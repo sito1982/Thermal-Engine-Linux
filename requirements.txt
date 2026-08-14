@@ -1,17 +1,30 @@
 # Thermal Engine - Python Dependencies
 
-# Qt GUI framework
+# Qt GUI framework (multiplataforma: Windows, Linux, macOS)
 PySide6>=6.5.0
 
 # Image processing
 Pillow>=10.0.0
 
-# System monitoring
+# System monitoring (en Linux también lee CPU temp/frecuencia y RAPL)
 psutil>=5.9.0
 
 # HID device communication (for LCD display)
+# En Linux usa el backend hidraw/libusb; ver reglas udev en scripts/.
 hidapi>=0.14.0
+
+# Comunicación USB bulk directa (protocolo LY) para el LCD Thermalright
+# Trofeo Vision (0416:5408). Necesario en Linux; en Windows el dispositivo
+# se gestiona vía HID/hidapi y pyusb no es estrictamente necesario, pero se
+# instala igualmente por si el modelo requiere el modo bulk.
+pyusb>=1.2.1
 
 # Video background support (optional)
 opencv-python>=4.8.0
 numpy>=1.24.0
+
+# --- Solo Linux (opcional) -------------------------------------------------
+# Lectura de sensores de la GPU NVIDIA vía NVML. Si no está instalado, en
+# Linux se recurre automáticamente a 'nvidia-smi'. En Windows los sensores
+# provienen de HWiNFO, por lo que este paquete no es necesario.
+nvidia-ml-py>=12.0.0 ; sys_platform == "linux"

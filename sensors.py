@@ -1,24 +1,60 @@
 """
-Sensor monitoring using HWiNFO Shared Memory.
+Monitorización de sensores multiplataforma.
 
-Requires HWiNFO to be running with "Shared Memory Support" enabled.
+- En Windows: usa la memoria compartida de HWiNFO (hwinfo_reader).
+- En Linux (p. ej. Bazzite): lee los sensores del sistema (linux_sensors):
+  psutil + RAPL para la CPU y NVML/nvidia-smi para la GPU NVIDIA.
+
+El resto de la aplicación usa siempre las mismas funciones
+(`is_hwinfo_available`, `get_hwinfo_sensors`, `HAS_HWINFO`, ...), sin importar
+el sistema operativo, por lo que este módulo elige el backend adecuado.
 """
 
 import sys
 import threading
 import time
 
-from hwinfo_reader import (
-    get_hwinfo_reader,
-    is_hwinfo_available,
-    get_hwinfo_sensors,
-    HWiNFOReader
-)
+IS_WINDOWS = sys.platform == "win32"
+
+# Selección del backend de sensores según el sistema operativo.
+if IS_WINDOWS:
+    from hwinfo_reader import (
+        get_hwinfo_reader as _get_reader,
+        is_hwinfo_available as _backend_available,
+        get_hwinfo_sensors as _backend_sensors,
+    )
+    SENSOR_BACKEND_NAME = "HWiNFO"
+else:
+    from linux_sensors import (
+        get_linux_reader as _get_reader,
+        is_linux_sensors_available as _backend_available,
+        get_linux_sensors as _backend_sensors,
+    )
+    SENSOR_BACKEND_NAME = "Sensores de Linux"
+
+
+# Alias retrocompatibles usados en el resto del código base.
+def is_hwinfo_available():
+    """Indica si el backend de sensores está disponible/conectado."""
+    return _backend_available()
+
+
+def get_hwinfo_sensors():
+    """Obtiene las lecturas de sensores del backend activo."""
+    return _backend_sensors()
+
+
+def get_hwinfo_reader():
+    """Devuelve la instancia del lector del backend activo."""
+    return _get_reader()
+
 
 # Configuration
 _SENSOR_UPDATE_INTERVAL = 0.5
 
 # Track initialization state
+# NOTA: HAS_HWINFO conserva su nombre por retrocompatibilidad, pero en Linux
+# significa "el backend de sensores nativo está conectado".
 HAS_HWINFO = False
 HWINFO_ERROR = None
 
@@ -78,7 +114,7 @@ def _sensor_polling_thread():
             if is_hwinfo_available():
                 if not HAS_HWINFO:
                     HAS_HWINFO = True
-                    print("[Sensors] Connected to HWiNFO")
+                    print(f"[Sensors] Connected to {SENSOR_BACKEND_NAME}")
 
                 data = get_hwinfo_sensors()
                 if data and any(v > 0 for v in data.values()):
@@ -88,7 +124,7 @@ def _sensor_polling_thread():
             else:
                 if HAS_HWINFO:
                     HAS_HWINFO = False
-                    print("[Sensors] Lost connection to HWiNFO")
+                    print(f"[Sensors] Lost connection to {SENSOR_BACKEND_NAME}")
 
         except Exception as e:
             print(f"[Sensors] Poll error: {e}")
@@ -105,10 +141,10 @@ def init_sensors(app_dir=None):
     if _sensor_thread_running:
         stop_sensors()
 
-    # Check if HWiNFO is available
+    # Check if the sensor backend is available
     if is_hwinfo_available():
         HAS_HWINFO = True
-        print("[Sensors] HWiNFO shared memory detected")
+        print(f"[Sensors] {SENSOR_BACKEND_NAME} detected")
 
         # Do initial read
         initial_data = get_hwinfo_sensors()
@@ -117,11 +153,16 @@ def init_sensors(app_dir=None):
                 _latest_sensor_data = initial_data.copy()
     else:
         HAS_HWINFO = False
-        HWINFO_ERROR = "HWiNFO not running or shared memory not enabled"
-        print("[Sensors] HWiNFO not available")
-        print("[Sensors] Please start HWiNFO with 'Shared Memory Support' enabled")
+        if IS_WINDOWS:
+            HWINFO_ERROR = "HWiNFO not running or shared memory not enabled"
+            print("[Sensors] HWiNFO not available")
+            print("[Sensors] Please start HWiNFO with 'Shared Memory Support' enabled")
+        else:
+            HWINFO_ERROR = "No se pudieron leer los sensores del sistema (¿falta psutil?)"
+            print("[Sensors] Backend de sensores de Linux no disponible")
+            print("[Sensors] Instala las dependencias: pip install psutil nvidia-ml-py")
 
-    # Start background polling thread (will keep trying if HWiNFO starts later)
+    # Start background polling thread (will keep trying if backend appears later)
     _sensor_thread_running = True
     _sensor_thread = threading.Thread(target=_sensor_polling_thread, daemon=True)
     _sensor_thread.start()
@@ -129,7 +170,7 @@ def init_sensors(app_dir=None):
     if HAS_HWINFO:
         print("[Sensors] Background polling started")
     else:
-        print("[Sensors] Background polling started (waiting for HWiNFO)")
+        print(f"[Sensors] Background polling started (waiting for {SENSOR_BACKEND_NAME})")
 
     return HAS_HWINFO
 
@@ -176,12 +217,12 @@ def stop_sensors():
 
 def get_sensor_source():
     """Get the current sensor source name."""
-    return "hwinfo" if HAS_HWINFO else None
+    return ("hwinfo" if IS_WINDOWS else "linux") if HAS_HWINFO else None
 
 
 def get_sensor_source_display():
     """Get a user-friendly sensor source name."""
     if HAS_HWINFO:
-        return "HWiNFO"
+        return SENSOR_BACKEND_NAME
     else:
         return "Not connected"

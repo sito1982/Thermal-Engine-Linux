@@ -1,237 +1,122 @@
-# Thermal Engine
+# Thermal Engine (fork con soporte Linux + LCD Thermalright Trofeo)
 
-[!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/nathanielh)
+Editor visual de temas para pantallas LCD de refrigeración AIO. Este fork parte del proyecto original de [nathanielhernandez/Thermal-Engine](https://github.com/nathanielhernandez/Thermal-Engine) y añade **soporte nativo para Linux** (incluyendo sistemas inmutables como Bazzite/Fedora Silverblue) y para el **Thermalright Trofeo Vision 9.16 (USB 0416:5408)**, además de varias mejoras de rendimiento y usabilidad.
 
-A visual theme editor for **LCD AIO cooler displays** (1280x480). Create custom monitoring themes with real-time CPU/GPU sensor data, gauges, clocks, images, and video backgrounds.
+---
 
-![Preview](https://img.shields.io/badge/Display-1280x480-blue) ![Python](https://img.shields.io/badge/Python-3.10+-green) ![License](https://img.shields.io/badge/License-MIT-yellow)
+## Novedades respecto al proyecto original
 
-<img width="1306" height="732" alt="image" src="https://github.com/user-attachments/assets/d6eafe44-8ea3-4f00-a6bd-2c0b672de1d8" />
+### 1. Driver LY para el Thermalright Trofeo Vision (`device_ly.py`)
+- Implementación completa del protocolo **LY** (comunicación USB *bulk*, no HID) para el LCD 0416:5408, basada en la ingeniería inversa del proyecto [thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux).
+- Handshake, envío de frames JPEG por bloques y reconexión automática ante desconexiones/timeouts USB.
+- Resolución nativa configurada a **1920×480**.
 
+### 2. Soporte completo para Linux
+- `linux_sensors.py`: backend de sensores de sistema para Linux (CPU, RAM, GPU NVIDIA vía NVML/`nvidia-smi`), equivalente al backend HWiNFO usado en Windows.
+- Autostart en Linux mediante archivo `.desktop` (XDG autostart), en lugar de depender del registro de Windows.
+- `scripts/install-linux.sh` y `scripts/run-linux.sh`: instalación y ejecución mediante entorno virtual (`.venv`), sin tocar el sistema base — pensado para distros inmutables (Bazzite, Silverblue, etc.).
+- `scripts/99-thermalright-trofeo.rules`: reglas `udev` para poder acceder al LCD por USB sin permisos de root.
 
-## Features
+### 3. Modo Vertical (Vertical Mode)
+- Nuevo checkbox **"Vertical Mode"** en el menú Display de la interfaz.
+- Al activarlo:
+  - El **lienzo de diseño** de la interfaz cambia a orientación vertical (480×1920 lógico) para que edites el tema tal y como se verá en el panel montado en vertical.
+  - Puedes mover y redimensionar elementos libremente por todo el lienzo vertical (se corrigieron límites de arrastre que antes seguían fijados a 1920×480).
+  - El **frame final** enviado al LCD se rota de vuelta a la resolución física fija del panel (1920×480) sin ningún reescalado/deformación.
+- Pensado para instalaciones donde el panel físico se monta girado 90°.
+- Configurable también directamente en `settings.json` (`"vertical_mode": true/false`).
 
-- **Visual drag-and-drop editor** with live preview
-- **Real-time sensor data**: CPU/GPU temperature, utilization, clock speed, power
-- **No admin required** - runs as a standard user application
-- **Auto-recovery**: Sensors automatically reconnect after sleep/wake or if HWiNFO restarts
-- **Element types**:
-  - Circle gauges with auto-color thresholds
-  - Bar gauges with rounded corners and gradient fill
-  - Text elements (static or sensor-linked)
-  - Digital and analog clocks
-  - Images and GIFs
-  - Line charts for historical data
-  - Rectangles
-- **Video backgrounds** with fit modes
-- **Preset system** for saving and loading themes
-- **Multi-select** with alignment tools
-- **Element grouping** for organizing complex themes
-- **Undo/Redo** support
-- **System tray** support with minimize-to-tray
+### 4. Optimización de CPU (frame signature caching)
+- Antes de renderizar y volver a comprimir cada frame a JPEG, se calcula una "firma" ligera (`_compute_frame_signature`) con todo lo que puede afectar al resultado: valores de sensores (redondeados para evitar jitter), posiciones/visibilidad de elementos, modo vertical, y si hay vídeo de fondo activo.
+- Si la firma no cambia respecto al frame anterior, se reutiliza el JPEG ya generado en lugar de volver a renderizar/codificar.
+- Reduce el consumo de CPU en reposo (sensores estables) de forma notable frente al comportamiento original de renderizar y codificar cada frame sin condición.
+- Aplicado tanto al modo estándar como al modo Overdrive (hilo de renderizado en segundo plano).
 
-## Supported Displays
+### 5. Configuración centralizada, menos hardcodeo
+- Todos los parámetros relevantes del hardware/comportamiento están en `settings.json`, gestionados por `settings.py`.
 
-- Thermalright Trofeo AIO LCD (1280x480)
-- Other HID-based AIO LCD displays (may require configuration)
+---
 
-## Requirements
+## Opciones de configuración (`settings.json`)
 
-- Windows 10/11
-- **HWiNFO** (for hardware sensor data) - [Download here](https://www.hwinfo.com/)
-- Python 3.10+ (only if running from source)
+| Clave | Tipo | Por defecto | Descripción |
+|---|---|---|---|
+| `launch_at_login` | bool | `true` | Inicia la aplicación automáticamente al arrancar sesión (Windows: registro; Linux: XDG autostart). |
+| `launch_minimized` | bool | `true` | Al iniciar automáticamente, arranca minimizado a la bandeja del sistema. |
+| `minimize_to_tray` | bool | `true` | Al minimizar la ventana, se envía a la bandeja del sistema en lugar de a la barra de tareas. |
+| `close_to_tray` | bool | `true` | Al cerrar la ventana (X), la app sigue ejecutándose en la bandeja en lugar de salir. |
+| `target_fps` | int | `30` | Fotogramas por segundo objetivo enviados al LCD. |
+| `default_preset` | string \| `null` | `null` | Nombre del preset (de `presets/`) que se carga automáticamente al iniciar. |
+| `overdrive_mode` | bool | `false` | Activa un hilo de renderizado en segundo plano que pre-genera frames para una entrega más fluida y compensada en el tiempo (útil con FPS altos). |
+| `suppress_60fps_warning` | bool | `false` | Oculta el aviso al seleccionar 60 FPS. |
+| `vertical_mode` | bool | `false` | Rota tanto la interfaz de diseño como la salida enviada al LCD 90°, para paneles montados verticalmente. También se puede activar/desactivar desde el menú Display → Vertical Mode. |
 
-### Hardware Sensor Support
+Todas estas opciones también son accesibles desde los menús de la interfaz gráfica; los cambios se guardan automáticamente en `settings.json`.
 
-ThermalEngine uses **HWiNFO Shared Memory** to read hardware sensors. This approach:
-- Requires no admin privileges
-- Has no driver blocklist issues
-- Works with all CPUs and GPUs that HWiNFO supports
+---
 
-**Supported hardware** (via HWiNFO):
-- **CPUs**: Intel Core (all generations), AMD Ryzen (all generations)
-- **GPUs**: NVIDIA GeForce, AMD Radeon
+## Hardware soportado (Linux)
 
-**Setup HWiNFO for ThermalEngine:**
+- **Thermalright Trofeo Vision 9.16** — USB `VID 0x0416 / PID 0x5408`, protocolo LY (bulk USB), resolución nativa 1920×480.
+- Sensores Linux: CPU/RAM vía `psutil`, temperaturas/frecuencias, GPU NVIDIA vía `nvidia-ml-py` (con fallback automático a `nvidia-smi` si no está instalado).
 
-1. Download [HWiNFO](https://www.hwinfo.com/) (installer or portable)
-2. Run HWiNFO and select "Sensors-only" mode
-3. Go to **Settings** (gear icon)
-4. Check **"Shared Memory Support"**
-5. Click OK
-6. Keep HWiNFO running while using ThermalEngine
+---
 
-> **Tip:** Configure HWiNFO to start with Windows and run minimized to tray. ThermalEngine will automatically connect when HWiNFO becomes available.
+## Instalación
 
-> **Note:** The free version of HWiNFO has a **12-hour limit** on Shared Memory Support. After 12 hours, shared memory will be disabled and sensors will stop updating. To restore sensors, restart HWiNFO. For uninterrupted monitoring, consider [HWiNFO Pro](https://www.hwinfo.com/licenses/) which removes this limitation.
+### Linux (recomendado: Bazzite / Fedora / distros inmutables)
 
-## Installation
-
-### Download (Recommended)
-
-1. Go to [Releases](https://github.com/nathanielhernandez/ThermalEngine/releases)
-2. Download `ThermalEngine-vX.X.X.zip` (portable) or `ThermalEngine-vX.X.X-Setup.exe` (installer)
-3. **Portable**: Extract the ZIP and run `ThermalEngine.exe`
-4. **Installer**: Run the setup and launch from Start Menu
-5. Make sure HWiNFO is running with Shared Memory enabled
-
-### From Source
-
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/nathanielhernandez/Thermal-Engine.git
-   cd Thermal-Engine
-   ```
-
-2. Install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Run the editor:
-   ```bash
-   python main.py
-   ```
-
-### Local Test Build
-
-Build a standalone executable locally:
-
-```powershell
-# Basic build (ZIP only)
-.\scripts\build-local.ps1 -SkipInstaller
-
-# Clean build (removes previous artifacts first)
-.\scripts\build-local.ps1 -Clean -SkipInstaller
-
-# Build with installer (requires Inno Setup)
-.\scripts\build-local.ps1
+```bash
+git clone https://github.com/<tu-usuario>/Thermal-Engine.git
+cd Thermal-Engine
+./scripts/install-linux.sh
 ```
 
-**Output:**
-- `dist\ThermalEngine\ThermalEngine.exe` - Run directly to test
-- `ThermalEngine-local-dev.zip` - Portable distribution
+El script `install-linux.sh`:
+1. Comprueba que tienes Python ≥ 3.10.
+2. Crea un entorno virtual en `.venv/` (no toca el Python del sistema).
+3. Instala todas las dependencias de `requirements.txt` dentro del `.venv`, **incluyendo `pyusb`** (necesario para el driver LY del LCD) — ya no hace falta instalarlo manualmente después.
+4. Instala las reglas `udev` (`scripts/99-thermalright-trofeo.rules`) para poder acceder al LCD sin `sudo`, y añade tu usuario al grupo `plugdev` si existe.
+5. Crea un lanzador de escritorio en `~/.local/share/applications/ThermalEngine.desktop`.
 
-**Clean up test build:**
-```powershell
-.\scripts\clean-local.ps1
+Después de instalar las reglas udev por primera vez, **desconecta y reconecta el LCD por USB** (o reinicia) para que surtan efecto. Cierra también cualquier software del fabricante (TRCC) que pueda estar bloqueando el acceso al dispositivo.
+
+Para ejecutar la aplicación:
+
+```bash
+./scripts/run-linux.sh
 ```
 
-## Usage
+o directamente con el Python del entorno virtual:
 
-### Connecting to Display
-
-1. **Close any manufacturer software** (e.g., TRCC) if running - it locks the display
-2. Launch the editor
-3. The editor will auto-connect, or click "Connect" in the toolbar
-
-### Setting Up Sensors
-
-1. **Start HWiNFO** with "Sensors-only" mode
-2. **Enable Shared Memory** in HWiNFO Settings
-3. Launch ThermalEngine - it will automatically detect HWiNFO
-
-ThermalEngine and HWiNFO can start in any order - sensors will connect automatically when both are running.
-
-Go to **Display > Diagnose Sensors** to verify sensor connection.
-
-### Creating a Theme
-
-1. **Add elements** from the Elements panel (left side)
-2. **Drag elements** on the canvas to position them
-3. **Resize** using corner handles
-4. **Configure properties** in the Properties panel (right side)
-5. **Save as preset** via File > Save as Preset
-
-### Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| Ctrl+N | New theme |
-| Ctrl+O | Open theme |
-| Ctrl+S | Save theme |
-| Ctrl+Shift+S | Save as preset |
-| Ctrl+Z | Undo |
-| Ctrl+Y | Redo |
-| Ctrl+G | Group selected elements |
-| Ctrl+Shift+G | Ungroup |
-| Delete | Delete selected |
-| Ctrl+Click | Multi-select elements |
-
-### Sensor Sources
-
-| Source | Description |
-|--------|-------------|
-| `cpu_percent` | CPU usage (%) |
-| `cpu_temp` | CPU temperature (C) |
-| `cpu_clock` | CPU clock speed (MHz) |
-| `cpu_power` | CPU power draw (W) |
-| `gpu_percent` | GPU usage (%) |
-| `gpu_temp` | GPU temperature (C) |
-| `gpu_clock` | GPU clock speed (MHz) |
-| `gpu_memory_clock` | GPU memory clock (MHz) |
-| `gpu_power` | GPU power draw (W) |
-| `ram_percent` | RAM usage (%) |
-| `net_upload` | Network upload (MB/s) |
-| `net_download` | Network download (MB/s) |
-
-## Troubleshooting
-
-### "Display not found"
-- Make sure manufacturer software is completely closed
-- Check USB connection
-- Restart the editor
-
-### Sensors showing 0 or not working
-1. **Check HWiNFO is running** - ThermalEngine requires HWiNFO for sensor data
-2. **Enable Shared Memory** in HWiNFO Settings
-3. Go to **Display > Diagnose Sensors** to check connection status
-4. Sensors will auto-connect when HWiNFO becomes available
-
-### Low FPS / Performance issues
-- Reduce target FPS (10 FPS is usually sufficient)
-- Avoid video backgrounds on older machines
-- Simplify theme (fewer elements)
-
-## Project Structure
-
-```
-Thermal-Engine/
-├── main.py              # Entry point
-├── main_window.py       # Main application window
-├── canvas.py            # Visual preview widget
-├── properties.py        # Properties panel
-├── element_list.py      # Element list panel
-├── presets.py           # Preset management
-├── element.py           # Theme element data model
-├── sensors.py           # Sensor polling and smoothing
-├── hwinfo_reader.py     # HWiNFO shared memory reader
-├── video_background.py  # Video background support
-├── constants.py         # Configuration constants
-├── scripts/             # Build and utility scripts
-│   ├── build-local.ps1  # Local build script
-│   └── clean-local.ps1  # Clean up build artifacts
-├── assets/              # Icons and images
-│   ├── icon.ico
-│   └── icon.png
-├── elements/            # Custom element plugins
-│   ├── line_chart.py
-│   └── gif.py
-├── presets/             # Saved presets
-└── .github/workflows/   # CI/CD workflows
-    └── release.yml      # Automated release build
+```bash
+./.venv/bin/python main.py
 ```
 
-## License
+### Windows
 
-MIT License - See LICENSE file for details.
+```bat
+scripts\install.bat
+```
 
-## Credits
+y para ejecutar:
 
-- [HWiNFO](https://www.hwinfo.com/) - Hardware sensor data provider
-- [PySide6](https://www.qt.io/qt-for-python) - Qt GUI framework
-- [Pillow](https://pillow.readthedocs.io/) - Image processing
+```bat
+scripts\run.bat
+```
 
-## Contributing
+---
 
-Contributions welcome! Please open an issue or PR.
+## Solución de problemas rápida (Linux)
+
+- **`[LY] device_ly.py not found, skipping LY probe`**: falta el archivo `device_ly.py` en la carpeta del proyecto, o estás ejecutando desde una copia incompleta. Verifica `ls device_ly.py` en la raíz del proyecto.
+- **`ModuleNotFoundError: No module named 'usb'`**: `pyusb` no está instalado en el entorno virtual activo. Ejecuta `./.venv/bin/python -m pip install pyusb` (asegúrate de usar el `pip`/`python` del `.venv`, no el del sistema).
+- **`Failed to connect: open failed`**: revisa que las reglas udev estén instaladas (`scripts/99-thermalright-trofeo.rules`) y que tu usuario pertenezca al grupo `plugdev`; reconecta el LCD por USB. Cierra cualquier software TRCC del fabricante.
+- **`[LY] Handshake error: [Errno 110] Operation timed out`**: normalmente se resuelve solo tras el primer handshake correcto gracias a la reconexión automática; si persiste, reconecta físicamente el cable USB.
+
+---
+
+## Créditos
+
+- Proyecto original: [nathanielhernandez/Thermal-Engine](https://github.com/nathanielhernandez/Thermal-Engine)
+- Protocolo LY de referencia: [Lexonight1/thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux)

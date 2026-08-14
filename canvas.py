@@ -7,7 +7,7 @@ import time
 
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPixmap, QImage
+from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPixmap, QImage, QTransform
 
 from constants import DISPLAY_WIDTH, DISPLAY_HEIGHT, PREVIEW_SCALE, SOURCE_UNITS
 from elements import get_custom_element
@@ -121,6 +121,7 @@ class CanvasPreview(QWidget):
         self.resize_start_size = (0, 0)
         self.resize_start_bounds = None  # For multi-element resize
         self.scale = PREVIEW_SCALE
+        self.vertical_mode = False  # Rotates the preview 90 degrees to match a vertically mounted LCD
         self.background_color = QColor(15, 15, 25)
         self.handle_size = 10
         self.group_selection_mode = False  # True when a complete group is selected
@@ -129,12 +130,29 @@ class CanvasPreview(QWidget):
         self._has_glass_cache = None  # Cache result of _has_glass_elements()
         self._animated_values = {}  # Track display values for animated gauges {element_name: current_display_value}
 
-        self.setFixedSize(
-            int(DISPLAY_WIDTH * self.scale),
-            int(DISPLAY_HEIGHT * self.scale)
-        )
+        self._update_fixed_size()
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Enable keyboard input
+
+    def _update_fixed_size(self):
+        """Set the widget's fixed size, swapping dimensions when in vertical mode."""
+        if self.vertical_mode:
+            self.setFixedSize(
+                int(DISPLAY_HEIGHT * self.scale),
+                int(DISPLAY_WIDTH * self.scale)
+            )
+        else:
+            self.setFixedSize(
+                int(DISPLAY_WIDTH * self.scale),
+                int(DISPLAY_HEIGHT * self.scale)
+            )
+
+    def set_vertical_mode(self, enabled):
+        """Enable/disable the rotated (portrait) preview to match a vertically mounted LCD."""
+        self.vertical_mode = enabled
+        self._glass_cache_valid = False  # Invalidate glass cache (size changed)
+        self._update_fixed_size()
+        self.update()
 
     def set_elements(self, elements):
         self.elements = elements
@@ -269,8 +287,21 @@ class CanvasPreview(QWidget):
         else:
             self._glass_background = None
 
+        # In vertical mode, the design canvas itself is logically portrait
+        # (DISPLAY_HEIGHT x DISPLAY_WIDTH) - matching render_theme_image() - so we
+        # draw directly at the swapped size. No post-hoc rotation of the whole
+        # picture is needed; element coordinates are defined in this same space.
+        if self.vertical_mode:
+            canvas_w = int(DISPLAY_HEIGHT * self.scale)
+            canvas_h = int(DISPLAY_WIDTH * self.scale)
+        else:
+            canvas_w = int(DISPLAY_WIDTH * self.scale)
+            canvas_h = int(DISPLAY_HEIGHT * self.scale)
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        draw_rect = QRectF(0, 0, canvas_w, canvas_h)
 
         # Draw video background if enabled, otherwise solid color
         if video_background.enabled:
@@ -278,12 +309,12 @@ class CanvasPreview(QWidget):
             if pixmap:
                 painter.drawPixmap(0, 0, pixmap)
             else:
-                painter.fillRect(self.rect(), self.background_color)
+                painter.fillRect(draw_rect, self.background_color)
         else:
-            painter.fillRect(self.rect(), self.background_color)
+            painter.fillRect(draw_rect, self.background_color)
 
         painter.setPen(QPen(QColor(60, 60, 80), 2))
-        painter.drawRect(self.rect().adjusted(1, 1, -1, -1))
+        painter.drawRect(draw_rect.adjusted(1, 1, -1, -1))
 
         # Draw elements in reverse: last in list drawn first (back), first in list drawn last (front)
         # Tree shows first element at top, so top of tree = front of display
@@ -1468,13 +1499,21 @@ class CanvasPreview(QWidget):
             dx = (pos.x() - self.drag_start_mouse.x()) / self.scale
             dy = (pos.y() - self.drag_start_mouse.y()) / self.scale
 
+            # Clamp against the active canvas bounds - swapped when vertical mode
+            # is enabled, since the logical design space is then DISPLAY_HEIGHT x
+            # DISPLAY_WIDTH instead of DISPLAY_WIDTH x DISPLAY_HEIGHT.
+            if self.vertical_mode:
+                bound_w, bound_h = DISPLAY_HEIGHT, DISPLAY_WIDTH
+            else:
+                bound_w, bound_h = DISPLAY_WIDTH, DISPLAY_HEIGHT
+
             for idx in self.selected_indices:
                 if idx in self.drag_start_positions:
                     start_x, start_y = self.drag_start_positions[idx]
                     new_x = int(start_x + dx)
                     new_y = int(start_y + dy)
-                    new_x = max(0, min(new_x, DISPLAY_WIDTH - 50))
-                    new_y = max(0, min(new_y, DISPLAY_HEIGHT - 50))
+                    new_x = max(0, min(new_x, bound_w - 50))
+                    new_y = max(0, min(new_y, bound_h - 50))
                     self.elements[idx].x = new_x
                     self.elements[idx].y = new_y
 

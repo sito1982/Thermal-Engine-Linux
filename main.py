@@ -125,10 +125,14 @@ class HWiNFOSetupDialog(QDialog):
 
 def create_tray_icon():
     """Create tray icon from file or generate one."""
-    # Try to load icon from file
-    icon_path = os.path.join(get_app_dir(), 'icon.ico')
-    if os.path.exists(icon_path):
-        return QIcon(icon_path)
+    # Try to load icon from file (busca en la carpeta de la app y en assets/)
+    app_dir = get_app_dir()
+    for candidate in ('icon.png', 'icon.ico',
+                      os.path.join('assets', 'icon.png'),
+                      os.path.join('assets', 'icon.ico')):
+        icon_path = os.path.join(app_dir, candidate)
+        if os.path.exists(icon_path):
+            return QIcon(icon_path)
 
     # Fallback: generate icon programmatically
     pixmap = QPixmap(32, 32)
@@ -176,9 +180,11 @@ def main():
     # Initialize sensors (uses HWiNFO shared memory)
     init_sensors()
 
-    # Show HWiNFO setup dialog if not connected (skip if minimized/auto-start)
+    # Show HWiNFO setup dialog if not connected (skip if minimized/auto-start).
+    # HWiNFO only exists on Windows; on Linux los sensores se leen directamente
+    # del sistema (psutil + NVML), así que no se muestra este diálogo.
     from sensors import HAS_HWINFO
-    if not HAS_HWINFO and not args.minimized:
+    if sys.platform == "win32" and not HAS_HWINFO and not args.minimized:
         dialog = HWiNFOSetupDialog()
         dialog.exec()
         # Re-initialize sensors in case user set up HWiNFO

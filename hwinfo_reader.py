@@ -7,26 +7,36 @@ Requires HWiNFO to be running with "Shared Memory Support" enabled in settings.
 Reference: https://www.hwinfo.com/forum/threads/shared-memory-layout.5149/
 """
 
+import sys
 import ctypes
-from ctypes import Structure, c_uint, c_double, c_char, c_uint32, c_uint64, wintypes
+from ctypes import Structure, c_uint, c_double, c_char, c_uint32, c_uint64
 
-# Windows API for shared memory access
-kernel32 = ctypes.windll.kernel32
+# HWiNFO shared memory is a Windows-only mechanism. On other platforms this
+# module must still be importable (so the rest of the app keeps working), it
+# just reports "not available". The sensor layer picks a native backend per OS.
+IS_WINDOWS = sys.platform == "win32"
 
+# Windows API for shared memory access (only wired up on Windows)
+kernel32 = None
 FILE_MAP_READ = 0x0004
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-kernel32.OpenFileMappingW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
-kernel32.OpenFileMappingW.restype = wintypes.HANDLE
+if IS_WINDOWS:
+    from ctypes import wintypes
 
-kernel32.MapViewOfFile.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.c_size_t]
-kernel32.MapViewOfFile.restype = ctypes.c_void_p
+    kernel32 = ctypes.windll.kernel32
 
-kernel32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
-kernel32.UnmapViewOfFile.restype = wintypes.BOOL
+    kernel32.OpenFileMappingW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.OpenFileMappingW.restype = wintypes.HANDLE
 
-kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.MapViewOfFile.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.c_size_t]
+    kernel32.MapViewOfFile.restype = ctypes.c_void_p
+
+    kernel32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
+    kernel32.UnmapViewOfFile.restype = wintypes.BOOL
+
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
 
 # HWiNFO Shared Memory Constants
 HWINFO_SHARED_MEM_NAME = "Global\\HWiNFO_SENS_SM2"
@@ -104,6 +114,11 @@ class HWiNFOReader:
 
     def connect(self):
         """Connect to HWiNFO shared memory."""
+        # HWiNFO shared memory only exists on Windows.
+        if not IS_WINDOWS or kernel32 is None:
+            self.connected = False
+            self.last_error = "HWiNFO shared memory is only available on Windows"
+            return False
         try:
             # Open the existing shared memory mapping
             self.handle = kernel32.OpenFileMappingW(FILE_MAP_READ, False, HWINFO_SHARED_MEM_NAME)

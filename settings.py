@@ -9,6 +9,7 @@ import json
 
 # Windows-only imports
 IS_WINDOWS = sys.platform == "win32"
+IS_LINUX = sys.platform.startswith("linux")
 if IS_WINDOWS:
     import winreg
 
@@ -28,6 +29,7 @@ DEFAULT_SETTINGS = {
     "default_preset": None,  # Name of preset to load on startup
     "overdrive_mode": False,
     "suppress_60fps_warning": False,  # Show warning when selecting 60 FPS
+    "vertical_mode": False,  # Rotate interface + LCD output 90 degrees
 }
 
 _settings = None
@@ -100,10 +102,60 @@ def get_executable_path():
         return f'{escape_registry_path(python_exe)} {escape_registry_path(script_path)}'
 
 
+# --- Autostart en Linux mediante archivo .desktop (XDG autostart) -----------
+def _linux_autostart_path():
+    """Ruta del archivo .desktop de autoarranque para el usuario actual."""
+    config_home = os.environ.get(
+        "XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    return os.path.join(config_home, "autostart", f"{APP_NAME}.desktop")
+
+
+def _set_autostart_linux(enabled):
+    """Crea o elimina el .desktop de autoarranque en Linux."""
+    desktop_path = _linux_autostart_path()
+    try:
+        if enabled:
+            os.makedirs(os.path.dirname(desktop_path), exist_ok=True)
+            python_exe = sys.executable
+            script_path = get_resource_path("main.py")
+            exec_cmd = f'"{python_exe}" "{script_path}"'
+            if get_setting("launch_minimized", True):
+                exec_cmd += " --minimized"
+
+            icon_path = get_resource_path(os.path.join("assets", "icon.png"))
+            content = (
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=Thermal Engine\n"
+                "Comment=Editor de temas para pantallas LCD de refrigeración AIO\n"
+                f"Exec={exec_cmd}\n"
+                f"Icon={icon_path}\n"
+                "Terminal=false\n"
+                "Categories=Utility;\n"
+                "X-GNOME-Autostart-enabled=true\n"
+            )
+            with open(desktop_path, "w") as f:
+                f.write(content)
+        else:
+            if os.path.exists(desktop_path):
+                os.remove(desktop_path)
+        return True
+    except Exception as e:
+        print(f"[Settings] Error configurando el autoarranque en Linux: {e}")
+        return False
+
+
+def _is_autostart_enabled_linux():
+    return os.path.exists(_linux_autostart_path())
+
+
 def set_autostart(enabled):
-    """Enable or disable autostart. Windows-only via registry."""
+    """Enable or disable autostart (Windows: registro; Linux: .desktop XDG)."""
+    if IS_LINUX:
+        return _set_autostart_linux(enabled)
+
     if not IS_WINDOWS:
-        print("[Settings] Autostart is only supported on Windows")
+        print("[Settings] Autostart no soportado en esta plataforma")
         return False
 
     key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -131,7 +183,10 @@ def set_autostart(enabled):
 
 
 def is_autostart_enabled():
-    """Check if autostart is currently enabled. Windows-only via registry."""
+    """Check if autostart is currently enabled (Windows: registro; Linux: .desktop)."""
+    if IS_LINUX:
+        return _is_autostart_enabled_linux()
+
     if not IS_WINDOWS:
         return False
 
@@ -151,8 +206,8 @@ def is_autostart_enabled():
 
 
 def apply_autostart_setting():
-    """Apply the current autostart setting to the registry. Windows-only."""
-    if not IS_WINDOWS:
+    """Apply the current autostart setting (Windows: registro; Linux: .desktop)."""
+    if not (IS_WINDOWS or IS_LINUX):
         return
     enabled = get_setting("launch_at_login", True)
     set_autostart(enabled)

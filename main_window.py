@@ -327,8 +327,11 @@ class ThemeEditorWindow(QMainWindow):
         self._frame_deadline = 0  # When next frame should be sent
         self._frames_skipped = 0  # Counter for skipped frames
         self._overdrive_mode = settings.get_setting("overdrive_mode", False)
+        self._vertical_mode = settings.get_setting("vertical_mode", False)  # Rotate UI + LCD output 90 degrees
         self._frame_buffer = None  # Pre-rendered frame buffer
         self._frame_buffer_lock = threading.Lock()
+        self._last_frame_signature = None  # Signature of last rendered frame (for caching)
+        self._last_jpeg_data = None  # Cached JPEG bytes for the last rendered frame
         self._render_thread = None
         self._render_thread_running = False
 
@@ -337,6 +340,7 @@ class ThemeEditorWindow(QMainWindow):
         self._reconnect_attempts = 0
         self._was_connected_before_sleep = False
         self._last_wake_time = 0
+        self._ly_device = None  # Referencia al driver LY bulk USB
 
         # Start background threads for sensor data
         start_psutil_thread()
@@ -482,10 +486,17 @@ class ThemeEditorWindow(QMainWindow):
         self.setWindowTitle("Thermal Engine")
         self.setMinimumSize(1200, 700)
 
-        # Set window icon
-        icon_path = get_bundled_resource_path("icon.ico")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        # Set window icon (en Linux se prefiere el PNG; el .ico como alternativa)
+        icon_candidates = ["icon.ico", "icon.png"]
+        if sys.platform != "win32":
+            icon_candidates = ["icon.png", "icon.ico"]
+        for icon_name in icon_candidates:
+            icon_path = get_bundled_resource_path(icon_name)
+            if not os.path.exists(icon_path):
+                icon_path = get_bundled_resource_path(os.path.join("assets", icon_name))
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
+                break
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -696,6 +707,16 @@ class ThemeEditorWindow(QMainWindow):
         self.overdrive_action.setToolTip("Threaded rendering with frame skipping for smoother output")
         self.overdrive_action.triggered.connect(self.toggle_overdrive_mode)
         fps_menu.addAction(self.overdrive_action)
+
+        display_menu.addSeparator()
+
+        # Vertical mode - rotates both the on-screen preview and the LCD output 90 degrees
+        self.vertical_mode_action = QAction("Vertical Mode", self)
+        self.vertical_mode_action.setCheckable(True)
+        self.vertical_mode_action.setChecked(self._vertical_mode)
+        self.vertical_mode_action.setToolTip("Rotate the preview and the LCD output 90 degrees for vertical mounting")
+        self.vertical_mode_action.triggered.connect(self.toggle_vertical_mode)
+        display_menu.addAction(self.vertical_mode_action)
 
         display_menu.addSeparator()
 
@@ -1327,13 +1348,14 @@ class ThemeEditorWindow(QMainWindow):
         info.append(f"Sensor source: {source}")
         info.append("")
 
-        # HWiNFO status
-        has_hwinfo = getattr(sensors, 'HAS_HWINFO', False)
-        info.append(f"HWiNFO connected: {has_hwinfo}")
+        # Sensor backend status
+        backend_name = getattr(sensors, 'SENSOR_BACKEND_NAME', 'HWiNFO')
+        has_backend = getattr(sensors, 'HAS_HWINFO', False)
+        info.append(f"{backend_name} connected: {has_backend}")
         info.append("")
 
-        if has_hwinfo:
-            info.append("Sensor readings from HWiNFO:")
+        if has_backend:
+            info.append(f"Sensor readings from {backend_name}:")
             info.append("-" * 40)
             try:
                 sensor_data = get_sensors_sync()
@@ -1344,7 +1366,7 @@ class ThemeEditorWindow(QMainWindow):
                     info.append("  (no data returned)")
             except Exception as e:
                 info.append(f"  Error: {e}")
-        else:
+        elif sys.platform == "win32":
             info.append("HWiNFO not connected!")
             info.append("")
             info.append("To enable sensor monitoring:")
@@ -1357,6 +1379,17 @@ class ThemeEditorWindow(QMainWindow):
             info.append("")
             info.append("HWiNFO provides reliable sensor data without")
             info.append("driver blocklist issues from Windows Defender.")
+        else:
+            info.append("Sensores del sistema no disponibles.")
+            info.append("")
+            info.append("En Linux los sensores se leen directamente del sistema:")
+            info.append("  - CPU: psutil + RAPL (/sys/class/powercap)")
+            info.append("  - GPU NVIDIA: NVML (nvidia-ml-py) o nvidia-smi")
+            info.append("")
+            info.append("Instala las dependencias dentro del entorno virtual:")
+            info.append("  pip install psutil nvidia-ml-py")
+            info.append("")
+            info.append("Comprueba que 'nvidia-smi' funciona en una terminal.")
 
         info.append("\n" + "-" * 40)
         info.append("Current sensor values:")
@@ -1379,9 +1412,46 @@ class ThemeEditorWindow(QMainWindow):
             self.connect_display()
 
     def connect_display(self, show_error=True):
+        # --- Intentar LY bulk USB primero (0416:5408 - Thermalright Trofeo) ---
+        try:
+            from device_ly import LYDevice
+            ly = LYDevice()
+            if ly.is_available():
+                ly.open()
+                self.device = ly
+                self._ly_device = ly
+                self.connect_action.setText("Disconnect")
+                self.send_action.setEnabled(True)
+                psutil.cpu_percent(interval=None)
+                self.frame_times = []
+                self.last_frame_time = 0
+                self.start_continuous_send()
+                if self._reconnect_timer:
+                    self._reconnect_timer.stop()
+                    self._reconnect_timer = None
+                self._was_connected_before_sleep = False
+                self._reconnect_attempts = 0
+                self.status_bar.showMessage("Connected to LY display (0416:5408) - sending frames")
+                return True
+        except ImportError:
+            print("[LY] device_ly.py not found, skipping LY probe")
+        except Exception as e:
+            print(f"[LY] Connection failed: {e}")
+
+        # --- Fallback: HID (0416:5302 / 35CC:0104) ---
         if not HAS_HID:
             if show_error:
-                QMessageBox.warning(self, "Error", "HID library not installed.\nRun: pip install hidapi")
+                QMessageBox.warning(
+                    self, "Error",
+                    "No se encontró ningún display compatible.\n\n"
+                    "Dispositivos soportados:\n"
+                    "  • LY bulk: 0416:5408 (Thermalright Trofeo)\n"
+                    "  • HID:     0416:5302 / 35CC:0104\n\n"
+                    "Instala las reglas udev y reconecta el dispositivo:\n"
+                    "  sudo cp scripts/99-thermalright-trofeo.rules /etc/udev/rules.d/\n"
+                    "  sudo udevadm control --reload-rules && sudo udevadm trigger\n"
+                    "Instala pyusb si no está instalado: pip install pyusb"
+                )
             return False
 
         try:
@@ -1394,40 +1464,52 @@ class ThemeEditorWindow(QMainWindow):
             init[12] = 0x01
             self.device.write(bytes([0x00]) + bytes(init))
 
-            # Update button text to "Disconnect"
             self.connect_action.setText("Disconnect")
             self.send_action.setEnabled(True)
-
             psutil.cpu_percent(interval=None)
-
             self.frame_times = []
             self.last_frame_time = 0
-
             self.start_continuous_send()
-
-            # Stop reconnect timer if running (successful connection)
             if self._reconnect_timer:
                 self._reconnect_timer.stop()
                 self._reconnect_timer = None
             self._was_connected_before_sleep = False
             self._reconnect_attempts = 0
-
-            self.status_bar.showMessage("Connected to display - sending frames")
+            self.status_bar.showMessage("Connected to HID display - sending frames")
             return True
 
         except Exception as e:
             if show_error:
-                QMessageBox.critical(self, "Error", f"Failed to connect:\n{e}\n\nMake sure TRCC is closed.")
+                if sys.platform == "win32":
+                    hint = "Make sure TRCC is closed."
+                else:
+                    hint = (
+                        "En Linux, comprueba:\n"
+                        "  • Instala las reglas udev y reconecta el dispositivo:\n"
+                        "      sudo cp scripts/99-thermalright-trofeo.rules /etc/udev/rules.d/\n"
+                        "      sudo udevadm control --reload-rules && sudo udevadm trigger\n"
+                        "  • pip install pyusb"
+                    )
+                QMessageBox.critical(self, "Error", f"Failed to connect:\n{e}\n\n{hint}")
             return False
 
     def disconnect_display(self):
         self.stop_continuous_send()
 
+        # Cerrar dispositivo LY si está activo
+        if hasattr(self, '_ly_device') and self._ly_device:
+            try:
+                self._ly_device.close()
+            except Exception as e:
+                print(f"[LY] Error closing LY device: {e}")
+            finally:
+                self._ly_device = None
+
         if self.device:
             try:
                 self.device.close()
             except Exception as e:
-                print(f"Error closing HID device: {e}")
+                print(f"Error closing device: {e}")
             finally:
                 self.device = None
 
@@ -1522,6 +1604,29 @@ class ThemeEditorWindow(QMainWindow):
             self._stop_render_thread()
             self.status_bar.showMessage("Overdrive mode disabled")
 
+    def toggle_vertical_mode(self, checked):
+        """Toggle vertical mode: rotates both the live preview and the LCD output 90 degrees."""
+        self._vertical_mode = checked
+        settings.set_setting("vertical_mode", checked)
+
+        # Update the preview widget orientation immediately
+        if hasattr(self, "canvas") and hasattr(self.canvas, "set_vertical_mode"):
+            self.canvas.set_vertical_mode(checked)
+
+        # Force an immediate re-render / re-send so the LCD updates right away
+        with self._frame_buffer_lock:
+            self._frame_buffer = None
+        self._last_frame_signature = None
+        self._last_jpeg_data = None
+
+        if self.device:
+            self.send_frame_with_sensors()
+
+        if checked:
+            self.status_bar.showMessage("Vertical mode enabled - preview and LCD output rotated 90 degrees")
+        else:
+            self.status_bar.showMessage("Vertical mode disabled")
+
     def _start_render_thread(self):
         """Start background render thread for overdrive mode."""
         if self._render_thread and self._render_thread.is_alive():
@@ -1549,9 +1654,16 @@ class ThemeEditorWindow(QMainWindow):
                         if element.source != "static" and element.source in sensor_data:
                             element.value = sensor_data[element.source]
 
-                    # Render frame
-                    img = self.render_theme_image()
-                    jpeg_data = self.image_to_jpeg(img)
+                    # Skip re-render/re-encode entirely if nothing that affects the
+                    # frame has actually changed since the last one (big CPU saver).
+                    signature = self._compute_frame_signature(sensor_data)
+                    if signature != self._last_frame_signature or self._last_jpeg_data is None:
+                        img = self.render_theme_image()
+                        jpeg_data = self.image_to_jpeg(img)
+                        self._last_frame_signature = signature
+                        self._last_jpeg_data = jpeg_data
+                    else:
+                        jpeg_data = self._last_jpeg_data
 
                     # Store in buffer
                     with self._frame_buffer_lock:
@@ -1644,8 +1756,16 @@ class ThemeEditorWindow(QMainWindow):
                     if element.source != "static" and element.source in sensor_data:
                         element.value = sensor_data[element.source]
 
-                img = self.render_theme_image()
-                jpeg_data = self.image_to_jpeg(img)
+                # Skip re-render/re-encode if nothing changed since the last frame
+                signature = self._compute_frame_signature(sensor_data)
+                if signature != self._last_frame_signature or self._last_jpeg_data is None:
+                    img = self.render_theme_image()
+                    jpeg_data = self.image_to_jpeg(img)
+                    self._last_frame_signature = signature
+                    self._last_jpeg_data = jpeg_data
+                else:
+                    jpeg_data = self._last_jpeg_data
+
                 self.send_jpeg_frame(jpeg_data)
 
             # Throttle canvas updates to reduce CPU usage
@@ -1684,10 +1804,12 @@ class ThemeEditorWindow(QMainWindow):
             ]
         else:  # Linux
             return [
-                '/usr/share/fonts/truetype',
-                '/usr/share/fonts/TTF',
+                '/usr/share/fonts',            # Fedora/Bazzite: fuentes en subcarpetas
+                '/usr/share/fonts/truetype',   # Debian/Ubuntu
+                '/usr/share/fonts/TTF',        # Arch
                 '/usr/local/share/fonts',
                 os.path.expanduser('~/.fonts'),
+                os.path.expanduser('~/.local/share/fonts'),
             ]
 
     def _build_font_cache(self):
@@ -1761,6 +1883,13 @@ class ThemeEditorWindow(QMainWindow):
                     return path
         else:  # Linux
             for path in [
+                # Fedora / Bazzite
+                '/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf',
+                '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+                '/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf',
+                '/usr/share/fonts/google-noto/NotoSans-Regular.ttf',
+                '/usr/share/fonts/abattis-cantarell-fonts/Cantarell-Regular.otf',
+                # Debian / Ubuntu / Arch
                 '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
                 '/usr/share/fonts/TTF/DejaVuSans.ttf',
                 '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
@@ -1860,16 +1989,45 @@ class ThemeEditorWindow(QMainWindow):
 
         return font
 
+    def _compute_frame_signature(self, sensor_data):
+        """Build a lightweight signature representing everything that affects the
+        rendered frame's pixels. If the signature is unchanged since the last frame,
+        we can skip re-rendering and re-encoding the JPEG entirely, which is the main
+        source of avoidable CPU usage when sensor values are not actively changing."""
+        parts = [self._vertical_mode, video_background.enabled]
+        for element in self.elements:
+            value = element.value
+            # Round floats to 1 decimal so tiny sensor jitter doesn't force re-renders
+            if isinstance(value, float):
+                value = round(value, 1)
+            parts.append((element.source, value, getattr(element, "x", None),
+                          getattr(element, "y", None), getattr(element, "visible", True)))
+        # Video backgrounds change every frame by nature, so never cache while active
+        if video_background.enabled:
+            parts.append(time.perf_counter())
+        return tuple(parts)
+
     def render_theme_image(self):
+        # When vertical mode is enabled, the design is laid out on a logical
+        # portrait canvas (DISPLAY_HEIGHT x DISPLAY_WIDTH, e.g. 480x1920) matching
+        # how the physically-rotated panel will be viewed. This canvas is rotated
+        # back to the panel's fixed physical buffer size in image_to_jpeg().
+        if getattr(self, "_vertical_mode", False):
+            canvas_w, canvas_h = DISPLAY_HEIGHT, DISPLAY_WIDTH
+        else:
+            canvas_w, canvas_h = DISPLAY_WIDTH, DISPLAY_HEIGHT
+
         # Use video frame as background if enabled, otherwise solid color
         if video_background.enabled:
             video_frame = video_background.get_frame_pil()
             if video_frame:
                 img = video_frame.copy().convert('RGBA')
+                if img.size != (canvas_w, canvas_h):
+                    img = img.resize((canvas_w, canvas_h))
             else:
-                img = Image.new('RGBA', (DISPLAY_WIDTH, DISPLAY_HEIGHT), color=self.background_color)
+                img = Image.new('RGBA', (canvas_w, canvas_h), color=self.background_color)
         else:
-            img = Image.new('RGBA', (DISPLAY_WIDTH, DISPLAY_HEIGHT), color=self.background_color)
+            img = Image.new('RGBA', (canvas_w, canvas_h), color=self.background_color)
 
         # Render in reverse order so elements at top of list appear in front
         for element in reversed(self.elements):
@@ -3231,6 +3389,16 @@ class ThemeEditorWindow(QMainWindow):
 
     def image_to_jpeg(self, img, quality=80):
         """Convert image to JPEG bytes with optimized settings."""
+        # If vertical mode is enabled, img is rendered in portrait (DISPLAY_HEIGHT x
+        # DISPLAY_WIDTH) logical space. Rotate it 90 degrees so the physical buffer
+        # sent to the panel is ALWAYS exactly DISPLAY_WIDTH x DISPLAY_HEIGHT (the
+        # panel's fixed native resolution) - never a different size, otherwise the
+        # firmware stretches/squishes the frame to fit, causing distortion.
+        if getattr(self, "_vertical_mode", False):
+            img = img.transpose(Image.ROTATE_270)
+            if img.size != (DISPLAY_WIDTH, DISPLAY_HEIGHT):
+                img = img.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT))
+
         buffer = io.BytesIO()
         # Use quality=80 and optimize=False for faster encoding
         # The LCD display doesn't need highest quality
@@ -3241,6 +3409,14 @@ class ThemeEditorWindow(QMainWindow):
         if not self.device:
             raise IOError("Device not connected")
 
+        # Si el device es LY (bulk), usar su protocolo nativo
+        from device_ly import LYDevice
+        if isinstance(self.device, LYDevice):
+            if not self.device.send_frame(jpeg_data):
+                raise IOError("LY write failed: send_frame returned False")
+            return
+
+        # Protocolo HID legacy (0416:5302, etc.)
         MAGIC = bytes([0xDA, 0xDB, 0xDC, 0xDD])
 
         header = bytearray(512)
@@ -3283,7 +3459,8 @@ class ThemeEditorWindow(QMainWindow):
         startup_group = QGroupBox("Startup")
         startup_layout = QVBoxLayout(startup_group)
 
-        self.launch_at_login_cb = QCheckBox("Launch at Windows startup")
+        _startup_label = "Launch at Windows startup" if sys.platform == "win32" else "Iniciar al arrancar la sesión"
+        self.launch_at_login_cb = QCheckBox(_startup_label)
         self.launch_at_login_cb.setChecked(settings.get_setting("launch_at_login", True))
         startup_layout.addWidget(self.launch_at_login_cb)
 

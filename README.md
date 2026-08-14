@@ -32,7 +32,18 @@ Editor visual de temas para pantallas LCD de refrigeración AIO. Este fork parte
 - Reduce el consumo de CPU en reposo (sensores estables) de forma notable frente al comportamiento original de renderizar y codificar cada frame sin condición.
 - Aplicado tanto al modo estándar como al modo Overdrive (hilo de renderizado en segundo plano).
 
-### 5. Configuración centralizada, menos hardcodeo
+### 5. Corrección de color para el LCD (brillo / contraste / saturación)
+- Los paneles LCD de este tipo suelen mostrar los colores algo apagados/desaturados respecto al diseño en pantalla.
+- Nuevo grupo **"LCD Color Correction"** en `Settings → Preferences...` con tres deslizadores: **Brightness**, **Contrast** y **Saturation** (rango 0.5–1.5/2.0, aplicados como multiplicador sobre el frame final antes de convertirlo a JPEG).
+- Por defecto se aplica un contraste (1.15) y saturación (1.25) ligeramente elevados para compensar el aspecto apagado de fábrica; el brillo por defecto es 1.0 (sin cambios).
+- También configurable directamente en `settings.json` (`lcd_brightness`, `lcd_contrast`, `lcd_saturation`).
+- Además, el submuestreo de croma del JPEG enviado al LCD se cambió de `4:2:0` a `4:4:4` (subsampling=0), lo que conserva mucha más fidelidad de color respecto al diseño mostrado en la interfaz, a costa de un JPEG ligeramente más pesado (impacto de CPU/USB despreciable en este uso).
+
+### 6. Corrección del límite del eje Y en modo vertical
+- El panel de propiedades (X/Y/Ancho/Alto) tenía los rangos de los spin boxes fijados siempre a la resolución física del panel (1920×480), por lo que en modo vertical el campo Y no dejaba introducir valores por encima de 480 aunque el lienzo vertical mide 1920 de alto.
+- Ahora los rangos de X/Y/Ancho/Alto (individuales y en selección múltiple) se recalculan automáticamente al activar/desactivar Vertical Mode, y también al iniciar la aplicación si ya estaba guardado como activo.
+
+### 6. Configuración centralizada, menos hardcodeo
 - Todos los parámetros relevantes del hardware/comportamiento están en `settings.json`, gestionados por `settings.py`.
 
 ---
@@ -50,6 +61,9 @@ Editor visual de temas para pantallas LCD de refrigeración AIO. Este fork parte
 | `overdrive_mode` | bool | `false` | Activa un hilo de renderizado en segundo plano que pre-genera frames para una entrega más fluida y compensada en el tiempo (útil con FPS altos). |
 | `suppress_60fps_warning` | bool | `false` | Oculta el aviso al seleccionar 60 FPS. |
 | `vertical_mode` | bool | `false` | Rota tanto la interfaz de diseño como la salida enviada al LCD 90°, para paneles montados verticalmente. También se puede activar/desactivar desde el menú Display → Vertical Mode. |
+| `lcd_brightness` | float | `1.0` | Multiplicador de brillo aplicado al frame final antes de enviarlo al LCD (0.5–1.5). Configurable en Preferences. |
+| `lcd_contrast` | float | `1.15` | Multiplicador de contraste aplicado al frame final antes de enviarlo al LCD (0.5–1.5). Configurable en Preferences. |
+| `lcd_saturation` | float | `1.25` | Multiplicador de saturación aplicado al frame final antes de enviarlo al LCD (0.5–2.0). Configurable en Preferences. |
 
 Todas estas opciones también son accesibles desde los menús de la interfaz gráfica; los cambios se guardan automáticamente en `settings.json`.
 

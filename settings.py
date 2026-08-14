@@ -30,6 +30,9 @@ DEFAULT_SETTINGS = {
     "overdrive_mode": False,
     "suppress_60fps_warning": False,  # Show warning when selecting 60 FPS
     "vertical_mode": False,  # Rotate interface + LCD output 90 degrees
+    "lcd_brightness": 1.0,   # 0.5 - 1.5, multiplier applied to the final frame before sending to the LCD
+    "lcd_contrast": 1.15,    # 0.5 - 1.5, multiplier applied to the final frame before sending to the LCD
+    "lcd_saturation": 1.25,  # 0.5 - 2.0, multiplier applied to the final frame before sending to the LCD
 }
 
 _settings = None

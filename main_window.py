@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QColorDialog, QFileDialog,
     QComboBox, QSplitter, QMessageBox, QStatusBar, QTabWidget,
     QDialog, QCheckBox, QDialogButtonBox, QGroupBox, QFormLayout, QSystemTrayIcon,
-    QTextEdit, QPlainTextEdit
+    QTextEdit, QPlainTextEdit, QSlider
 )
 from PySide6.QtCore import Qt, QTimer, QByteArray, Signal, QObject
 from PySide6.QtGui import QColor, QAction, QKeySequence, QIcon, QTextCursor, QFont
@@ -109,7 +109,7 @@ PBT_APMRESUMEAUTOMATIC = 0x0012
 PBT_APMRESUMESUSPEND = 0x0007
 PBT_APMSUSPEND = 0x0004
 
-from PIL import Image, ImageDraw, ImageFont, ImageChops
+from PIL import Image, ImageDraw, ImageFont, ImageChops, ImageEnhance
 
 from security import validate_preset_schema, is_safe_path
 
@@ -328,6 +328,12 @@ class ThemeEditorWindow(QMainWindow):
         self._frames_skipped = 0  # Counter for skipped frames
         self._overdrive_mode = settings.get_setting("overdrive_mode", False)
         self._vertical_mode = settings.get_setting("vertical_mode", False)  # Rotate UI + LCD output 90 degrees
+        # Color correction applied to the final frame before sending it to the LCD.
+        # Many of these panels render colors slightly washed-out/dim by default,
+        # so a mild contrast/saturation boost compensates for that.
+        self._lcd_brightness = settings.get_setting("lcd_brightness", 1.0)
+        self._lcd_contrast = settings.get_setting("lcd_contrast", 1.15)
+        self._lcd_saturation = settings.get_setting("lcd_saturation", 1.25)
         self._frame_buffer = None  # Pre-rendered frame buffer
         self._frame_buffer_lock = threading.Lock()
         self._last_frame_signature = None  # Signature of last rendered frame (for caching)
@@ -349,6 +355,16 @@ class ThemeEditorWindow(QMainWindow):
         self.setup_console()
         self.setup_menu()
         self.connect_signals()
+
+        # Apply the persisted vertical mode state to the canvas and property
+        # panel on startup. Without this, if vertical_mode was saved as True,
+        # the canvas/spin-box ranges stay in landscape orientation until the
+        # user manually toggles the "Vertical Mode" checkbox off and on again.
+        if self._vertical_mode:
+            if hasattr(self, "canvas") and hasattr(self.canvas, "set_vertical_mode"):
+                self.canvas.set_vertical_mode(True)
+            if hasattr(self, "properties_panel") and hasattr(self.properties_panel, "set_vertical_mode"):
+                self.properties_panel.set_vertical_mode(True)
 
         self.add_default_elements()
         self.setup_performance_monitor()
@@ -1613,6 +1629,15 @@ class ThemeEditorWindow(QMainWindow):
         if hasattr(self, "canvas") and hasattr(self.canvas, "set_vertical_mode"):
             self.canvas.set_vertical_mode(checked)
 
+        # Update the property panel's X/Y/W/H spin box ranges to match the new
+        # canvas orientation - otherwise Y stays capped at the old DISPLAY_HEIGHT.
+        if hasattr(self, "properties_panel") and hasattr(self.properties_panel, "set_vertical_mode"):
+            self.properties_panel.set_vertical_mode(checked)
+            # Re-populate the currently selected element's fields with the (now
+            # correctly-ranged) spin boxes so displayed values stay in sync.
+            if getattr(self.properties_panel, "current_element", None) is not None:
+                self.properties_panel.set_element(self.properties_panel.current_element)
+
         # Force an immediate re-render / re-send so the LCD updates right away
         with self._frame_buffer_lock:
             self._frame_buffer = None
@@ -1994,7 +2019,8 @@ class ThemeEditorWindow(QMainWindow):
         rendered frame's pixels. If the signature is unchanged since the last frame,
         we can skip re-rendering and re-encoding the JPEG entirely, which is the main
         source of avoidable CPU usage when sensor values are not actively changing."""
-        parts = [self._vertical_mode, video_background.enabled]
+        parts = [self._vertical_mode, video_background.enabled,
+                 self._lcd_brightness, self._lcd_contrast, self._lcd_saturation]
         for element in self.elements:
             value = element.value
             # Round floats to 1 decimal so tiny sensor jitter doesn't force re-renders
@@ -3399,10 +3425,28 @@ class ThemeEditorWindow(QMainWindow):
             if img.size != (DISPLAY_WIDTH, DISPLAY_HEIGHT):
                 img = img.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT))
 
+        # Color correction (brightness/contrast/saturation) to compensate for LCD
+        # panels that render colors washed-out/dim compared to the design preview.
+        # Values of 1.0 are a no-op, so this is skipped entirely when unused.
+        brightness = getattr(self, "_lcd_brightness", 1.0)
+        contrast = getattr(self, "_lcd_contrast", 1.0)
+        saturation = getattr(self, "_lcd_saturation", 1.0)
+        if brightness != 1.0:
+            img = ImageEnhance.Brightness(img).enhance(brightness)
+        if contrast != 1.0:
+            img = ImageEnhance.Contrast(img).enhance(contrast)
+        if saturation != 1.0:
+            img = ImageEnhance.Color(img).enhance(saturation)
+
         buffer = io.BytesIO()
         # Use quality=80 and optimize=False for faster encoding
         # The LCD display doesn't need highest quality
-        img.save(buffer, format='JPEG', quality=quality, optimize=False, subsampling=2)
+        # subsampling=0 (4:4:4, full chroma resolution) keeps colors closer to what
+        # is shown in the design interface. subsampling=2 (4:2:0) saves a little
+        # CPU/bandwidth but visibly washes out/bleeds saturated colors on small
+        # LCD panels, which is part of why the panel looked less vivid than the
+        # on-screen preview.
+        img.save(buffer, format='JPEG', quality=quality, optimize=False, subsampling=0)
         return buffer.getvalue()
 
     def send_jpeg_frame(self, jpeg_data):
@@ -3484,6 +3528,44 @@ class ThemeEditorWindow(QMainWindow):
 
         layout.addWidget(behavior_group)
 
+        # LCD color correction group
+        color_group = QGroupBox("LCD Color Correction")
+        color_layout = QFormLayout(color_group)
+
+        def make_slider(setting_key, default, min_val=50, max_val=200):
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setMinimum(min_val)
+            slider.setMaximum(max_val)
+            current = settings.get_setting(setting_key, default)
+            slider.setValue(int(round(current * 100)))
+            value_label = QLabel(f"{current:.2f}")
+            slider.valueChanged.connect(lambda v, lbl=value_label: lbl.setText(f"{v / 100:.2f}"))
+            row = QHBoxLayout()
+            row.addWidget(slider)
+            row.addWidget(value_label)
+            container = QWidget()
+            container.setLayout(row)
+            return slider, container
+
+        self.lcd_brightness_slider, brightness_row = make_slider("lcd_brightness", 1.0, 50, 150)
+        color_layout.addRow("Brightness", brightness_row)
+
+        self.lcd_contrast_slider, contrast_row = make_slider("lcd_contrast", 1.15, 50, 150)
+        color_layout.addRow("Contrast", contrast_row)
+
+        self.lcd_saturation_slider, saturation_row = make_slider("lcd_saturation", 1.25, 50, 200)
+        color_layout.addRow("Saturation", saturation_row)
+
+        reset_colors_btn = QPushButton("Reset to defaults")
+        reset_colors_btn.clicked.connect(lambda: (
+            self.lcd_brightness_slider.setValue(100),
+            self.lcd_contrast_slider.setValue(115),
+            self.lcd_saturation_slider.setValue(125),
+        ))
+        color_layout.addRow(reset_colors_btn)
+
+        layout.addWidget(color_group)
+
         # Buttons
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -3498,6 +3580,17 @@ class ThemeEditorWindow(QMainWindow):
             settings.set_setting("launch_minimized", self.launch_minimized_cb.isChecked())
             settings.set_setting("minimize_to_tray", self.minimize_to_tray_cb.isChecked())
             settings.set_setting("close_to_tray", self.close_to_tray_cb.isChecked())
+
+            # LCD color correction
+            self._lcd_brightness = self.lcd_brightness_slider.value() / 100.0
+            self._lcd_contrast = self.lcd_contrast_slider.value() / 100.0
+            self._lcd_saturation = self.lcd_saturation_slider.value() / 100.0
+            settings.set_setting("lcd_brightness", self._lcd_brightness)
+            settings.set_setting("lcd_contrast", self._lcd_contrast)
+            settings.set_setting("lcd_saturation", self._lcd_saturation)
+            # Invalidate the cached frame so the new color correction is applied
+            # to the very next frame instead of waiting for something else to change.
+            self._last_frame_signature = None
 
             # Apply autostart setting
             settings.apply_autostart_setting()

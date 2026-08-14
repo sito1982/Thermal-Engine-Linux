@@ -595,12 +595,57 @@ class PropertiesPanel(QWidget):
         self.multi_selection_elements = []
         self.multi_selection_indices = []
         self._undo_state_saved = False  # Track if undo state was saved for current edit session
+        self.vertical_mode = False  # When True, X/Y/W/H spin ranges are swapped (portrait canvas)
 
         # Section headers for visibility control
         self.section_headers = {}
         self.section_fields = {}
 
         self.setup_ui()
+
+    def set_vertical_mode(self, enabled):
+        """Swap the X/Y/Width/Height spin box ranges to match the active canvas
+        orientation. In vertical mode the logical design canvas is DISPLAY_HEIGHT
+        wide by DISPLAY_WIDTH tall (e.g. 480x1920), so the property fields need
+        their min/max swapped accordingly - otherwise Y is stuck capped at the
+        old DISPLAY_HEIGHT (480) even though elements can now be placed much
+        further down the vertical canvas."""
+        self.vertical_mode = enabled
+        canvas_w = DISPLAY_HEIGHT if enabled else DISPLAY_WIDTH
+        canvas_h = DISPLAY_WIDTH if enabled else DISPLAY_HEIGHT
+
+        for spin in (self.x_spin,):
+            spin.blockSignals(True)
+            spin.setRange(0, canvas_w)
+            spin.blockSignals(False)
+        for spin in (self.y_spin,):
+            spin.blockSignals(True)
+            spin.setRange(0, canvas_h)
+            spin.blockSignals(False)
+        for spin in (self.width_spin,):
+            spin.blockSignals(True)
+            spin.setRange(10, canvas_w)
+            spin.blockSignals(False)
+        for spin in (self.height_spin,):
+            spin.blockSignals(True)
+            spin.setRange(10, canvas_h)
+            spin.blockSignals(False)
+        for spin in (self.multi_x_spin,):
+            spin.blockSignals(True)
+            spin.setRange(-1000, canvas_w + 1000)
+            spin.blockSignals(False)
+        for spin in (self.multi_y_spin,):
+            spin.blockSignals(True)
+            spin.setRange(-1000, canvas_h + 1000)
+            spin.blockSignals(False)
+        for spin in (self.multi_w_spin,):
+            spin.blockSignals(True)
+            spin.setRange(1, canvas_w * 2)
+            spin.blockSignals(False)
+        for spin in (self.multi_h_spin,):
+            spin.blockSignals(True)
+            spin.setRange(1, canvas_h * 2)
+            spin.blockSignals(False)
 
     def create_section(self, title):
         """Create a styled section container with title."""

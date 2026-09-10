@@ -10,6 +10,8 @@ Editor visual de temas para pantallas LCD de refrigeración AIO. Este fork parte
 - Implementación completa del protocolo **LY** (comunicación USB *bulk*, no HID) para el LCD 0416:5408, basada en la ingeniería inversa del proyecto [thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux).
 - Handshake, envío de frames JPEG por bloques y reconexión automática ante desconexiones/timeouts USB.
 - Resolución nativa configurada a **1920×480**.
+- **Tasas por panel**: el driver declara sus capacidades (`frame_rate_options`, subsampling y hilo de envío). El Trofeo 9.16 ofrece **Low (12 FPS @ 4:4:4)** y **High (24 FPS @ 4:2:2)**; las tasas extendidas 30/60 solo se desbloquean si el benchmark manual pasa.
+- **Rendimiento**: buffer de empaquetado de frames persistente reutilizado entre envíos (elimina copias de memoria por frame) y padding de bloques a múltiplo de 4 según exige el protocolo.
 
 ### 2. Soporte completo para Linux
 - `linux_sensors.py`: backend de sensores de sistema para Linux (CPU, RAM, GPU NVIDIA vía NVML/`nvidia-smi`), equivalente al backend HWiNFO usado en Windows.
@@ -43,8 +45,31 @@ Editor visual de temas para pantallas LCD de refrigeración AIO. Este fork parte
 - El panel de propiedades (X/Y/Ancho/Alto) tenía los rangos de los spin boxes fijados siempre a la resolución física del panel (1920×480), por lo que en modo vertical el campo Y no dejaba introducir valores por encima de 480 aunque el lienzo vertical mide 1920 de alto.
 - Ahora los rangos de X/Y/Ancho/Alto (individuales y en selección múltiple) se recalculan automáticamente al activar/desactivar Vertical Mode, y también al iniciar la aplicación si ya estaba guardado como activo.
 
-### 6. Configuración centralizada, menos hardcodeo
+### 7. Configuración centralizada, menos hardcodeo
 - Todos los parámetros relevantes del hardware/comportamiento están en `settings.json`, gestionados por `settings.py`.
+
+### 8. Asistente "New Project…" (File → New Project…)
+- Nuevo wizard de dos pasos estilo Figma para crear proyectos:
+  1. **Dispositivo**: selección de targets **Web / LCD / DMD** (DMD como placeholder deshabilitado) mediante cards visuales.
+  2. **Configuración**: nombre del proyecto, benchmark del panel y plantilla inicial.
+- El paso LCD incluye un test manual **"Test LCD"** que mide los FPS reales del panel sobre el hardware conectado; si pasa, desbloquea las tasas extendidas (30/60 FPS).
+- El asistente entrega los datos al editor sin manipular el lienzo directamente (`dialog.data()`).
+
+### 9. Templates con orientación (secciones Horizontal / Vertical)
+- El panel **Template** del editor separa ahora las plantillas en dos secciones: **Horizontal** y **Vertical** (la orientación se infiere de `display_width` vs `display_height` de cada preset).
+- Cada miniatura muestra un preview que respeta la proporción real del template (horizontales anchas, verticales altas) y una etiqueta de orientación.
+- Los presets verticales suelen corresponder a paneles montados girados 90° (modo vertical).
+
+### 10. Canvas mejorado (zoom y guías de alineación)
+- **Zoom** con la rueda del ratón (5%–400%) manteniendo el modo "Fit".
+- **Smart guides**: líneas guía de alineación con snapping (6px de tolerancia) al mover/redimensionar elementos.
+
+### 11. Visibilidad y bloqueo de elementos
+- La lista de elementos incluye ahora un **ojo** (ocultar/mostrar) y un **candado** (bloquear) en cada fila.
+- Un elemento oculto no se renderiza en el LCD ni en la preview, pero sigue siendo editable desde la lista (nuevo campo `visible` persistido en el tema).
+
+### 12. Webserver bajo demanda
+- El preview web ya **no se arranca al iniciar la aplicación**: el servidor (puerto `4241`, configurable con `--port`) solo se levanta cuando el proyecto activo tiene target **Web**, y se detiene al cambiar a un proyecto solo LCD.
 
 ---
 
@@ -64,6 +89,10 @@ Editor visual de temas para pantallas LCD de refrigeración AIO. Este fork parte
 | `lcd_brightness` | float | `1.0` | Multiplicador de brillo aplicado al frame final antes de enviarlo al LCD (0.5–1.5). Configurable en Preferences. |
 | `lcd_contrast` | float | `1.15` | Multiplicador de contraste aplicado al frame final antes de enviarlo al LCD (0.5–1.5). Configurable en Preferences. |
 | `lcd_saturation` | float | `1.25` | Multiplicador de saturación aplicado al frame final antes de enviarlo al LCD (0.5–2.0). Configurable en Preferences. |
+| `project_targets` | dict | `{web: true, lcd: true}` | Targets activos del proyecto (Web / LCD). El webserver solo arranca con target `web` y el envío LCD solo con target `lcd`. |
+| `lcd_model` | string | `"trofeo_9_16"` | Modelo LCD activo del catálogo (`lcds.py`), que determina resolución, tasas base y tasas extendidas. |
+| `lcd_benchmarks` | dict | `{}` | Resultados del benchmark por panel, clave `"vid:pid"` → `{passed, fps_*, requirement, date}`. Si `passed`, se desbloquean las tasas extendidas. |
+| `web_port` | int | `4241` | Puerto del webserver de preview (también configurable con `main.py --port`). |
 
 Todas estas opciones también son accesibles desde los menús de la interfaz gráfica; los cambios se guardan automáticamente en `settings.json`.
 

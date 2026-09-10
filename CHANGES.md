@@ -4,6 +4,8 @@ Resumen de los cambios realizados en este repositorio con respecto al último co
 
 > Nota: estos cambios aún **no están commiteados**. Los archivos nuevos figuran como untracked y las modificaciones como working tree. Puedes revisarlos con `git diff HEAD` y `git status`.
 
+> Tras crear este documento, el `README.md` también se actualizó con las nuevas funcionalidades (secciones 8–12, claves nuevas de `settings.json` y la sección del driver LY), y se corrigió la numeración duplicada del punto 6.
+
 ---
 
 ## Archivos nuevos

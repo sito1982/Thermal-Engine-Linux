@@ -16,6 +16,11 @@
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="5302", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 KERNEL=="hidraw*", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="5302", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 
+# --- Thermalright Trofeo Vision 9.16 LCD, protocolo LY bulk (VID 0x0416 / PID 0x5408) ---
+# Es la variante real usada por device_ly.py via libusb/pyusb.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="5408", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="5408", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+
 # --- Variante alternativa declarada en constants.py (VID 0x35CC / PID 0x0104) ---
 SUBSYSTEM=="usb", ATTRS{idVendor}=="35cc", ATTRS{idProduct}=="0104", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 KERNEL=="hidraw*", ATTRS{idVendor}=="35cc", ATTRS{idProduct}=="0104", MODE="0660", GROUP="plugdev", TAG+="uaccess"

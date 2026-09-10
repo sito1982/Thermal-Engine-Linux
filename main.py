@@ -10,14 +10,13 @@ import os
 import argparse
 import atexit
 import signal
-import webbrowser
 
 from PySide6.QtWidgets import (
     QApplication, QMessageBox, QSystemTrayIcon, QMenu,
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
 )
 from PySide6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush, QFont
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 
 from sensors import init_sensors, HAS_HWINFO
 from main_window import ThemeEditorWindow
@@ -154,13 +153,14 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Thermal Engine')
     parser.add_argument('--minimized', action='store_true', help='Start minimized to system tray')
+    parser.add_argument('--port', type=int, default=4241, help='Port for the web server (default: 4241)')
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Keep running when minimized to tray
 
-    # Apply dark theme first (so dialog looks correct)
-    app.setStyle("Fusion")
+    from ui_style import apply_dark_theme
+    apply_dark_theme(app)
 
     palette = app.palette()
     palette.setColor(palette.ColorRole.Window, QColor(45, 45, 50))
@@ -191,7 +191,12 @@ def main():
         init_sensors()
 
     # Create main window
-    window = ThemeEditorWindow()
+    window = ThemeEditorWindow(port=args.port)
+
+    # NOTA: el webserver ya no se arranca aquí de forma incondicional. Se
+    # levanta bajo demanda desde la ventana cuando el proyecto activo tiene
+    # target Web (ver ThemeEditorWindow.apply_targets). Así se ahorran recursos
+    # cuando el proyecto es solo de panel LCD.
 
     # Register cleanup handlers to ensure HID device is released on any exit
     def cleanup_on_exit():

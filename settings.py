@@ -33,6 +33,14 @@ DEFAULT_SETTINGS = {
     "lcd_brightness": 1.0,   # 0.5 - 1.5, multiplier applied to the final frame before sending to the LCD
     "lcd_contrast": 1.15,    # 0.5 - 1.5, multiplier applied to the final frame before sending to the LCD
     "lcd_saturation": 1.25,  # 0.5 - 2.0, multiplier applied to the final frame before sending to the LCD
+    # Objetivos del proyecto actual (Web / LCD) y panel seleccionado.
+    "project_targets": {"web": True, "lcd": True},  # legado = ambos activos
+    "lcd_model": "trofeo_9_16",  # Default: Thermalright Trofeo Vision 9.16
+    # Resultados del benchmark del panel: key "vid:pid" -> {passed, fps_*,
+    # requirement, date}. Si passed, el panel desbloquea las tasas extendidas.
+    "lcd_benchmarks": {},
+    # Puerto del webserver (arranca solo cuando el proyecto tiene target Web).
+    "web_port": 4241,
 }
 
 _settings = None

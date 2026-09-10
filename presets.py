@@ -5,6 +5,7 @@ PresetsPanel - Theme preset management widget.
 import os
 import json
 import math
+import copy
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -18,12 +19,84 @@ from element import ThemeElement
 from app_path import get_resource_path
 from security import validate_preset_schema, is_safe_filename, sanitize_preset_name
 from settings import get_setting, set_setting
+from ui_style import SectionLabel, TEXT, TEXT_DIM, TEXT_FAINT, TEXT_SECONDARY, ACCENT, BORDER, PANEL_BG, WARN
+
+
+def list_presets():
+    """List available templates: [(name, element_count, width, height), ...].
+
+    Default goes first. Width/height describe the logical display the template
+    is designed for (orientation = height > width → vertical).
+    """
+    names = [("Default", len(DEFAULT_THEME.get("elements", [])),
+              DISPLAY_WIDTH, DISPLAY_HEIGHT)]
+    presets_dir = get_resource_path("presets")
+    if os.path.isdir(presets_dir):
+        for fn in sorted(os.listdir(presets_dir)):
+            if not fn.endswith(".json"):
+                continue
+            safe, _ = is_safe_filename(fn)
+            if not safe:
+                continue
+            try:
+                with open(os.path.join(presets_dir, fn)) as f:
+                    data = json.load(f)
+                if validate_preset_schema(data)[0]:
+                    preset_name = data.get("name", fn[:-5])
+                    if preset_name == "Default":
+                        continue  # el builtin "Default" tiene prioridad
+                    w = data.get("display_width", DISPLAY_WIDTH)
+                    h = data.get("display_height", DISPLAY_HEIGHT)
+                    names.append((preset_name, len(data.get("elements", [])),
+                                  w, h))
+            except Exception:
+                continue
+    return names
+
+
+def get_preset_thumbnail_path(name):
+    """Return the thumbnail PNG path for a template, or None if missing."""
+    if name == "Default":
+        return None  # el builtin usa preview generada
+    presets_dir = get_resource_path("presets")
+    if not os.path.isdir(presets_dir):
+        return None
+    path = os.path.join(presets_dir, f"{name}.png")
+    return path if os.path.exists(path) else None
+
+
+def get_preset_data(name):
+    """Return the preset data dict for a template name (None if missing)."""
+    if name == "Default":
+        return copy.deepcopy(DEFAULT_THEME)
+    presets_dir = get_resource_path("presets")
+    if not os.path.isdir(presets_dir):
+        return None
+    for fn in os.listdir(presets_dir):
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(presets_dir, fn)) as f:
+                data = json.load(f)
+            if data.get("name") == name and validate_preset_schema(data)[0]:
+                return data
+        except Exception:
+            continue
+    return None
 
 # Thumbnail dimensions (maintain aspect ratio of display)
 THUMBNAIL_WIDTH = 150
 THUMBNAIL_HEIGHT = int(THUMBNAIL_WIDTH * DISPLAY_HEIGHT / DISPLAY_WIDTH)  # ~56 for 1280x480
 LABEL_HEIGHT = 20
 WIDGET_HEIGHT = THUMBNAIL_HEIGHT + LABEL_HEIGHT  # Total widget height
+
+# Tamaños por orientación en el panel de templates. La barra lateral mide ~234px
+# (espacio usable ~192), así que los previews horizontales caben 2 por fila y los
+# verticales se muestran altos en su propia fila, respetando la proporción.
+H_PREVIEW_W, H_PREVIEW_H = 88, 34
+V_PREVIEW_W, V_PREVIEW_H = 48, 160
+H_COLS = 2
+V_COLS = 1
 
 
 # Default theme elements (same as main_window.py)
@@ -51,7 +124,9 @@ class PresetThumbnail(QWidget):
     delete_requested = Signal(str)  # Emits preset name for deletion
     set_default_requested = Signal(str)  # Emits preset name to set as default
 
-    def __init__(self, preset_name, preset_data, is_builtin=False, is_default=False, thumbnail_path=None):
+    def __init__(self, preset_name, preset_data, is_builtin=False, is_default=False,
+                 thumbnail_path=None, dw=None, dh=None,
+                 preview_w=None, preview_h=None):
         super().__init__()
         self.preset_name = preset_name
         self.preset_data = preset_data
@@ -59,12 +134,19 @@ class PresetThumbnail(QWidget):
         self.is_default = is_default
         self.thumbnail_path = thumbnail_path
         self.thumbnail_pixmap = None
+        self._dw = dw or DISPLAY_WIDTH
+        self._dh = dh or DISPLAY_HEIGHT
+
+        # Area de preview adaptativa por orientacion
+        self._pw = preview_w or THUMBNAIL_WIDTH
+        self._ph = preview_h or THUMBNAIL_HEIGHT
+        self._label_h = LABEL_HEIGHT
 
         # Load thumbnail image if it exists
         if thumbnail_path and os.path.exists(thumbnail_path):
             self.thumbnail_pixmap = QPixmap(thumbnail_path)
 
-        self.setFixedSize(THUMBNAIL_WIDTH, WIDGET_HEIGHT)
+        self.setFixedSize(self._pw, self._ph + self._label_h)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         tooltip = f"Click to load: {preset_name}"
         if is_default:
@@ -75,61 +157,97 @@ class PresetThumbnail(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        preview_height = THUMBNAIL_HEIGHT
+        preview_height = self._ph
 
         # Use saved thumbnail if available, otherwise generate preview
         if self.thumbnail_pixmap and not self.thumbnail_pixmap.isNull():
-            # Draw the saved thumbnail scaled to fill the preview area exactly
+            # Draw the saved thumbnail scaled to fit the preview area keeping
+            # the aspect ratio (vertical templates stay tall/narrow)
             scaled_pixmap = self.thumbnail_pixmap.scaled(
-                THUMBNAIL_WIDTH, preview_height,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
+                self._pw, preview_height,
+                Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )
-            painter.drawPixmap(0, 0, scaled_pixmap)
+            x = (self._pw - scaled_pixmap.width()) // 2
+            y = (preview_height - scaled_pixmap.height()) // 2
+            painter.drawPixmap(x, y, scaled_pixmap)
 
             # Draw border
-            painter.setPen(QPen(QColor(60, 60, 80), 2))
-            painter.drawRect(0, 0, THUMBNAIL_WIDTH, preview_height)
+            painter.setPen(QPen(QColor(BORDER), 1))
+            painter.drawRect(0, 0, self._pw - 1, preview_height - 1)
         else:
             # Fall back to generated preview
             # Draw background
             bg_color = QColor(self.preset_data.get("background_color", "#0f0f19"))
-            painter.fillRect(0, 0, THUMBNAIL_WIDTH, preview_height, bg_color)
+            painter.fillRect(0, 0, self._pw, preview_height, bg_color)
 
             # Draw border
-            painter.setPen(QPen(QColor(60, 60, 80), 2))
-            painter.drawRect(0, 0, THUMBNAIL_WIDTH, preview_height)
+            painter.setPen(QPen(QColor(BORDER), 1))
+            painter.drawRect(0, 0, self._pw - 1, preview_height - 1)
 
-            # Scale factor for preview
-            scale_x = THUMBNAIL_WIDTH / DISPLAY_WIDTH
-            scale_y = preview_height / DISPLAY_HEIGHT
+            # Scale the display-space into the preview keeping aspect ratio
+            dw = self._dw
+            dh = self._dh
+            if dw > 0 and dh > 0:
+                s = min(self._pw / dw, preview_height / dh)
+                ox = (self._pw - dw * s) / 2
+                oy = (preview_height - dh * s) / 2
+                painter.save()
+                painter.translate(ox, oy)
+                painter.scale(s, s)
 
-            # Draw simplified element previews
-            elements = self.preset_data.get("elements", [])
-            for el_data in elements:
-                el_type = el_data.get("type", "")
-                color = QColor(el_data.get("color", "#00ff96"))
-                x = int(el_data.get("x", 0) * scale_x)
-                y = int(el_data.get("y", 0) * scale_y)
+                # Draw simplified element previews
+                elements = self.preset_data.get("elements", [])
+                for el_data in elements:
+                    el_type = el_data.get("type", "")
+                    color = QColor(el_data.get("color", "#00ff96"))
+                    x = el_data.get("x", 0)
+                    y = el_data.get("y", 0)
 
-                if el_type in ["circle_gauge", "analog_clock"]:
-                    radius = int(el_data.get("radius", 50) * min(scale_x, scale_y))
-                    painter.setPen(QPen(color, 2))
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
-                    painter.drawEllipse(x - radius, y - radius, radius * 2, radius * 2)
-                elif el_type in ["bar_gauge", "rectangle", "text", "clock", "image", "line_chart", "gif"]:
-                    width = int(el_data.get("width", 100) * scale_x)
-                    height = int(el_data.get("height", 30) * scale_y)
-                    painter.setPen(QPen(color, 1))
-                    painter.setBrush(QBrush(color.darker(200)))
-                    painter.drawRect(x, y, max(width, 3), max(height, 3))
+                    if el_type in ["circle_gauge", "analog_clock"]:
+                        radius = el_data.get("radius", 50)
+                        painter.setPen(QPen(color, 2))
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawEllipse(x - radius, y - radius,
+                                            radius * 2, radius * 2)
+                    elif el_type in ["bar_gauge", "rectangle", "text", "clock",
+                                     "image", "line_chart", "gif"]:
+                        width = el_data.get("width", 100)
+                        height = el_data.get("height", 30)
+                        painter.setPen(QPen(color, 1))
+                        painter.setBrush(QBrush(color.darker(200)))
+                        painter.drawRect(x, y, max(width, 3), max(height, 3))
+                painter.restore()
 
         # Draw name label at bottom
-        label_y = THUMBNAIL_HEIGHT
-        painter.fillRect(0, label_y, THUMBNAIL_WIDTH, LABEL_HEIGHT, QColor(35, 35, 40))
-        painter.setPen(QPen(QColor(200, 200, 200)))
+        label_y = self._ph
         font = QFont()
         font.setPixelSize(11)
+
+        # Orientation pill over the top-right corner of the preview
+        dw_, dh_ = self._dw, self._dh
+        if dw_ and dh_ and dw_ != dh_:
+            is_vert = dh_ > dw_
+            badge_text = "Vertical" if is_vert else "Horizontal"
+            badge_color = ACCENT if is_vert else TEXT_SECONDARY
+            badge_font = QFont()
+            badge_font.setPixelSize(8)
+            badge_font.setBold(True)
+            painter.setFont(badge_font)
+            fm = painter.fontMetrics()
+            bw = fm.horizontalAdvance(badge_text) + 10
+            bh = 12
+            bx = self._pw - 4 - bw
+            by = 4
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(badge_color).darker(150))
+            painter.drawRoundedRect(bx, by, bw, bh, 6, 6)
+            painter.setPen(QPen(QColor(badge_color)))
+            painter.drawText(bx + 5, by + bh - 3, badge_text)
+            painter.setFont(font)
+
+        painter.fillRect(0, label_y, self._pw, self._label_h, QColor(PANEL_BG))
+        painter.setPen(QPen(QColor(TEXT)))
         painter.setFont(font)
 
         # Truncate name if too long
@@ -137,21 +255,21 @@ class PresetThumbnail(QWidget):
         if len(display_name) > 18:
             display_name = display_name[:15] + "..."
 
-        painter.drawText(5, label_y + LABEL_HEIGHT - 5, display_name)
+        painter.drawText(5, label_y + self._label_h - 5, display_name)
 
         # Draw indicators on the right side
-        indicator_x = THUMBNAIL_WIDTH - 15
+        indicator_x = self._pw - 15
 
         # Draw checkmark for default preset
         if self.is_default:
-            painter.setPen(QPen(QColor(0, 255, 150)))
-            painter.drawText(indicator_x, label_y + LABEL_HEIGHT - 5, "✓")
+            painter.setPen(QPen(QColor(ACCENT)))
+            painter.drawText(indicator_x, label_y + self._label_h - 5, "✓")
             indicator_x -= 15
 
         # Draw star for built-in presets
         if self.is_builtin:
-            painter.setPen(QPen(QColor(255, 200, 0)))
-            painter.drawText(indicator_x, label_y + LABEL_HEIGHT - 5, "★")
+            painter.setPen(QPen(QColor(WARN)))
+            painter.drawText(indicator_x, label_y + self._label_h - 5, "★")
 
         painter.end()
 
@@ -200,13 +318,11 @@ class PresetsPanel(QWidget):
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setContentsMargins(10, 10, 10, 8)
 
         # Title row with New button
         title_row = QHBoxLayout()
-        title = QLabel("Presets")
-        title.setStyleSheet("font-weight: bold; font-size: 14px; padding: 5px;")
-        title_row.addWidget(title)
+        title_row.addWidget(SectionLabel("Template"))
         title_row.addStretch()
 
         self.new_preset_btn = QPushButton("+ New")
@@ -216,11 +332,31 @@ class PresetsPanel(QWidget):
 
         layout.addLayout(title_row)
 
-        # Preset grid container
-        self.grid_container = QWidget()
-        self.grid_layout = QGridLayout(self.grid_container)
-        self.grid_layout.setSpacing(10)
-        layout.addWidget(self.grid_container)
+        # Sección Horizontal
+        self.h_section = QWidget()
+        hs = QVBoxLayout(self.h_section)
+        hs.setContentsMargins(0, 0, 0, 0)
+        hs.setSpacing(6)
+        hs.addWidget(SectionLabel("Horizontal"))
+        self.h_container = QWidget()
+        self.h_grid = QGridLayout(self.h_container)
+        self.h_grid.setContentsMargins(0, 0, 0, 0)
+        self.h_grid.setSpacing(8)
+        hs.addWidget(self.h_container)
+        layout.addWidget(self.h_section)
+
+        # Sección Vertical
+        self.v_section = QWidget()
+        vs = QVBoxLayout(self.v_section)
+        vs.setContentsMargins(0, 0, 0, 0)
+        vs.setSpacing(6)
+        vs.addWidget(SectionLabel("Vertical"))
+        self.v_container = QWidget()
+        self.v_grid = QGridLayout(self.v_container)
+        self.v_grid.setContentsMargins(0, 0, 0, 0)
+        self.v_grid.setSpacing(8)
+        vs.addWidget(self.v_container)
+        layout.addWidget(self.v_section)
 
         # Pagination controls
         self.pagination_widget = QWidget()
@@ -258,7 +394,9 @@ class PresetsPanel(QWidget):
         self.presets["Default"] = {
             "data": DEFAULT_THEME,
             "builtin": True,
-            "thumbnail_path": None
+            "thumbnail_path": None,
+            "dw": DISPLAY_WIDTH,
+            "dh": DISPLAY_HEIGHT,
         }
 
         # Load presets from folder
@@ -293,7 +431,9 @@ class PresetsPanel(QWidget):
                         "data": data,
                         "builtin": False,
                         "filepath": filepath,
-                        "thumbnail_path": thumbnail_path
+                        "thumbnail_path": thumbnail_path,
+                        "dw": data.get("display_width", DISPLAY_WIDTH),
+                        "dh": data.get("display_height", DISPLAY_HEIGHT),
                     }
                 except Exception as e:
                     print(f"Failed to load preset {filename}: {e}")
@@ -301,47 +441,74 @@ class PresetsPanel(QWidget):
         self.refresh_display()
 
     def refresh_display(self):
-        """Refresh the preset thumbnails display."""
+        """Refresh the preset thumbnails display split by orientation."""
         # Clear existing thumbnails properly
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            widget = item.widget() if item else None
-            if widget:
-                widget.setParent(None)
-                widget.deleteLater()
+        self._clear_grid(self.h_grid)
+        self._clear_grid(self.v_grid)
 
-        # Get sorted preset names (Default first, then alphabetical)
-        preset_names = sorted(self.presets.keys(), key=lambda x: (x != "Default", x.lower()))
+        # Separar presets por orientación (Default primero, luego alfabético)
+        horiz, vert = [], []
+        for name, info in self.presets.items():
+            dw = info.get("dw", DISPLAY_WIDTH) or DISPLAY_WIDTH
+            dh = info.get("dh", DISPLAY_HEIGHT) or DISPLAY_HEIGHT
+            (vert if dh > dw else horiz).append((name, info))
+        horiz.sort(key=lambda x: (x[0] != "Default", x[0].lower()))
+        vert.sort(key=lambda x: (x[0] != "Default", x[0].lower()))
+        vert_names = {n for n, _ in vert}
 
-        # Calculate pagination
-        total_presets = len(preset_names)
-        total_pages = max(1, math.ceil(total_presets / self.PRESETS_PER_PAGE))
+        # Paginación sobre la lista combinada (horizontales primero)
+        combined = horiz + vert
+        total_pages = max(1, math.ceil(len(combined) / self.PRESETS_PER_PAGE))
         self.current_page = min(self.current_page, total_pages - 1)
-
-        # Get presets for current page
-        start_idx = self.current_page * self.PRESETS_PER_PAGE
-        end_idx = start_idx + self.PRESETS_PER_PAGE
-        page_presets = preset_names[start_idx:end_idx]
+        start = self.current_page * self.PRESETS_PER_PAGE
+        page = combined[start:start + self.PRESETS_PER_PAGE]
 
         # Get the default preset name
         default_preset = get_setting("default_preset", None)
 
-        # Create thumbnails in a 2-column grid
-        for i, name in enumerate(page_presets):
-            preset_info = self.presets[name]
-            thumbnail = PresetThumbnail(
-                name,
-                preset_info["data"],
-                preset_info.get("builtin", False),
-                is_default=(name == default_preset),
-                thumbnail_path=preset_info.get("thumbnail_path")
-            )
-            thumbnail.clicked.connect(self.on_preset_clicked)
-            thumbnail.delete_requested.connect(self.on_delete_preset)
-            thumbnail.set_default_requested.connect(self.on_set_default_preset)
-            row = i // 2
-            col = i % 2
-            self.grid_layout.addWidget(thumbnail, row, col)
+        hidx = vidx = 0
+        h_in_page = v_in_page = 0
+        for name, info in page:
+            if name in vert_names:
+                v_in_page += 1
+                thumb = PresetThumbnail(
+                    name,
+                    info["data"],
+                    info.get("builtin", False),
+                    is_default=(name == default_preset),
+                    thumbnail_path=info.get("thumbnail_path"),
+                    dw=info.get("dw"),
+                    dh=info.get("dh"),
+                    preview_w=V_PREVIEW_W,
+                    preview_h=V_PREVIEW_H,
+                )
+                thumb.clicked.connect(self.on_preset_clicked)
+                thumb.delete_requested.connect(self.on_delete_preset)
+                thumb.set_default_requested.connect(self.on_set_default_preset)
+                self.v_grid.addWidget(thumb, vidx // V_COLS, vidx % V_COLS,
+                                      alignment=Qt.AlignmentFlag.AlignCenter)
+                vidx += 1
+            else:
+                h_in_page += 1
+                thumb = PresetThumbnail(
+                    name,
+                    info["data"],
+                    info.get("builtin", False),
+                    is_default=(name == default_preset),
+                    thumbnail_path=info.get("thumbnail_path"),
+                    dw=info.get("dw"),
+                    dh=info.get("dh"),
+                    preview_w=H_PREVIEW_W,
+                    preview_h=H_PREVIEW_H,
+                )
+                thumb.clicked.connect(self.on_preset_clicked)
+                thumb.delete_requested.connect(self.on_delete_preset)
+                thumb.set_default_requested.connect(self.on_set_default_preset)
+                self.h_grid.addWidget(thumb, hidx // H_COLS, hidx % H_COLS)
+                hidx += 1
+
+        self.h_section.setVisible(h_in_page > 0)
+        self.v_section.setVisible(v_in_page > 0)
 
         # Update pagination controls
         self.page_label.setText(f"Page {self.current_page + 1}/{total_pages}")
@@ -350,9 +517,19 @@ class PresetsPanel(QWidget):
         self.pagination_widget.setVisible(total_pages > 1)
 
         # Force layout update
-        self.grid_container.updateGeometry()
+        self.h_container.updateGeometry()
+        self.v_container.updateGeometry()
         self.updateGeometry()
         self.update()
+
+    @staticmethod
+    def _clear_grid(grid):
+        while grid.count():
+            item = grid.takeAt(0)
+            widget = item.widget() if item else None
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
 
     def prev_page(self):
         if self.current_page > 0:
@@ -389,7 +566,7 @@ class PresetsPanel(QWidget):
                         if os.path.exists(thumbnail_path):
                             os.remove(thumbnail_path)
                     except Exception as e:
-                        QMessageBox.warning(self, "Error", f"Failed to delete preset file: {e}")
+                        QMessageBox.warning(self, "Error", f"Failed to delete template file: {e}")
                         return
                 del self.presets[preset_name]
 
@@ -432,11 +609,12 @@ class PresetsPanel(QWidget):
             return
 
         # Create empty preset data
+        orientation_vertical = get_setting("vertical_mode", False)
         new_preset_data = {
             "name": name,
             "background_color": "#000000",
-            "display_width": DISPLAY_WIDTH,
-            "display_height": DISPLAY_HEIGHT,
+            "display_width": DISPLAY_HEIGHT if orientation_vertical else DISPLAY_WIDTH,
+            "display_height": DISPLAY_WIDTH if orientation_vertical else DISPLAY_HEIGHT,
             "elements": [],
             "video_background": {
                 "video_path": "",
@@ -474,7 +652,7 @@ class PresetsPanel(QWidget):
         filename = f"{safe_name}.json"
         safe, err = is_safe_filename(filename)
         if not safe:
-            QMessageBox.warning(self, "Error", f"Invalid preset name: {err}")
+            QMessageBox.warning(self, "Error", f"Invalid template name: {err}")
             return False
 
         filepath = os.path.join(self.presets_dir, filename)
@@ -511,11 +689,13 @@ class PresetsPanel(QWidget):
                 "data": theme_data,
                 "builtin": False,
                 "filepath": filepath,
-                "thumbnail_path": thumbnail_path if thumbnail_path and os.path.exists(thumbnail_path) else None
+                "thumbnail_path": thumbnail_path if thumbnail_path and os.path.exists(thumbnail_path) else None,
+                "dw": theme_data.get("display_width", DISPLAY_WIDTH),
+                "dh": theme_data.get("display_height", DISPLAY_HEIGHT),
             }
             self.refresh_display()
             self.preset_saved.emit(name)
             return True
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to save preset: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to save template: {e}")
             return False

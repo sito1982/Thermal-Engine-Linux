@@ -20,10 +20,15 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QColorDialog, QFileDialog,
     QComboBox, QSplitter, QMessageBox, QStatusBar, QTabWidget,
     QDialog, QCheckBox, QDialogButtonBox, QGroupBox, QFormLayout, QSystemTrayIcon,
-    QTextEdit, QPlainTextEdit, QSlider
+    QTextEdit, QPlainTextEdit, QSlider, QToolBar, QToolButton, QSizePolicy
 )
 from PySide6.QtCore import Qt, QTimer, QByteArray, Signal, QObject
 from PySide6.QtGui import QColor, QAction, QKeySequence, QIcon, QTextCursor, QFont
+
+from ui_style import LogoLabel, ACCENT, TEXT, TEXT_DIM, BORDER, APP_BG, DOT_OFF, DOT_ON, make_icon
+from canvas import CanvasPreview, CanvasScrollArea
+from lcds import find_lcd
+from benchmark import run_display_benchmark
 
 
 class ConsoleOutputStream(QObject):
@@ -35,11 +40,53 @@ class ConsoleOutputStream(QObject):
         self.original_stream = original_stream
 
     def write(self, text):
-        if text:
-            self.text_written.emit(text)
-            if self.original_stream:
-                self.original_stream.write(text)
+        # Accept both str and bytes; convert bytes to str for the Qt signal
+        if not text:
+            return
+
+        # Decode bytes/bytearray to str using original stream encoding when possible
+        encoding = getattr(self.original_stream, "encoding", None) or "utf-8"
+        if isinstance(text, (bytes, bytearray)):
+            try:
+                text_str = text.decode(encoding, errors="replace")
+            except Exception:
+                # Fallback to a safe string representation
+                try:
+                    text_str = text.decode("utf-8", errors="replace")
+                except Exception:
+                    text_str = str(text)
+        else:
+            # Ensure we always emit a str for the Signal
+            text_str = str(text)
+
+        # Emit to GUI console (expects str)
+        try:
+            self.text_written.emit(text_str)
+        except Exception:
+            # If signal emission fails, continue silently
+            pass
+
+        # Forward to original stream. Try to write a str first; if that raises
+        # a TypeError (original stream expects bytes), write bytes instead.
+        if self.original_stream:
+            try:
+                self.original_stream.write(text_str)
                 self.original_stream.flush()
+            except TypeError:
+                # Try writing raw bytes if available
+                try:
+                    raw = text if isinstance(text, (bytes, bytearray)) else text_str.encode(encoding, errors="replace")
+                    self.original_stream.write(raw)
+                    self.original_stream.flush()
+                except Exception:
+                    # Give up silently; forwarding output is best-effort
+                    pass
+            except Exception:
+                # Non-TypeError exceptions from underlying stream should not crash the app
+                try:
+                    self.original_stream.flush()
+                except Exception:
+                    pass
 
     def flush(self):
         if self.original_stream:
@@ -71,12 +118,13 @@ class ConsoleWindow(QDialog):
         # Dark theme styling
         self.console_text.setStyleSheet("""
             QPlainTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid #333;
-                selection-background-color: #264f78;
+                background-color: %s;
+                color: %s;
+                border: 1px solid %s;
+                border-radius: 6px;
+                selection-background-color: %s;
             }
-        """)
+        """ % (APP_BG, TEXT, BORDER, ACCENT))
 
         layout.addWidget(self.console_text)
 
@@ -298,7 +346,7 @@ from video_background import video_background, HAS_CV2
 
 
 class ThemeEditorWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, port=4241):
         super().__init__()
         self.theme_path = None
         self.theme_name = "Untitled Theme"
@@ -307,6 +355,15 @@ class ThemeEditorWindow(QMainWindow):
         self.device = None
         self.live_preview_timer = None
         self.target_fps = settings.get_setting("target_fps", 30)
+
+        # Destino del proyecto activo (Web / LCD). En el arranque NO se aplica
+        # nada (el webserver solo se levanta bajo demanda al crear/abrir un
+        # proyecto con target Web).
+        self._web_port = int(port or 4241)
+        self.project_targets = dict(
+            settings.get_setting("project_targets", {"web": True, "lcd": True}))
+        lcd_default = settings.get_setting("lcd_model")
+        self.project_lcd_id = lcd_default if lcd_default else None
 
         # Performance monitoring
         self.frame_times = []
@@ -341,6 +398,16 @@ class ThemeEditorWindow(QMainWindow):
         self._render_thread = None
         self._render_thread_running = False
 
+        # Ruta de envío "alta" (device con use_send_thread y target_fps>=24):
+        # hilo de envío dedicado + pipeline, mantiene la GUI libre de bloqueos USB.
+        self._send_thread = None
+        self._send_thread_running = False
+        self._fast_delivery = False
+        self._device_error_occurred = False
+        # Subsamping que aplicará image_to_jpeg según el perfil del device conectado
+        # (LY: 0 en Low/4:4:4, 1 en High/4:2:2). Sin device -> 0 (igual que siempre).
+        self._delivery_subsampling = 0
+
         # Sleep/wake handling - auto-reconnect
         self._reconnect_timer = None
         self._reconnect_attempts = 0
@@ -369,6 +436,10 @@ class ThemeEditorWindow(QMainWindow):
         self.add_default_elements()
         self.setup_performance_monitor()
 
+        # El caché JPEG que alimenta el webserver ya NO se arranca aquí: se
+        # levanta bajo demanda junto al servidor cuando el proyecto tiene
+        # target Web (ver apply_targets / _set_webserver_state).
+
         # Load default preset if one is set
         self.load_default_preset_on_startup()
 
@@ -379,6 +450,7 @@ class ThemeEditorWindow(QMainWindow):
         """Attempt to connect to display automatically on startup."""
         if self.connect_display(show_error=False):
             self.status_bar.showMessage("Auto-connected to display")
+            self._set_device_status(True)
         else:
             self.status_bar.showMessage("Display not found - click Connect when ready")
 
@@ -465,6 +537,7 @@ class ThemeEditorWindow(QMainWindow):
                 self._reconnect_timer = None
             self._was_connected_before_sleep = False
             self.status_bar.showMessage("Reconnected to display after wake")
+            self._set_device_status(True)
             print("[Power] Reconnected successfully")
         else:
             # Keep trying with backoff (no max limit - will retry indefinitely)
@@ -476,6 +549,9 @@ class ThemeEditorWindow(QMainWindow):
         default_preset_data = self.presets_panel.get_default_preset_data()
         if default_preset_data:
             # Load without saving undo state (it's startup)
+            # Match preview/LCD orientation to the default preset's dimensions
+            self._apply_theme_orientation(default_preset_data)
+
             self.theme_name = default_preset_data.get("name", "Untitled")
             self.theme_name_edit.setText(self.theme_name)
             self.background_color = default_preset_data.get("background_color", "#0f0f19")
@@ -500,7 +576,7 @@ class ThemeEditorWindow(QMainWindow):
 
     def setup_ui(self):
         self.setWindowTitle("Thermal Engine")
-        self.setMinimumSize(1200, 700)
+        self.setMinimumSize(1280, 740)
 
         # Set window icon (en Linux se prefiere el PNG; el .ico como alternativa)
         icon_candidates = ["icon.ico", "icon.png"]
@@ -514,106 +590,180 @@ class ThemeEditorWindow(QMainWindow):
                 self.setWindowIcon(QIcon(icon_path))
                 break
 
+        # ----- Menu bar (32px) with app logo at the left corner -----
+        logo = LogoLabel("Thermal Engine")
+        self.menuBar().setCornerWidget(logo, Qt.Corner.TopLeftCorner)
+
+        # ----- Toolbar (44px) -----
+        toolbar = QToolBar()
+        toolbar.setObjectName("mainToolbar")
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+
+        self.theme_name_edit = QLineEdit(self.theme_name)
+        self.theme_name_edit.setObjectName("themeNameEdit")
+        self.theme_name_edit.setMinimumWidth(170)
+        self.theme_name_edit.setMaximumWidth(320)
+        self.theme_name_edit.textChanged.connect(self.on_theme_name_changed)
+        toolbar.addWidget(self.theme_name_edit)
+
+        self.quick_save_btn = QPushButton("Save")
+        self.quick_save_btn.clicked.connect(self.quick_save)
+        self.quick_save_btn.setToolTip("Save to presets folder (Ctrl+S)")
+        toolbar.addWidget(self.quick_save_btn)
+
+        export_btn = QPushButton("Export")
+        export_btn.clicked.connect(self.export_image)
+        export_btn.setToolTip("Export the theme as an image")
+        toolbar.addWidget(export_btn)
+
+        toolbar.addSeparator()
+
+        toolbar.addWidget(QLabel("Background"))
+        self.bg_color_btn = QPushButton()
+        self.bg_color_btn.setFixedSize(30, 26)
+        self.bg_color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.bg_color_btn.setToolTip("Background color")
+        self.bg_color_btn.setStyleSheet(
+            f"background-color: {self.background_color}; border: 1px solid {BORDER}; border-radius: 5px;"
+        )
+        self.bg_color_btn.clicked.connect(self.choose_background_color)
+        toolbar.addWidget(self.bg_color_btn)
+
+        toolbar.addWidget(QLabel("Video"))
+        self.video_btn = QPushButton("None")
+        self.video_btn.clicked.connect(self.choose_video_background)
+        toolbar.addWidget(self.video_btn)
+
+        self.video_fit_combo = QComboBox()
+        self.video_fit_combo.addItem("Fit Height", "fit_height")
+        self.video_fit_combo.addItem("Fit Width", "fit_width")
+        self.video_fit_combo.currentIndexChanged.connect(self.on_video_fit_changed)
+        self.video_fit_combo.setEnabled(False)
+        toolbar.addWidget(self.video_fit_combo)
+
+        toolbar_spacer = QWidget()
+        toolbar_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(toolbar_spacer)
+
+        # ----- Central area -----
         central = QWidget()
+        central.setObjectName("centralRoot")
         self.setCentralWidget(central)
 
         main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        # Left panel with tabs for Elements and Presets
+        # Left panel (234px) with Elements / Presets tabs
         left_panel = QTabWidget()
-        left_panel.setMaximumWidth(340)
+        left_panel.setObjectName("sidePanel")
+        left_panel.setFixedWidth(234)
 
         self.element_list = ElementListPanel()
         left_panel.addTab(self.element_list, "Elements")
 
         self.presets_panel = PresetsPanel()
-        left_panel.addTab(self.presets_panel, "Presets")
+        left_panel.addTab(self.presets_panel, "Template")
 
-        splitter.addWidget(left_panel)
+        main_layout.addWidget(left_panel)
 
-        canvas_container = QWidget()
-        canvas_layout = QVBoxLayout(canvas_container)
+        # ----- Center column: canvas sub-toolbar (36px) + scrollable canvas -----
+        center_col = QWidget()
+        center_col.setObjectName("canvasHost")
+        center_layout = QVBoxLayout(center_col)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(0)
 
-        name_layout = QHBoxLayout()
-        name_layout.addWidget(QLabel("Theme Name:"))
-        self.theme_name_edit = QLineEdit(self.theme_name)
-        self.theme_name_edit.textChanged.connect(self.on_theme_name_changed)
-        name_layout.addWidget(self.theme_name_edit)
+        canvas_bar = QWidget()
+        canvas_bar.setObjectName("canvasBar")
+        canvas_bar.setFixedHeight(36)
+        bar_layout = QHBoxLayout(canvas_bar)
+        bar_layout.setContentsMargins(8, 5, 10, 5)
+        bar_layout.setSpacing(4)
 
-        self.quick_save_btn = QPushButton("Save")
-        self.quick_save_btn.setFixedWidth(60)
-        self.quick_save_btn.clicked.connect(self.quick_save)
-        self.quick_save_btn.setToolTip("Save to presets folder (Ctrl+S)")
-        name_layout.addWidget(self.quick_save_btn)
+        self.fit_btn = QToolButton()
+        self.fit_btn.setObjectName("zoomButton")
+        self.fit_btn.setText("Fit")
+        self.fit_btn.clicked.connect(self.fit_canvas)
+        self.fit_btn.setToolTip("Fit the LCD preview to the view")
+        bar_layout.addWidget(self.fit_btn)
 
-        name_layout.addWidget(QLabel("Background:"))
-        self.bg_color_btn = QPushButton()
-        self.bg_color_btn.setFixedSize(30, 25)
-        self.bg_color_btn.setStyleSheet(f"background-color: {self.background_color};")
-        self.bg_color_btn.clicked.connect(self.choose_background_color)
-        name_layout.addWidget(self.bg_color_btn)
+        self.zoom_out_btn = QToolButton()
+        self.zoom_out_btn.setObjectName("zoomButton")
+        self.zoom_out_btn.setText("\u2212")
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
+        bar_layout.addWidget(self.zoom_out_btn)
 
-        name_layout.addWidget(QLabel("Video:"))
-        self.video_btn = QPushButton("None")
-        self.video_btn.setFixedWidth(80)
-        self.video_btn.clicked.connect(self.choose_video_background)
-        name_layout.addWidget(self.video_btn)
+        self.zoom_value_label = QLabel()
+        self.zoom_value_label.setObjectName("zoomValue")
+        self.zoom_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        bar_layout.addWidget(self.zoom_value_label)
 
-        self.video_fit_combo = QComboBox()
-        self.video_fit_combo.addItem("Fit Height", "fit_height")
-        self.video_fit_combo.addItem("Fit Width", "fit_width")
-        self.video_fit_combo.setFixedWidth(90)
-        self.video_fit_combo.currentIndexChanged.connect(self.on_video_fit_changed)
-        self.video_fit_combo.setEnabled(False)
-        name_layout.addWidget(self.video_fit_combo)
+        self.zoom_in_btn = QToolButton()
+        self.zoom_in_btn.setObjectName("zoomButton")
+        self.zoom_in_btn.setText("+")
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        bar_layout.addWidget(self.zoom_in_btn)
 
-        self.clear_video_btn = QPushButton("Clear")
-        self.clear_video_btn.setFixedWidth(50)
-        self.clear_video_btn.clicked.connect(self.clear_video_background)
-        self.clear_video_btn.setEnabled(False)
-        name_layout.addWidget(self.clear_video_btn)
+        bar_layout.addSpacing(12)
 
-        name_layout.addStretch()
+        self.device_status_dot = QLabel()
+        self.device_status_dot.setObjectName("deviceStatusDot")
+        self.device_status_dot.setFixedSize(10, 10)
+        self.device_status_dot.setStyleSheet(f"background-color: {DOT_OFF}; border-radius: 5px;")
+        bar_layout.addWidget(self.device_status_dot)
 
-        canvas_layout.addLayout(name_layout)
+        self.device_status_label = QLabel("Disconnected")
+        self.device_status_label.setStyleSheet("color: %s;" % TEXT_DIM)
+        bar_layout.addWidget(self.device_status_label)
+
+        bar_layout.addStretch(1)
+
+        center_layout.addWidget(canvas_bar)
+
+        self.canvas_scroll = CanvasScrollArea()
+        self.canvas_scroll.setObjectName("canvasScroll")
+        self.canvas_scroll.setWidgetResizable(False)
+        self.canvas_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.canvas_scroll.viewport_resized.connect(self._on_canvas_viewport_resized)
 
         self.canvas = CanvasPreview()
+        self.canvas_scroll.setWidget(self.canvas)
 
-        canvas_wrapper = QHBoxLayout()
-        canvas_wrapper.addStretch()
-        canvas_wrapper.addWidget(self.canvas)
-        canvas_wrapper.addStretch()
+        center_layout.addWidget(self.canvas_scroll, 1)
 
-        canvas_layout.addLayout(canvas_wrapper)
-        canvas_layout.addStretch()
+        main_layout.addWidget(center_col, 1)
 
-        splitter.addWidget(canvas_container)
-
+        # Right panel (260px) - properties
         self.properties_panel = PropertiesPanel()
-        self.properties_panel.setMinimumWidth(280)
-        self.properties_panel.setMaximumWidth(320)
-        splitter.addWidget(self.properties_panel)
+        self.properties_panel.setFixedWidth(260)
+        self.properties_panel.setMinimumHeight(0)
+        main_layout.addWidget(self.properties_panel)
 
-        splitter.setSizes([200, 650, 300])
-
-        main_layout.addWidget(splitter)
-
+        # ----- Status bar (24px) -----
         self.status_bar = QStatusBar()
+        self.status_bar.setFixedHeight(24)
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
 
-        # Performance indicator widgets
         self.perf_indicator = QLabel()
+        self.perf_indicator.setObjectName("perfIndicator")
         self.perf_indicator.setFixedWidth(20)
-        self.perf_indicator.setStyleSheet("background-color: #444; border-radius: 4px;")
+        self.perf_indicator.setStyleSheet("background-color: #444;")
 
         self.perf_label = QLabel("FPS: -- | CPU: --%")
-        self.perf_label.setStyleSheet("padding: 2px 8px;")
+        self.perf_label.setObjectName("statusMetric")
+        mono = QFont("DejaVu Sans Mono", 9)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        self.perf_label.setFont(mono)
 
         self.status_bar.addPermanentWidget(self.perf_indicator)
         self.status_bar.addPermanentWidget(self.perf_label)
+
+        # Initial fit once the window is laid out
+        QTimer.singleShot(10, self.fit_canvas)
 
     def setup_console(self):
         """Setup console output capture and window."""
@@ -640,9 +790,9 @@ class ThemeEditorWindow(QMainWindow):
 
         file_menu = menubar.addMenu("File")
 
-        new_action = QAction("New Theme", self)
+        new_action = QAction("New Project...", self)
         new_action.setShortcut(QKeySequence.StandardKey.New)
-        new_action.triggered.connect(self.new_theme)
+        new_action.triggered.connect(self.new_project)
         file_menu.addAction(new_action)
 
         open_action = QAction("Open Theme...", self)
@@ -705,6 +855,7 @@ class ThemeEditorWindow(QMainWindow):
         display_menu.addSeparator()
 
         fps_menu = display_menu.addMenu("Frame Rate")
+        self.fps_menu = fps_menu
         self.fps_actions = []
         for fps in [10, 20, 30, 60]:
             action = QAction(f"{fps} FPS", self)
@@ -774,6 +925,42 @@ class ThemeEditorWindow(QMainWindow):
         self.presets_panel.preset_selected.connect(self.load_preset)
         self.presets_panel.preset_saved.connect(self.on_preset_saved)
 
+    # ------------------------------------------------------------------
+    # Canvas zoom controls (sub-toolbar over the canvas)
+    # ------------------------------------------------------------------
+    def fit_canvas(self):
+        if not hasattr(self, "canvas_scroll") or self.canvas_scroll is None:
+            return
+        self._zoom_manual = False
+        vp = self.canvas_scroll.viewport()
+        scale = self.canvas.fit_scale_for(vp.width(), vp.height())
+        self.canvas.set_zoom_scale(scale)
+        self._update_zoom_label()
+
+    def zoom_in(self):
+        self._zoom_manual = True
+        self.canvas.set_zoom_scale(self.canvas.scale * 1.25)
+        self._update_zoom_label()
+
+    def zoom_out(self):
+        self._zoom_manual = True
+        self.canvas.set_zoom_scale(self.canvas.scale / 1.25)
+        self._update_zoom_label()
+
+    def _update_zoom_label(self):
+        self.zoom_value_label.setText(f"{self.canvas.zoom_percent()}%")
+
+    def _on_canvas_viewport_resized(self):
+        if not getattr(self, "_zoom_manual", False):
+            self.fit_canvas()
+
+    def _set_device_status(self, connected):
+        if not hasattr(self, "device_status_dot") or self.device_status_dot is None:
+            return
+        color = DOT_ON if connected else DOT_OFF
+        self.device_status_dot.setStyleSheet(f"background-color: {color}; border-radius: 5px;")
+        self.device_status_label.setText("Connected" if connected else "Disconnected")
+
     def setup_performance_monitor(self):
         """Setup timer to update performance stats."""
         self.perf_update_timer = QTimer(self)
@@ -820,17 +1007,27 @@ class ThemeEditorWindow(QMainWindow):
         except:
             mem_str = ""
 
+        # GPU utilization comes from the shared sensor pipeline (NVML / nvidia-smi),
+        # already polled and smoothed by the sensors background thread.
+        gpu_str = ""
+        try:
+            sensor_data = get_cached_sensors()
+            gpu = sensor_data.get("gpu_percent", 0) or 0
+            gpu_str = f" | GPU: {gpu:.0f}%"
+        except Exception:
+            gpu_str = ""
+
         if self.device:
             mode_str = " [OD]" if self._overdrive_mode else ""
             skip_str = f" Skip:{self._frames_skipped}" if self._overdrive_mode and self._frames_skipped > 0 else ""
             self.perf_label.setText(
-                f"FPS: {actual_fps:.1f}/{self.target_fps}{mode_str} | CPU: {cpu_percent:.1f}%{mem_str} | {status}{skip_str}"
+                f"FPS: {actual_fps:.1f}/{self.target_fps}{mode_str} | CPU: {cpu_percent:.1f}%{mem_str}{gpu_str} | {status}{skip_str}"
             )
             # Reset skip counter periodically
             if self._overdrive_mode:
                 self._frames_skipped = 0
         else:
-            self.perf_label.setText(f"FPS: -- | CPU: --%{mem_str}")
+            self.perf_label.setText(f"FPS: -- | CPU: --%{mem_str}{gpu_str}")
 
         if self.device and actual_fps < self.target_fps * 0.7 and actual_fps > 0:
             self.status_bar.showMessage(
@@ -1008,6 +1205,9 @@ class ThemeEditorWindow(QMainWindow):
         """Load a preset into the editor."""
         self.save_undo_state()
 
+        # Match preview/LCD orientation to the theme's stored display dimensions
+        self._apply_theme_orientation(preset_data)
+
         self.theme_name = preset_data.get("name", "Untitled")
         self.theme_name_edit.setText(self.theme_name)
         self.background_color = preset_data.get("background_color", "#0f0f19")
@@ -1030,7 +1230,8 @@ class ThemeEditorWindow(QMainWindow):
             video_background.clear_video()
         self._update_video_ui()
 
-        self.status_bar.showMessage(f"Loaded preset: {self.theme_name}")
+        self.fit_canvas()
+        self.status_bar.showMessage(f"Loaded template: {self.theme_name}")
 
     def on_preset_saved(self, preset_name):
         """Called when a preset is saved."""
@@ -1038,11 +1239,12 @@ class ThemeEditorWindow(QMainWindow):
 
     def save_as_preset(self):
         """Save current theme as a preset with thumbnail snapshot."""
+        bound_w, bound_h = self._effective_canvas_dims()
         theme_data = {
             "name": self.theme_name,
             "background_color": self.background_color,
-            "display_width": DISPLAY_WIDTH,
-            "display_height": DISPLAY_HEIGHT,
+            "display_width": bound_w,
+            "display_height": bound_h,
             "elements": [e.to_dict() for e in self.elements],
             "video_background": video_background.to_dict()
         }
@@ -1102,7 +1304,6 @@ class ThemeEditorWindow(QMainWindow):
             self.video_btn.setText(filename)
             self.video_btn.setToolTip(path)
             self.video_fit_combo.setEnabled(True)
-            self.clear_video_btn.setEnabled(True)
 
             # Start loading with progress callback
             self.status_bar.showMessage(f"Loading video: {os.path.basename(path)}...")
@@ -1165,7 +1366,6 @@ class ThemeEditorWindow(QMainWindow):
         self.video_btn.setText("None")
         self.video_btn.setToolTip("")
         self.video_fit_combo.setEnabled(False)
-        self.clear_video_btn.setEnabled(False)
         self.canvas.update()
         self.status_bar.showMessage("Video background cleared")
 
@@ -1178,7 +1378,6 @@ class ThemeEditorWindow(QMainWindow):
             self.video_btn.setText(filename)
             self.video_btn.setToolTip(video_background.video_path)
             self.video_fit_combo.setEnabled(True)
-            self.clear_video_btn.setEnabled(True)
             # Set fit mode in combo
             idx = self.video_fit_combo.findData(video_background.fit_mode)
             if idx >= 0:
@@ -1187,7 +1386,132 @@ class ThemeEditorWindow(QMainWindow):
             self.video_btn.setText("None")
             self.video_btn.setToolTip("")
             self.video_fit_combo.setEnabled(False)
-            self.clear_video_btn.setEnabled(False)
+
+    # --------------------------------------------------- target Web / LCD ---
+    def apply_targets(self, targets, lcd_model=None):
+        """Aplica el destino del proyecto activo (Web / LCD) y el modelo LCD.
+
+        - Web  -> levanta el webserver + el caché JPEG que lo alimenta.
+        - !Web -> lo detiene (ahorro de recursos con proyectos solo LCD).
+        - LCD  -> recuerda el modelo; el perfil de entrega (tasas del menú
+          Frame Rate) se resuelve con la capacidad del panel y el estado del
+          benchmark persistido.
+        """
+        targets = {
+            "web": bool(targets.get("web", True)),
+            "lcd": bool(targets.get("lcd", True)),
+        }
+        self.project_targets = targets
+        if lcd_model:
+            self.project_lcd_id = lcd_model
+            settings.set_setting("lcd_model", lcd_model)
+
+        self._set_webserver_state(targets["web"])
+        self._resolve_device_frame_options()
+        self._apply_delivery_profile()
+        if targets["web"]:
+            if targets["lcd"]:
+                self.status_bar.showMessage(
+                    "Proyecto Web + LCD (webserver activo)")
+            else:
+                self.status_bar.showMessage("Proyecto Web (webserver activo)")
+        else:
+            self.status_bar.showMessage(
+                "Proyecto LCD (webserver apagado)")
+        return targets
+
+    def _set_webserver_state(self, web_active):
+        """Levanta o detiene el webserver y su caché JPEG según el target Web."""
+        try:
+            from webserver import start_server, stop_server, is_running
+        except Exception as e:
+            print(f"[Web] webserver import failed: {e}")
+            return
+        try:
+            if web_active:
+                if not is_running():
+                    start_server(self, host='0.0.0.0', port=self._web_port)
+                self._start_jpeg_cache_timer(500)
+            else:
+                if is_running():
+                    stop_server()
+                self._stop_jpeg_cache_timer()
+        except Exception as e:
+            print(f"[Web] webserver state change failed: {e}")
+
+    def _resolve_device_frame_options(self):
+        """Deriva las tasas de refresco del device conectado a partir del
+        catálogo LCD y del resultado del benchmark persistido.
+
+        Escribe frame_rate_options como atributo de instancia del device; el
+        menú Frame Rate se reconstruye después desde ahí.
+        """
+        device = self.device
+        if device is None:
+            return
+        model = find_lcd(getattr(device, "vid", None),
+                         getattr(device, "pid", None))
+        if model is None:
+            return
+        bench = (settings.get_setting("lcd_benchmarks", {}) or {}).get(
+            model.bench_key, {})
+        device.frame_rate_options = model.frame_rate_options(
+            bool(bench.get("passed")))
+
+    def _run_lcd_benchmark(self, model):
+        """Ejecuta el Test LCD reutilizando el device conectado (pausando el
+        envío en vivo) o abriendo uno propio si no hay conexión."""
+        was_connected = self.device is not None
+        dev = getattr(self, "_ly_device", None) if was_connected else None
+        if was_connected:
+            self.stop_continuous_send()
+        try:
+            return run_display_benchmark(device=dev)
+        finally:
+            if was_connected:
+                self.start_continuous_send()
+
+    def _refresh_profile_after_benchmark(self, result):
+        """Tras persistir un resultado de benchmark, re-resuelve las tasas y
+        reconstruye el menú Frame Rate según corresponda."""
+        self._resolve_device_frame_options()
+        self._apply_delivery_profile()
+        if result["passed"]:
+            msg = ("Benchmark aprobado: tasas extendidas habilitadas "
+                   f"({result['fps_fast']} FPS medidos)")
+        else:
+            msg = ("Benchmark no superado: el panel queda en tasas base "
+                   f"({result['fps_fast']} FPS medidos)")
+        self.status_bar.showMessage(msg)
+
+    def new_project(self):
+        """File → New Project: asistente de 2 pasos (Web / LCD + tipo de LCD)."""
+        from new_project import NewProjectDialog
+        from presets import get_preset_data
+        dlg = NewProjectDialog(
+            self,
+            web_checked=self.project_targets.get("web", True),
+            lcd_checked=self.project_targets.get("lcd", True),
+            lcd_model=self.project_lcd_id,
+            benchmark_runner=self._run_lcd_benchmark,
+            refresh_hook=self._refresh_profile_after_benchmark,
+        )
+        if dlg.exec():
+            data = dlg.data()
+            self.new_theme()
+            self.apply_targets(data, lcd_model=data.get("lcd_model"))
+
+            template = data.get("template")
+            if template and template != "En blanco":
+                preset_data = get_preset_data(template)
+                if preset_data:
+                    self.load_preset(preset_data)
+
+            name = data.get("name") or "Untitled Project"
+            self.theme_name = name
+            self.theme_name_edit.setText(name)
+            self.status_bar.showMessage(
+                f"New project created: {name}", 3000)
 
     def new_theme(self):
         self.theme_path = None
@@ -1222,6 +1546,9 @@ class ThemeEditorWindow(QMainWindow):
                         f"Theme file has invalid format:\n{', '.join(errors[:5])}")
                     return
 
+                # Match preview/LCD orientation to the theme's stored dimensions
+                self._apply_theme_orientation(data)
+
                 self.theme_name = data.get("name", "Untitled")
                 self.theme_name_edit.setText(self.theme_name)
                 self.background_color = data.get("background_color", "#0f0f19")
@@ -1244,6 +1571,26 @@ class ThemeEditorWindow(QMainWindow):
                     self._update_video_ui()
 
                 self.theme_path = path
+                self.fit_canvas()
+
+                # Aplicar el destino del proyecto (Web/LCD) guardado en el
+                # theme. Los themes legados sin "targets" se tratan como
+                # Web+LCD (comportamiento original).
+                targets = data.get("targets")
+                if isinstance(targets, dict):
+                    target_data = {
+                        "web": bool(targets.get("web", True)),
+                        "lcd": bool(targets.get("lcd", True)),
+                    }
+                elif isinstance(targets, list):
+                    target_data = {
+                        "web": "web" in targets,
+                        "lcd": "lcd" in targets,
+                    }
+                else:
+                    target_data = {"web": True, "lcd": True}
+                self.apply_targets(target_data, data.get("lcd_model"))
+
                 self.status_bar.showMessage(f"Opened: {path}")
 
             except Exception as e:
@@ -1265,13 +1612,16 @@ class ThemeEditorWindow(QMainWindow):
 
     def _save_to_path(self, path):
         try:
+            bound_w, bound_h = self._effective_canvas_dims()
             data = {
                 "name": self.theme_name,
                 "background_color": self.background_color,
-                "display_width": DISPLAY_WIDTH,
-                "display_height": DISPLAY_HEIGHT,
+                "display_width": bound_w,
+                "display_height": bound_h,
                 "elements": [e.to_dict() for e in self.elements],
-                "video_background": video_background.to_dict()
+                "video_background": video_background.to_dict(),
+                "targets": dict(self.project_targets),
+                "lcd_model": self.project_lcd_id,
             }
 
             with open(path, 'w') as f:
@@ -1441,6 +1791,8 @@ class ThemeEditorWindow(QMainWindow):
                 psutil.cpu_percent(interval=None)
                 self.frame_times = []
                 self.last_frame_time = 0
+                self._resolve_device_frame_options()
+                self._apply_delivery_profile()
                 self.start_continuous_send()
                 if self._reconnect_timer:
                     self._reconnect_timer.stop()
@@ -1448,6 +1800,7 @@ class ThemeEditorWindow(QMainWindow):
                 self._was_connected_before_sleep = False
                 self._reconnect_attempts = 0
                 self.status_bar.showMessage("Connected to LY display (0416:5408) - sending frames")
+                self._set_device_status(True)
                 return True
         except ImportError:
             print("[LY] device_ly.py not found, skipping LY probe")
@@ -1485,6 +1838,7 @@ class ThemeEditorWindow(QMainWindow):
             psutil.cpu_percent(interval=None)
             self.frame_times = []
             self.last_frame_time = 0
+            self._apply_delivery_profile()
             self.start_continuous_send()
             if self._reconnect_timer:
                 self._reconnect_timer.stop()
@@ -1492,6 +1846,7 @@ class ThemeEditorWindow(QMainWindow):
             self._was_connected_before_sleep = False
             self._reconnect_attempts = 0
             self.status_bar.showMessage("Connected to HID display - sending frames")
+            self._set_device_status(True)
             return True
 
         except Exception as e:
@@ -1532,11 +1887,15 @@ class ThemeEditorWindow(QMainWindow):
         self.frame_times = []
         self.last_frame_time = 0
 
+        # Restaurar perfil legado (device None): menú 10/20/30/60, 4:4:4, sin hilo.
+        self._apply_delivery_profile()
+
         # Update button text to "Connect"
         try:
             self.connect_action.setText("Connect")
             self.send_action.setEnabled(False)
             self.status_bar.showMessage("Disconnected")
+            self._set_device_status(False)
         except:
             pass  # UI might not be available during shutdown
 
@@ -1559,6 +1918,7 @@ class ThemeEditorWindow(QMainWindow):
             interval = 1000 // self.target_fps
             self.live_preview_timer.setInterval(interval)
 
+        self._update_delivery_state()
         self.status_bar.showMessage(f"Frame rate set to {fps} FPS")
 
     def _show_60fps_warning(self):
@@ -1608,6 +1968,130 @@ class ThemeEditorWindow(QMainWindow):
             return True
         return False
 
+    # --- Perfil de entrega según capacidades del device conectado ---
+    # Cada driver puede declarar (clase de device_ly.LYDevice, p.ej.):
+    #   frame_rate_options=[12,24], use_send_thread=True,
+    #   fast_subsampling=1, slow_subsampling=0
+    # Si un driver no declara nada, se usa el legado: Frame Rate 10/20/30/60,
+    # envío síncrono en el timer y subsampling 4:4:4 (comportamiento original).
+    # Esto permite que un futuro panel con soporte real de 30/60fps vuelva a
+    # mostrar y usar todo el abanico sin cambios de código adicionales.
+
+    def _apply_delivery_profile(self):
+        """Aplicar el perfil del device conectado (menú, clamp de fps, hilos).
+
+        Se llama al conectar y al desconectar; con self.device None restaura el
+        comportamiento legado.
+        """
+        if not hasattr(self, "fps_menu"):
+            return
+
+        # Clamp: si el target_fps persistido no existe en este device (p.ej. 20 y
+        # este panel ofrece solo 12/24), aproxima al más cercano.
+        if self.device is not None:
+            options = getattr(self.device, "frame_rate_options", None)
+            if options:
+                if self.target_fps not in options:
+                    resolved = min(options, key=lambda f: abs(f - self.target_fps))
+                    self.set_target_fps(resolved)
+
+        self._rebuild_frame_rate_menu()
+        self._update_delivery_state()
+
+    def _rebuild_frame_rate_menu(self):
+        """Reconstruye las opciones del submenú Frame Rate a partir de las
+        capacidades del device conectado (legado 10/20/30/60 sin device)."""
+        fps_menu = self.fps_menu
+        fps_menu.clear()
+        self.fps_actions = []
+        if self.device is not None:
+            options = getattr(self.device, "frame_rate_options", None)
+        else:
+            options = None
+        for fps in options or [10, 20, 30, 60]:
+            action = QAction(f"{fps} FPS", self)
+            action.setCheckable(True)
+            action.setChecked(fps == self.target_fps)
+            action.triggered.connect(lambda checked, f=fps: self.set_target_fps(f))
+            fps_menu.addAction(action)
+            self.fps_actions.append(action)
+        fps_menu.addSeparator()
+        fps_menu.addAction(self.overdrive_action)
+
+    def _update_delivery_state(self):
+        """Decide si la ruta de envío es la 'alta' (hilo dedicado) y el
+        subsampling a usar, según el device conectado y el target_fps."""
+        use_thread = (
+            self.device is not None
+            and getattr(self.device, "use_send_thread", False)
+        )
+        new_fast = bool(use_thread and self.target_fps >= 24)
+
+        if new_fast != self._fast_delivery:
+            if new_fast:
+                # Timer activo => arranca ahora los hilos; si aún no (caso
+                # connect), start_continuous_send() los arrancará después.
+                if self.live_preview_timer is not None and self.live_preview_timer.isActive():
+                    self._start_render_thread()
+                    self._start_send_thread()
+            else:
+                self._stop_send_thread()
+                if not self._overdrive_mode:
+                    self._stop_render_thread()
+        self._fast_delivery = new_fast
+
+        if self.device is not None:
+            self._delivery_subsampling = (
+                getattr(self.device, "fast_subsampling", 0)
+                if new_fast
+                else getattr(self.device, "slow_subsampling", 0)
+            )
+        else:
+            self._delivery_subsampling = 0
+
+    def _start_send_thread(self):
+        """Arranca el hilo consumidor que envía el último JPEG al dispositivo."""
+        if self._send_thread and self._send_thread.is_alive():
+            return
+        self._send_thread_running = True
+        self._send_thread = threading.Thread(target=self._send_thread_loop, daemon=True)
+        self._send_thread.start()
+
+    def _stop_send_thread(self):
+        self._send_thread_running = False
+        if self._send_thread:
+            self._send_thread.join(timeout=1.0)
+            self._send_thread = None
+
+    def _send_thread_loop(self):
+        """Consumidor: envía siempre el frame más reciente del buffer.
+
+        El propio send_frame del device bloquea hasta que el panel procesa el
+        frame (ACK), así que este hilo se pace él solo (~24fps en 4:2:2) sin
+        necesidad de sleep. Los frames intermedios se descartan implícitamente:
+        cada iteración toma lo último disponible.
+        """
+        while self._send_thread_running:
+            try:
+                with self._frame_buffer_lock:
+                    jpeg = self._frame_buffer
+                if jpeg is not None:
+                    self.send_jpeg_frame(jpeg)
+                    self.record_frame_time()
+                else:
+                    time.sleep(0.002)
+            except Exception as e:
+                err = str(e).lower()
+                if "device" in err or "hid" in err or "write" in err or "closed" in err:
+                    # El manejo de desconexión/reconexión debe ejecutarse en la
+                    # GUI: lo señala y el tick del timer lo procesa en el hilo
+                    # principal.
+                    self._device_error_occurred = True
+                    time.sleep(0.1)
+                else:
+                    print(f"[Send Thread] Error: {e}")
+                    time.sleep(0.02)
+
     def toggle_overdrive_mode(self, checked):
         """Toggle overdrive mode for smoother frame delivery."""
         self._overdrive_mode = checked
@@ -1617,22 +2101,26 @@ class ThemeEditorWindow(QMainWindow):
             self._start_render_thread()
             self.status_bar.showMessage("Overdrive mode enabled - threaded rendering active")
         else:
-            self._stop_render_thread()
+            # No parar el hilo productor si la ruta alta (fast) también lo usa.
+            if not self._fast_delivery:
+                self._stop_render_thread()
             self.status_bar.showMessage("Overdrive mode disabled")
 
-    def toggle_vertical_mode(self, checked):
-        """Toggle vertical mode: rotates both the live preview and the LCD output 90 degrees."""
-        self._vertical_mode = checked
-        settings.set_setting("vertical_mode", checked)
+    def _apply_vertical_mode(self, enabled):
+        """Apply a vertical/portrait orientation across preview, properties, LCD output and settings."""
+        self._vertical_mode = enabled
+        settings.set_setting("vertical_mode", enabled)
 
-        # Update the preview widget orientation immediately
         if hasattr(self, "canvas") and hasattr(self.canvas, "set_vertical_mode"):
-            self.canvas.set_vertical_mode(checked)
+            self.canvas.set_vertical_mode(enabled)
+
+        if hasattr(self, "vertical_mode_action"):
+            self.vertical_mode_action.setChecked(enabled)
 
         # Update the property panel's X/Y/W/H spin box ranges to match the new
         # canvas orientation - otherwise Y stays capped at the old DISPLAY_HEIGHT.
         if hasattr(self, "properties_panel") and hasattr(self.properties_panel, "set_vertical_mode"):
-            self.properties_panel.set_vertical_mode(checked)
+            self.properties_panel.set_vertical_mode(enabled)
             # Re-populate the currently selected element's fields with the (now
             # correctly-ranged) spin boxes so displayed values stay in sync.
             if getattr(self.properties_panel, "current_element", None) is not None:
@@ -1647,10 +2135,33 @@ class ThemeEditorWindow(QMainWindow):
         if self.device:
             self.send_frame_with_sensors()
 
-        if checked:
+        if enabled:
             self.status_bar.showMessage("Vertical mode enabled - preview and LCD output rotated 90 degrees")
         else:
             self.status_bar.showMessage("Vertical mode disabled")
+
+    def _effective_canvas_dims(self):
+        """Return the effective logical canvas dimensions for the current orientation."""
+        if getattr(self, "_vertical_mode", False):
+            return DISPLAY_HEIGHT, DISPLAY_WIDTH
+        return DISPLAY_WIDTH, DISPLAY_HEIGHT
+
+    def _apply_theme_orientation(self, data):
+        """Switch preview/LCD orientation to match a theme's stored display dimensions.
+
+        A theme whose display_height exceeds display_width is a portrait layout.
+        Themes without dimensions leave the current orientation untouched.
+        """
+        dw = data.get("display_width")
+        dh = data.get("display_height")
+        if not (isinstance(dw, int) and isinstance(dh, int)):
+            return
+        if dw > 0 and dh > 0 and dh != dw:
+            self._apply_vertical_mode(dh > dw)
+
+    def toggle_vertical_mode(self, checked):
+        """Toggle vertical mode: rotates both the live preview and the LCD output 90 degrees."""
+        self._apply_vertical_mode(bool(checked))
 
     def _start_render_thread(self):
         """Start background render thread for overdrive mode."""
@@ -1660,6 +2171,48 @@ class ThemeEditorWindow(QMainWindow):
         self._render_thread_running = True
         self._render_thread = threading.Thread(target=self._render_thread_loop, daemon=True)
         self._render_thread.start()
+
+    def _start_jpeg_cache_timer(self, interval_ms=500):
+        """Start a Qt timer that periodically renders and caches the latest JPEG frame.
+
+        This keeps _last_jpeg_data available for the webserver so it doesn't need to
+        block the Qt thread on-demand for every HTTP request.
+        """
+        try:
+            if getattr(self, '_jpeg_cache_timer', None) and self._jpeg_cache_timer.isActive():
+                return
+
+            self._jpeg_cache_timer = QTimer(self)
+
+            def tick():
+                try:
+                    # Update sensor-driven values first
+                    sensor_data = self.get_sensor_data()
+                    for element in self.elements:
+                        if element.source != 'static' and element.source in sensor_data:
+                            element.value = sensor_data[element.source]
+
+                    img = self.render_theme_image()
+                    jpeg = self.image_to_jpeg(img, quality=80)
+                    self._last_jpeg_data = jpeg
+                except Exception:
+                    # Don't let cache timer exceptions crash the GUI
+                    pass
+
+            self._jpeg_cache_timer.timeout.connect(tick)
+            self._jpeg_cache_timer.start(interval_ms)
+        except Exception:
+            pass
+
+    def _stop_jpeg_cache_timer(self):
+        """Detiene el caché JPEG del webserver (solo útil con Web activo)."""
+        timer = getattr(self, '_jpeg_cache_timer', None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            self._jpeg_cache_timer = None
 
     def _stop_render_thread(self):
         """Stop background render thread."""
@@ -1672,7 +2225,7 @@ class ThemeEditorWindow(QMainWindow):
         """Background thread that pre-renders frames."""
         while self._render_thread_running:
             try:
-                if self.device and self._overdrive_mode:
+                if self.device and (self._overdrive_mode or self._fast_delivery):
                     # Update sensor values
                     sensor_data = self.get_sensor_data()
                     for element in self.elements:
@@ -1707,9 +2260,13 @@ class ThemeEditorWindow(QMainWindow):
         self._frame_deadline = time.perf_counter()
         self._frames_skipped = 0
 
-        # Start render thread if overdrive mode
-        if self._overdrive_mode:
+        # Start render thread if overdrive mode (or fast delivery: productor)
+        if self._overdrive_mode or self._fast_delivery:
             self._start_render_thread()
+
+        # Fast delivery: hilo consumidor dedicado que envía el último frame.
+        if self._fast_delivery:
+            self._start_send_thread()
 
         if self.live_preview_timer is None:
             self.live_preview_timer = QTimer(self)
@@ -1727,14 +2284,42 @@ class ThemeEditorWindow(QMainWindow):
             self.live_preview_timer.stop()
             self.live_preview_timer = None
 
-        # Stop render thread
+        # Stop send thread (fast delivery) and render thread
+        self._stop_send_thread()
         self._stop_render_thread()
 
     def send_to_display(self):
         self.send_frame_with_sensors()
 
+    def _handle_disconnect_on_error(self, e):
+        """Desconecta y programa la reconexión automática. Debe ejecutarse en el
+        hilo de la GUI (el tick del timer en la ruta alta / el except del timer
+        en la ruta normal lo llaman)."""
+        print(f"[HID] Device error, disconnecting: {e}")
+        self.disconnect_display()
+        self._was_connected_before_sleep = True
+        self._reconnect_attempts = 0
+        self._start_reconnect_timer()
+        self.status_bar.showMessage("Display disconnected - attempting to reconnect...")
+
     def send_frame_with_sensors(self):
         if not self.device:
+            return
+
+        # Ruta alta (fast delivery): el hilo productor (render thread) rellena
+        # el buffer y el hilo de envío dedicado lo manda. Este tick de la GUI
+        # solo refresca el canvas y procesa avisos de desconexión del hilo.
+        if self._fast_delivery:
+            if self._device_error_occurred:
+                self._device_error_occurred = False
+                self._handle_disconnect_on_error(
+                    OSError("LY send thread flagged a device error")
+                )
+            self._canvas_update_counter += 1
+            if self._canvas_update_counter >= self._canvas_update_interval:
+                self._canvas_update_counter = 0
+                self.canvas.set_elements(self.elements)
+                self.canvas.update()
             return
 
         try:
@@ -1805,12 +2390,7 @@ class ThemeEditorWindow(QMainWindow):
         except Exception as e:
             error_str = str(e).lower()
             if "device" in error_str or "hid" in error_str or "write" in error_str or "closed" in error_str:
-                print(f"[HID] Device error, disconnecting: {e}")
-                self.disconnect_display()
-                self._was_connected_before_sleep = True
-                self._reconnect_attempts = 0
-                self._start_reconnect_timer()
-                self.status_bar.showMessage("Display disconnected - attempting to reconnect...")
+                self._handle_disconnect_on_error(e)
             else:
                 print(f"Send error: {e}")
                 self.status_bar.showMessage(f"Error: {e}")
@@ -2045,11 +2625,9 @@ class ThemeEditorWindow(QMainWindow):
 
         # Use video frame as background if enabled, otherwise solid color
         if video_background.enabled:
-            video_frame = video_background.get_frame_pil()
+            video_frame = video_background.get_frame_pil_resized((canvas_w, canvas_h))
             if video_frame:
-                img = video_frame.copy().convert('RGBA')
-                if img.size != (canvas_w, canvas_h):
-                    img = img.resize((canvas_w, canvas_h))
+                img = video_frame.copy()
             else:
                 img = Image.new('RGBA', (canvas_w, canvas_h), color=self.background_color)
         else:
@@ -2064,6 +2642,8 @@ class ThemeEditorWindow(QMainWindow):
 
     def render_element_with_opacity(self, img, element):
         """Render an element with opacity support using alpha compositing."""
+        if not getattr(element, 'visible', True):
+            return
         font = self.get_pil_font(element)
         font_small = self.get_pil_font(element, int(element.font_size * 0.6))
 
@@ -2118,7 +2698,11 @@ class ThemeEditorWindow(QMainWindow):
                         print(f"Unsafe image path blocked: {element.image_path} - {err}")
                     return
                 try:
-                    overlay = Image.open(element.image_path).convert('RGBA')
+                    # Open image via context manager to ensure file descriptor is closed
+                    with open(element.image_path, 'rb') as _f:
+                        with Image.open(_f) as _im:
+                            overlay = _im.convert('RGBA').copy()
+
                     if element.scale_proportionally:
                         overlay.thumbnail((element.width, element.height), Image.Resampling.LANCZOS)
                     else:
@@ -3413,13 +3997,13 @@ class ThemeEditorWindow(QMainWindow):
                     center_y = y + height + 16 + text_height // 2
                     draw.text((text_x, center_y), element.text, fill=label_text_color, font=label_font, anchor="lm")
 
-    def image_to_jpeg(self, img, quality=80):
+    def image_to_jpeg(self, img, quality=80, subsampling=None):
         """Convert image to JPEG bytes with optimized settings."""
-        # If vertical mode is enabled, img is rendered in portrait (DISPLAY_HEIGHT x
-        # DISPLAY_WIDTH) logical space. Rotate it 90 degrees so the physical buffer
-        # sent to the panel is ALWAYS exactly DISPLAY_WIDTH x DISPLAY_HEIGHT (the
-        # panel's fixed native resolution) - never a different size, otherwise the
-        # firmware stretches/squishes the frame to fit, causing distortion.
+        # Si vertical mode está activo, img se renderiza en espacio lógico
+        # retrato (DISPLAY_HEIGHT x DISPLAY_WIDTH). Rótalo 90 grados para que el
+        # buffer físico enviado al panel sea SIEMPRE exactamente
+        # DISPLAY_WIDTH x DISPLAY_HEIGHT (resolución nativa fija del panel) - nunca
+        # otro tamaño, o el firmware estira/comprime el frame y distorsiona.
         if getattr(self, "_vertical_mode", False):
             img = img.transpose(Image.ROTATE_270)
             if img.size != (DISPLAY_WIDTH, DISPLAY_HEIGHT):
@@ -3438,15 +4022,18 @@ class ThemeEditorWindow(QMainWindow):
         if saturation != 1.0:
             img = ImageEnhance.Color(img).enhance(saturation)
 
+        # Subsampling seleccionado por el perfil de entrega del device conectado:
+        #  - Low/legado: 0 (4:4:4, croma completa) como siempre.
+        #  - High (24fps en LY): 1 (4:2:2, mitad de croma) para duplicar el ritmo
+        #    de decodificación del panel (~12 -> ~24fps).
+        # Si el device no declara perfil, subsampling=0 (comportamiento original).
+        if subsampling is None:
+            subsampling = getattr(self, "_delivery_subsampling", 0)
+
         buffer = io.BytesIO()
         # Use quality=80 and optimize=False for faster encoding
         # The LCD display doesn't need highest quality
-        # subsampling=0 (4:4:4, full chroma resolution) keeps colors closer to what
-        # is shown in the design interface. subsampling=2 (4:2:0) saves a little
-        # CPU/bandwidth but visibly washes out/bleeds saturated colors on small
-        # LCD panels, which is part of why the panel looked less vivid than the
-        # on-screen preview.
-        img.save(buffer, format='JPEG', quality=quality, optimize=False, subsampling=0)
+        img.save(buffer, format='JPEG', quality=quality, optimize=False, subsampling=subsampling)
         return buffer.getvalue()
 
     def send_jpeg_frame(self, jpeg_data):
@@ -3619,6 +4206,9 @@ class ThemeEditorWindow(QMainWindow):
         if self._reconnect_timer:
             self._reconnect_timer.stop()
             self._reconnect_timer = None
+
+        # Apagar el webserver y su caché JPEG si están activos
+        self._set_webserver_state(False)
 
         self.disconnect_display()
 

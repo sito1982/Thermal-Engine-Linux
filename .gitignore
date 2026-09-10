@@ -56,12 +56,13 @@ nul
 # User settings
 settings.json
 
-# User themes - only track Default and Analog Clock presets
+# User themes - only track a curated set of presets
 presets/*
 !presets/Default.json
 !presets/Default.png
 !presets/Analog Clock.json
 !presets/Analog Clock.png
+!presets/Theme Horizontal.json
 
 # Old/backup files
 *_old.py
@@ -72,3 +73,9 @@ presets/*
 *.nupkg
 ThermalEngine-*.zip
 ThermalEngine-*-Setup.exe
+
+# Capturas locales
+fotos/
+
+# Obsidian vault
+.obsidian/

@@ -59,6 +59,11 @@ class VideoBackground:
         self._cached_pixmap = None
         self._cached_frame_idx = -1
 
+        # Cache de fondo RGBA ya convertido+redimensionado por (idx, tamaño):
+        # evita re-convertir/re-escalar el frame en cada render de la app.
+        self._cached_resized_key = None
+        self._cached_resized = None
+
         # Threading
         self._lock = threading.Lock()
         self._load_thread = None
@@ -102,6 +107,8 @@ class VideoBackground:
             self._cached_pil = None
             self._cached_pixmap = None
             self._cached_frame_idx = -1
+            self._cached_resized_key = None
+            self._cached_resized = None
 
         # Start loading in background thread
         self._load_thread = threading.Thread(
@@ -310,6 +317,33 @@ class VideoBackground:
             self._cached_pixmap = None  # Invalidate pixmap cache
 
             return pil_image
+
+    def get_frame_pil_resized(self, size):
+        """Get the current frame as a PIL RGBA image converted+resized to
+        ``size``, cached por (idx, tamaño). Si el frame no cambió, se evita la
+        conversión numpy->PIL, el convert('RGBA') y el resize de cada render."""
+        if not self.enabled:
+            return None
+
+        with self._lock:
+            if not self._buffer_ready or not self._frame_buffer:
+                return None
+
+            self._advance_frame()
+
+            key = (self._current_frame_idx, size[0], size[1])
+            if key == self._cached_resized_key and self._cached_resized is not None:
+                return self._cached_resized
+
+            pil = Image.fromarray(
+                self._frame_buffer[self._current_frame_idx]
+            ).convert('RGBA')
+            if pil.size != (size[0], size[1]):
+                pil = pil.resize((size[0], size[1]), Image.BILINEAR)
+
+            self._cached_resized_key = key
+            self._cached_resized = pil
+            return pil
 
     def get_frame_qpixmap(self, scale=1.0):
         """Get the current frame as a QPixmap for Qt rendering."""

@@ -65,30 +65,31 @@ class GifData:
                 self.error = "File not found"
                 return False
 
-            gif = PILImage.open(self.path)
-            self.width = gif.width
-            self.height = gif.height
+            # Open the GIF safely using a context manager to ensure the file is closed
+            with PILImage.open(self.path) as gif:
+                self.width = gif.width
+                self.height = gif.height
 
-            # Extract all frames
-            self.frames = []
-            self.durations = []
+                # Extract all frames
+                self.frames = []
+                self.durations = []
 
-            try:
-                while True:
-                    # Convert frame to RGBA
-                    frame = gif.convert('RGBA')
-                    self.frames.append(frame.copy())
+                try:
+                    while True:
+                        # Convert frame to RGBA and copy it so we don't hold the source file
+                        frame = gif.convert('RGBA')
+                        self.frames.append(frame.copy())
 
-                    # Get frame duration (in milliseconds, default to 100ms)
-                    duration = gif.info.get('duration', 100) / 1000.0
-                    if duration <= 0:
-                        duration = 0.1
-                    self.durations.append(duration)
-                    self.total_duration += duration
+                        # Get frame duration (in milliseconds, default to 100ms)
+                        duration = gif.info.get('duration', 100) / 1000.0
+                        if duration <= 0:
+                            duration = 0.1
+                        self.durations.append(duration)
+                        self.total_duration += duration
 
-                    gif.seek(gif.tell() + 1)
-            except EOFError:
-                pass  # End of frames
+                        gif.seek(gif.tell() + 1)
+                except EOFError:
+                    pass  # End of frames
 
             if len(self.frames) == 0:
                 self.error = "No frames found"

@@ -3,7 +3,7 @@ ElementListPanel - Element list management widget with group support.
 """
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy,
     QPushButton, QComboBox, QTreeWidget, QTreeWidgetItem,
     QMenu, QInputDialog, QAbstractItemView
 )
@@ -13,6 +13,40 @@ from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
 from constants import ELEMENT_TYPES, DEFAULT_ELEMENT_PROPS
 from element import ThemeElement
 from elements import get_custom_element
+from ui_style import IconButton, SectionLabel, ACCENT, TEXT_DIM, TEXT_FAINT
+
+
+class _ElementRowWidget(QWidget):
+    """In-cell row for the elements tree: icon + label + eye (visibility) + lock."""
+
+    def __init__(self, icon, text, hidden, locked, on_eye, on_lock, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 1, 4, 1)
+        lay.setSpacing(5)
+
+        self.icon_label = QLabel()
+        self.icon_label.setPixmap(icon.pixmap(20, 20))
+        lay.addWidget(self.icon_label)
+
+        self.label = QLabel(text)
+        if locked:
+            self.label.setStyleSheet("color: %s;" % TEXT_FAINT)
+        elif hidden:
+            self.label.setStyleSheet("color: %s;" % TEXT_DIM)
+        lay.addWidget(self.label, 1)
+
+        self.eye_btn = IconButton("eye", checkable=True, check_color=ACCENT, size=13,
+                                  tooltip="Toggle visibility")
+        self.eye_btn.setChecked(not hidden)
+        self.eye_btn.clicked.connect(on_eye)
+        lay.addWidget(self.eye_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.lock_btn = IconButton("lock" if locked else "lock_open", checkable=True,
+                                   check_color=ACCENT, size=13, tooltip="Toggle lock")
+        self.lock_btn.setChecked(locked)
+        self.lock_btn.clicked.connect(on_lock)
+        lay.addWidget(self.lock_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
 
 class ElementTreeWidget(QTreeWidget):
@@ -49,18 +83,22 @@ class ElementListPanel(QWidget):
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 8)
+        layout.setSpacing(8)
 
-        title = QLabel("Elements")
-        title.setStyleSheet("font-weight: bold; font-size: 14px; padding: 5px;")
-        layout.addWidget(title)
+        layout.addWidget(SectionLabel("Elements"))
 
         add_layout = QHBoxLayout()
+        add_layout.setSpacing(6)
 
         self.add_combo = QComboBox()
         self.add_combo.addItems(ELEMENT_TYPES)
-        add_layout.addWidget(self.add_combo)
+        self.add_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        add_layout.addWidget(self.add_combo, 1)
 
-        self.add_btn = QPushButton("+ Add")
+        self.add_btn = IconButton("plus", color=TEXT_DIM, hover_color=ACCENT, size=14)
+        self.add_btn.setFixedSize(34, 28)
+        self.add_btn.setToolTip("Add element")
         self.add_btn.clicked.connect(self.add_element)
         add_layout.addWidget(self.add_btn)
 
@@ -71,59 +109,7 @@ class ElementListPanel(QWidget):
         self.tree_widget.items_reordered.connect(self.on_items_reordered)
         self.tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree_widget.customContextMenuRequested.connect(self.show_context_menu)
-        layout.addWidget(self.tree_widget)
-
-        btn_layout = QHBoxLayout()
-
-        self.duplicate_btn = QPushButton("Duplicate")
-        self.duplicate_btn.clicked.connect(self.duplicate_element)
-        btn_layout.addWidget(self.duplicate_btn)
-
-        self.remove_btn = QPushButton("Remove")
-        self.remove_btn.clicked.connect(self.remove_element)
-        btn_layout.addWidget(self.remove_btn)
-
-        layout.addLayout(btn_layout)
-
-        group_layout = QHBoxLayout()
-
-        self.group_btn = QPushButton("Group")
-        self.group_btn.clicked.connect(self.group_selected)
-        self.group_btn.setToolTip("Group selected elements (Ctrl+G)")
-        group_layout.addWidget(self.group_btn)
-
-        self.ungroup_btn = QPushButton("Ungroup")
-        self.ungroup_btn.clicked.connect(self.ungroup_selected)
-        self.ungroup_btn.setToolTip("Ungroup selected elements (Ctrl+Shift+G)")
-        group_layout.addWidget(self.ungroup_btn)
-
-        layout.addLayout(group_layout)
-
-        lock_layout = QHBoxLayout()
-
-        self.lock_btn = QPushButton("Lock")
-        self.lock_btn.clicked.connect(self.lock_selected)
-        self.lock_btn.setToolTip("Lock selected elements (prevent editing)")
-        lock_layout.addWidget(self.lock_btn)
-
-        self.unlock_btn = QPushButton("Unlock")
-        self.unlock_btn.clicked.connect(self.unlock_selected)
-        self.unlock_btn.setToolTip("Unlock selected elements")
-        lock_layout.addWidget(self.unlock_btn)
-
-        layout.addLayout(lock_layout)
-
-        move_layout = QHBoxLayout()
-
-        self.up_btn = QPushButton("Move Up")
-        self.up_btn.clicked.connect(self.move_up)
-        move_layout.addWidget(self.up_btn)
-
-        self.down_btn = QPushButton("Move Down")
-        self.down_btn.clicked.connect(self.move_down)
-        move_layout.addWidget(self.down_btn)
-
-        layout.addLayout(move_layout)
+        layout.addWidget(self.tree_widget, 1)
 
     def show_context_menu(self, position):
         """Show context menu for tree items."""
@@ -163,6 +149,28 @@ class ElementListPanel(QWidget):
             if has_locked:
                 unlock_action = menu.addAction("Unlock")
                 unlock_action.triggered.connect(self.unlock_selected)
+
+            menu.addSeparator()
+
+            # Check if any selected elements are visible/hidden
+            selected_elements = [self.elements[i] for i in self.get_selected_element_indices()]
+            has_visible = any(getattr(el, 'visible', True) for el in selected_elements)
+            has_hidden = any(not getattr(el, 'visible', True) for el in selected_elements)
+
+            if has_visible:
+                hide_action = menu.addAction("Hide")
+                hide_action.triggered.connect(self.hide_selected)
+
+            if has_hidden:
+                show_action = menu.addAction("Show")
+                show_action.triggered.connect(self.show_selected)
+
+            menu.addSeparator()
+
+            up_action = menu.addAction("Move Up")
+            up_action.triggered.connect(self.move_up)
+            down_action = menu.addAction("Move Down")
+            down_action.triggered.connect(self.move_down)
 
             menu.addSeparator()
 
@@ -270,6 +278,23 @@ class ElementListPanel(QWidget):
         # Use element name from properties panel
         return f"{type_label} - {element.name}"
 
+    def _build_element_item(self, element, idx):
+        """Create a tree item for an element and its eye/lock row widget."""
+        item = QTreeWidgetItem([""])
+        item.setData(0, Qt.ItemDataRole.UserRole, idx)  # Store element index
+        item.setData(0, Qt.ItemDataRole.UserRole + 1, "element")  # Mark as element
+
+        hidden = not getattr(element, 'visible', True)
+        row = _ElementRowWidget(
+            icon=self.get_element_icon(element.type),
+            text=self.get_friendly_label(element),
+            hidden=hidden,
+            locked=element.locked,
+            on_eye=lambda i=idx: self.toggle_visible(i),
+            on_lock=lambda i=idx: self.toggle_lock(i),
+        )
+        return item, row
+
     def refresh_list(self, preserve_state=True):
         """Refresh the tree widget to reflect current elements and groups."""
         # Save current state before clearing
@@ -332,32 +357,16 @@ class ElementListPanel(QWidget):
 
                 # Add elements in this group
                 for idx, element in group_elements:
-                    icon = self.get_element_icon(element.type)
-                    label = self.get_friendly_label(element)
-                    if element.locked:
-                        label = f"🔒 {label}"
-                    child_item = QTreeWidgetItem([label])
-                    child_item.setIcon(0, icon)
-                    child_item.setData(0, Qt.ItemDataRole.UserRole, idx)  # Store element index
-                    child_item.setData(0, Qt.ItemDataRole.UserRole + 1, "element")  # Mark as element
-                    if element.locked:
-                        child_item.setForeground(0, QColor(128, 128, 128))  # Gray out locked
+                    child_item, row = self._build_element_item(element, idx)
                     group_item.addChild(child_item)
+                    self.tree_widget.setItemWidget(child_item, 0, row)
 
             else:  # item_type == 'element' (ungrouped)
                 idx = item_data
                 element = self.elements[idx]
-                icon = self.get_element_icon(element.type)
-                label = self.get_friendly_label(element)
-                if element.locked:
-                    label = f"🔒 {label}"
-                item = QTreeWidgetItem([label])
-                item.setIcon(0, icon)
-                item.setData(0, Qt.ItemDataRole.UserRole, idx)  # Store element index
-                item.setData(0, Qt.ItemDataRole.UserRole + 1, "element")  # Mark as element
-                if element.locked:
-                    item.setForeground(0, QColor(128, 128, 128))  # Gray out locked
+                item, row = self._build_element_item(element, idx)
                 self.tree_widget.addTopLevelItem(item)
+                self.tree_widget.setItemWidget(item, 0, row)
 
         # Restore expanded state and selection
         if preserve_state:
@@ -586,6 +595,50 @@ class ElementListPanel(QWidget):
         """Check if any selected element is locked."""
         indices = self.get_selected_element_indices()
         return any(self.elements[idx].locked for idx in indices)
+
+    def hide_selected(self):
+        """Hide selected elements (skip rendering, keep editable)."""
+        indices = self.get_selected_element_indices()
+        if not indices:
+            return
+
+        self.elements_will_change.emit()
+        for idx in indices:
+            self.elements[idx].visible = False
+
+        self.refresh_list()
+        self.select_elements(indices)
+        self.elements_changed.emit()
+
+    def show_selected(self):
+        """Show (un-hide) selected elements."""
+        indices = self.get_selected_element_indices()
+        if not indices:
+            return
+
+        self.elements_will_change.emit()
+        for idx in indices:
+            self.elements[idx].visible = True
+
+        self.refresh_list()
+        self.select_elements(indices)
+        self.elements_changed.emit()
+
+    def toggle_visible(self, idx):
+        """Toggle visibility for a single element by index (used by the eye icon)."""
+        if 0 <= idx < len(self.elements):
+            self.elements_will_change.emit()
+            self.elements[idx].visible = not getattr(self.elements[idx], 'visible', True)
+            self.refresh_list()
+            self.elements_changed.emit()
+
+    def toggle_lock(self, idx):
+        """Toggle the locked state for a single element by index (used by the lock icon)."""
+        if 0 <= idx < len(self.elements):
+            self.elements_will_change.emit()
+            self.elements[idx].locked = not self.elements[idx].locked
+            self.refresh_list()
+            self.elements_changed.emit()
 
     def rename_selected(self):
         """Rename selected group or element."""

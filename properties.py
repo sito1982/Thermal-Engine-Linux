@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QSize, QRect, QPoint
 from PySide6.QtGui import QColor, QFont, QPixmap, QFontDatabase, QPainter, QLinearGradient, QPen, QBrush, QIcon
 
+from ui_style import SectionLabel, TEXT_DIM
+
 
 class NoScrollComboBox(QComboBox):
     """ComboBox that ignores wheel events to allow parent scrolling."""
@@ -547,7 +549,10 @@ class GradientBarEditor(QWidget):
         return "#ffffff"
 
 
-from constants import DISPLAY_WIDTH, DISPLAY_HEIGHT, DATA_SOURCES, DATA_SOURCES_CATEGORIZED
+from constants import (
+    DISPLAY_WIDTH, DISPLAY_HEIGHT, DATA_SOURCES, DATA_SOURCES_CATEGORIZED,
+    ELEMENT_FIELD_VISIBILITY,
+)
 
 
 class FontPreviewDelegate(QStyledItemDelegate):
@@ -649,41 +654,9 @@ class PropertiesPanel(QWidget):
 
     def create_section(self, title):
         """Create a styled section container with title."""
-        # Container frame
+        # Container frame (styled globally via ui_style QSS)
         frame = QFrame()
-        frame.setObjectName("sectionFrame")
-        frame.setStyleSheet("""
-            QFrame#sectionFrame {
-                background-color: #2a2a2a;
-                border: 1px solid #3a3a3a;
-                border-radius: 6px;
-            }
-            QFrame#sectionFrame QLabel {
-                background: transparent;
-                border: none;
-                min-height: 22px;
-                qproperty-alignment: AlignVCenter;
-            }
-            QFrame#sectionFrame QCheckBox {
-                background: transparent;
-                border: none;
-                color: #ccc;
-            }
-            QFrame#sectionFrame QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border: 1px solid #666;
-                border-radius: 3px;
-                background-color: #1a1a1a;
-            }
-            QFrame#sectionFrame QCheckBox::indicator:checked {
-                background-color: #0078d4;
-                border-color: #0078d4;
-            }
-            QFrame#sectionFrame QCheckBox::indicator:hover {
-                border-color: #888;
-            }
-        """)
+        frame.setObjectName("propertySection")
 
         # Layout for the section
         section_layout = QVBoxLayout(frame)
@@ -692,23 +665,14 @@ class PropertiesPanel(QWidget):
 
         # Title label
         title_label = QLabel(title)
-        title_label.setStyleSheet("""
-            QLabel {
-                font-weight: bold;
-                color: #aaa;
-                font-size: 11px;
-                background: transparent;
-                border: none;
-                padding: 0;
-                margin-bottom: 4px;
-            }
-        """)
+        title_label.setObjectName("sectionTitle")
         section_layout.addWidget(title_label)
 
         # Form layout for fields
         form_layout = QFormLayout()
         form_layout.setSpacing(6)
         form_layout.setContentsMargins(0, 0, 0, 0)
+        form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         form_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         section_layout.addLayout(form_layout)
 
@@ -727,7 +691,7 @@ class PropertiesPanel(QWidget):
         from PySide6.QtCore import QByteArray
 
         # Replace currentColor with actual color based on palette
-        color = "#cccccc"  # Light gray for dark theme
+        color = TEXT_DIM
         svg_content = svg_content.replace("currentColor", color)
 
         svg_bytes = QByteArray(svg_content.encode('utf-8'))
@@ -744,11 +708,9 @@ class PropertiesPanel(QWidget):
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setContentsMargins(10, 10, 10, 8)
 
-        title = QLabel("Properties")
-        title.setStyleSheet("font-weight: bold; font-size: 14px; padding: 5px;")
-        layout.addWidget(title)
+        layout.addWidget(SectionLabel("Properties"))
 
         # Helper text when no element selected (in a container for proper centering)
         self.no_selection_container = QWidget()
@@ -756,7 +718,7 @@ class PropertiesPanel(QWidget):
         no_selection_layout.setContentsMargins(0, 0, 0, 0)
         no_selection_layout.addStretch()
         self.no_selection_label = QLabel("Select an element to edit its properties")
-        self.no_selection_label.setStyleSheet("color: #888; padding: 20px; font-style: italic;")
+        self.no_selection_label.setStyleSheet(f"color: {TEXT_DIM}; padding: 20px; font-style: italic;")
         self.no_selection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.no_selection_label.setWordWrap(True)
         no_selection_layout.addWidget(self.no_selection_label)
@@ -768,12 +730,11 @@ class PropertiesPanel(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setMaximumWidth(320)
         self.scroll_area = scroll
 
         self.props_widget = QWidget()
         self.props_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self.props_widget.setMaximumWidth(310)
+        self.props_widget.setMaximumWidth(250)
         self.props_layout = QVBoxLayout(self.props_widget)
         self.props_layout.setSpacing(8)
         self.props_layout.setContentsMargins(4, 4, 4, 4)
@@ -1694,84 +1655,7 @@ class PropertiesPanel(QWidget):
         self.on_property_changed()
 
     def update_visible_fields(self, element_type):
-        field_visibility = {
-            "circle_gauge": {
-                "width": False, "height": False, "radius": True,
-                "color": True, "bg_color": True, "text": False,
-                "font": False, "font_size": False, "font_style": False,
-                "value_text_group": True, "label_text_group": True,
-                "align": False, "clip": False, "source": True, "value": True, "image": False,
-                "auto_color_change": True, "animate_gauge": True, "gauge_rounded_ends": True
-            },
-            "text": {
-                "width": True, "height": True, "radius": False,
-                "color": True, "bg_color": False, "text": True,
-                "font": False, "font_size": False, "font_style": False,
-                "value_text_group": True, "label_text_group": False,
-                "align": True, "clip": True, "source": True, "value": True, "image": False
-            },
-            "clock": {
-                "width": True, "height": True, "radius": False,
-                "color": True, "bg_color": False, "text": False,
-                "font": False, "font_size": False, "font_style": False,
-                "value_text_group": True, "label_text_group": False,
-                "align": True, "clip": True, "source": False, "value": False, "image": False,
-                "time_format": True, "show_am_pm": True, "show_seconds": True, "show_leading_zero": True
-            },
-            "rectangle": {
-                "width": True, "height": True, "radius": False,
-                "color": True, "bg_color": False, "text": False,
-                "font": False, "font_size": False, "font_style": False,
-                "align": False, "clip": False, "source": False, "value": False, "image": False,
-                "border_radius": True, "glass_effect": True
-            },
-            "image": {
-                "width": True, "height": True, "radius": False,
-                "color": False, "bg_color": False, "text": False,
-                "font": False, "font_size": False, "font_style": False,
-                "align": False, "clip": False, "source": False, "value": False, "image": True
-            },
-            "gif": {
-                "width": True, "height": True, "radius": False,
-                "color": True, "bg_color": False, "text": False,
-                "font": False, "font_size": False, "font_style": False,
-                "align": False, "clip": False, "source": False, "value": False, "image": False,
-                "gif": True, "scale_mode": True
-            },
-            "line_chart": {
-                "width": True, "height": True, "radius": False,
-                "color": True, "bg_color": True, "text": True,
-                "font": False, "font_size": False, "font_style": False,
-                "value_text_group": True, "label_text_group": False,
-                "align": False, "clip": False, "source": True, "value": True, "image": False,
-                "show_background": True, "show_label": True, "show_gradient": True,
-                "rounded_corners": False, "gradient_fill": False,
-                "line_thickness": True, "smooth": True
-            },
-            "bar_gauge": {
-                "width": True, "height": True, "radius": False,
-                "color": True, "bg_color": True, "text": False,
-                "font": False, "font_size": False, "font_style": False,
-                "value_text_group": True, "label_text_group": True,
-                "align": False, "clip": False, "source": True, "value": True, "image": False,
-                "show_background": False, "show_label": False, "show_gradient": False,
-                "rounded_corners": True, "gradient_fill": True,
-                "auto_color_change": True, "animate_gauge": True,
-                "bar_text_mode": True, "bar_text_position": True,
-                "bar_border": True
-            },
-            "analog_clock": {
-                "width": False, "height": False, "radius": True,
-                "color": True, "bg_color": True, "text": False,
-                "font": False, "font_size": False, "font_style": False,
-                "value_text_group": True, "label_text_group": False,
-                "align": False, "clip": False, "source": False, "value": False, "image": False,
-                "show_seconds_hand": True, "show_clock_border": True,
-                "clock_face_style": True, "smooth_animation": True
-            }
-        }
-
-        visibility = field_visibility.get(element_type, {})
+        visibility = ELEMENT_FIELD_VISIBILITY.get(element_type, {})
 
         # Track visibility for each section
         section_visible = {section: False for section in self.section_headers}
@@ -2623,8 +2507,9 @@ class PropertiesPanel(QWidget):
             if self.current_element:
                 try:
                     from PIL import Image
-                    gif = Image.open(path)
-                    img_width, img_height = gif.size
+                    with open(path, 'rb') as _f:
+                        with Image.open(_f) as gif:
+                            img_width, img_height = gif.size
 
                     # Set dimensions (capped at display size)
                     max_width = min(img_width, DISPLAY_WIDTH)

@@ -5,13 +5,34 @@ CanvasPreview - Visual preview and editing widget.
 import os
 import time
 
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QScrollArea
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPixmap, QImage, QTransform
 
 from constants import DISPLAY_WIDTH, DISPLAY_HEIGHT, PREVIEW_SCALE, SOURCE_UNITS
 from elements import get_custom_element
 from video_background import video_background
+from ui_style import ACCENT, BORDER
+
+ACCENT_QCOLOR = QColor(ACCENT)
+BORDER_QCOLOR = QColor(BORDER)
+
+MIN_ZOOM_SCALE = 0.05
+MAX_ZOOM_SCALE = 4.0
+
+# Smart guides: snap tolerance in on-screen pixels (converted to scene units via /scale)
+SNAP_TOLERANCE_PX = 6.0
+GUIDE_COLOR = QColor(255, 46, 151)
+
+
+class CanvasScrollArea(QScrollArea):
+    """Scroll area that reports viewport resizes (used to keep ``Fit`` current)."""
+
+    viewport_resized = Signal()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.viewport_resized.emit()
 
 
 def apply_opacity(color, opacity):
@@ -120,6 +141,7 @@ class CanvasPreview(QWidget):
         self.resize_start_pos_element = (0, 0)
         self.resize_start_size = (0, 0)
         self.resize_start_bounds = None  # For multi-element resize
+        self._active_guides = []  # Smart guides visible during a drag: [(axis, value, a, b), ...]
         self.scale = PREVIEW_SCALE
         self.vertical_mode = False  # Rotates the preview 90 degrees to match a vertically mounted LCD
         self.background_color = QColor(15, 15, 25)
@@ -154,10 +176,36 @@ class CanvasPreview(QWidget):
         self._update_fixed_size()
         self.update()
 
+    # ------------------------------------------------------------------
+    # Zoom
+    # ------------------------------------------------------------------
+    def set_zoom_scale(self, scale):
+        """Set the paint scale directly (1.0 == 100%, actual LCD pixels)."""
+        scale = max(MIN_ZOOM_SCALE, min(MAX_ZOOM_SCALE, scale))
+        if abs(scale - self.scale) < 0.001:
+            return
+        self.scale = scale
+        self._glass_cache_valid = False  # Glass background is rendered at this scale
+        self._active_guides = []  # Guides are transient; drop them on zoom changes
+        self._update_fixed_size()
+        self.update()
+
+    def fit_scale_for(self, avail_w, avail_h, margin=28):
+        """Compute the largest scale that fits ``avail_w x avail_h`` (preview px)."""
+        base_w = DISPLAY_HEIGHT if self.vertical_mode else DISPLAY_WIDTH
+        base_h = DISPLAY_WIDTH if self.vertical_mode else DISPLAY_HEIGHT
+        avail_w = max(1, avail_w - margin)
+        avail_h = max(1, avail_h - margin)
+        return max(MIN_ZOOM_SCALE, min(MAX_ZOOM_SCALE, min(avail_w / base_w, avail_h / base_h)))
+
+    def zoom_percent(self):
+        return int(round(self.scale * 100))
+
     def set_elements(self, elements):
         self.elements = elements
         self._glass_cache_valid = False  # Invalidate glass cache when elements change
         self._has_glass_cache = None  # Clear has_glass cache
+        self._active_guides = []  # Guides belong to a drag; drop them with the element set
         self.update()
 
     def get_animated_value(self, element):
@@ -313,7 +361,9 @@ class CanvasPreview(QWidget):
         else:
             painter.fillRect(draw_rect, self.background_color)
 
-        painter.setPen(QPen(QColor(60, 60, 80), 2))
+        pen = QPen(ACCENT_QCOLOR, 2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(draw_rect.adjusted(1, 1, -1, -1))
 
         # Draw elements in reverse: last in list drawn first (back), first in list drawn last (front)
@@ -330,11 +380,35 @@ class CanvasPreview(QWidget):
         if len(self.selected_indices) > 1:
             self.draw_multi_selection_box(painter)
 
+        # Draw active smart guides on top
+        if self._active_guides:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            guide_pen = QPen(GUIDE_COLOR, 1, Qt.PenStyle.DashLine)
+            guide_pen.setDashPattern([4, 3])
+            painter.setPen(guide_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for axis, value, extent_a, extent_b in self._active_guides:
+                px = int(value * self.scale)
+                a = int(extent_a * self.scale)
+                b = int(extent_b * self.scale)
+                if axis == 'x':
+                    painter.drawLine(px, a, px, b)
+                else:
+                    painter.drawLine(a, px, b, px)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
         painter.end()
 
     def draw_element(self, painter, element, selected):
         x = int(element.x * self.scale)
         y = int(element.y * self.scale)
+
+        # Hidden elements are not drawn, but keep a selection outline so they can
+        # still be moved/resized after selecting them from the element list.
+        if not getattr(element, 'visible', True):
+            if selected:
+                self.draw_selection_box(painter, element, x, y)
+            return
 
         # Only apply clipping for text/clock elements that have clip enabled
         needs_clip = element.clip and element.type in ["text", "clock"]
@@ -1132,10 +1206,127 @@ class CanvasPreview(QWidget):
         else:
             return QRectF(x, y, 100, 50)
 
+    # ------------------------------------------------------------------
+    # Smart guides
+    # ------------------------------------------------------------------
+    def get_element_logical_bounds(self, element):
+        """Get the bounding rectangle of an element in logical (unscaled) units."""
+        if element.type in ["circle_gauge", "analog_clock"]:
+            radius = int(element.radius)
+            return (element.x - radius, element.y - radius,
+                    element.x + radius, element.y + radius)
+        elif hasattr(element, 'width') and hasattr(element, 'height') and element.width > 0 and element.height > 0:
+            return (element.x, element.y,
+                    element.x + element.width, element.y + element.height)
+        else:
+            return (element.x, element.y, element.x + 100, element.y + 50)
+
+    def _active_canvas_bounds(self):
+        """Logical canvas extent for the current orientation: (w, h)."""
+        if self.vertical_mode:
+            return DISPLAY_HEIGHT, DISPLAY_WIDTH
+        return DISPLAY_WIDTH, DISPLAY_HEIGHT
+
+    def _logical_bounds_from(self, element, ox, oy):
+        """Logical bounds of an element anchored at origin (ox, oy)."""
+        if element.type in ["circle_gauge", "analog_clock"]:
+            radius = int(element.radius)
+            return (ox - radius, oy - radius, ox + radius, oy + radius)
+        elif hasattr(element, 'width') and hasattr(element, 'height') and element.width > 0 and element.height > 0:
+            return (ox, oy, ox + element.width, oy + element.height)
+        else:
+            return (ox, oy, ox + 100, oy + 50)
+
+    def _moving_selection_bounds(self, base_x, base_y):
+        """Union logical bounds of the dragged selection at a raw offset from its start."""
+        min_x = min_y = None
+        max_x = max_y = None
+        for idx in self.selected_indices:
+            if idx not in self.drag_start_positions:
+                continue
+            sx, sy = self.drag_start_positions[idx]
+            l, t, r, b = self._logical_bounds_from(self.elements[idx], sx, sy)
+            l += base_x
+            r += base_x
+            t += base_y
+            b += base_y
+            if min_x is None:
+                min_x, max_x, min_y, max_y = l, r, t, b
+            else:
+                min_x, max_x = min(min_x, l), max(max_x, r)
+                min_y, max_y = min(min_y, t), max(max_y, b)
+        if min_x is None:
+            return (0, 0, 0, 0)
+        return (min_x, min_y, max_x, max_y)
+
+    def _collect_guide_candidates(self, axis):
+        """Reference coordinates for a guide axis: each non-moving element's
+        left/center/right (x) or top/center/bottom (y), plus the canvas extent."""
+        bound_w, bound_h = self._active_canvas_bounds()
+        if bound_w <= 0 or bound_h <= 0:
+            return []
+        candidates = []
+        for idx, el in enumerate(self.elements):
+            if idx in self.selected_indices:
+                continue
+            l, t, r, b = self.get_element_logical_bounds(el)
+            if axis == 'x':
+                candidates.extend((l, (l + r) / 2.0, r))
+            else:
+                candidates.extend((t, (t + b) / 2.0, b))
+        if axis == 'x':
+            candidates.extend((0, bound_w / 2.0, bound_w))
+        else:
+            candidates.extend((0, bound_h / 2.0, bound_h))
+        return candidates
+
+    def _compute_snap(self, base_x, base_y, modifiers):
+        """Resolve smart-guide snapping for the dragged selection.
+
+        Returns (snap_dx, snap_dy, guides): the offsets to add to the raw drag
+        translation and the guide lines (axis, value, extent_a, extent_b) to draw.
+        """
+        snap_off_x = snap_off_y = 0.0
+        guides = []
+        if modifiers & Qt.KeyboardModifier.AltModifier:
+            return 0.0, 0.0, []
+
+        min_x, min_y, max_x, max_y = self._moving_selection_bounds(base_x, base_y)
+        tol = SNAP_TOLERANCE_PX / self.scale
+
+        for axis, (a, b), _offset_attr in (
+                ('x', (min_x, max_x), 'snap_off_x'),
+                ('y', (min_y, max_y), 'snap_off_y')):
+            # edges/centers of the moving selection: 0=start-edge, 1=center, 2=end-edge
+            moving_vals = (a, (a + b) / 2.0, b)
+            best_delta = None
+            best_ref = None
+            best_i = 0
+            for cand in self._collect_guide_candidates(axis):
+                for i, mval in enumerate(moving_vals):
+                    delta = cand - mval
+                    if best_delta is None or abs(delta) < abs(best_delta):
+                        best_delta = delta
+                        best_ref = cand
+                        best_i = i
+            if best_delta is not None and abs(best_delta) <= tol:
+                if axis == 'x':
+                    snap_off_x = best_delta
+                else:
+                    snap_off_y = best_delta
+                bound_w, bound_h = self._active_canvas_bounds()
+                if axis == 'x':
+                    guides.append(('x', best_ref, 0, bound_h))
+                else:
+                    guides.append(('y', best_ref, 0, bound_w))
+
+        return snap_off_x, snap_off_y, guides
+
     def draw_selection_box(self, painter, element, x, y):
         bounds = self.get_element_bounds(element)
 
-        pen = QPen(QColor(0, 150, 255), 2, Qt.PenStyle.DashLine)
+        pen = QPen(ACCENT_QCOLOR, 1.6, Qt.PenStyle.DashLine)
+        pen.setDashPattern([4, 3])
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(bounds)
@@ -1151,7 +1342,7 @@ class CanvasPreview(QWidget):
 
         painter.setPen(Qt.PenStyle.NoPen)
         for hx, hy in handles:
-            painter.setBrush(QBrush(QColor(0, 150, 255)))
+            painter.setBrush(QBrush(ACCENT_QCOLOR))
             painter.drawRect(int(hx - hs / 2), int(hy - hs / 2), hs, hs)
 
     def get_multi_selection_bounds(self):
@@ -1184,7 +1375,8 @@ class CanvasPreview(QWidget):
             return
 
         # Draw outer selection box
-        pen = QPen(QColor(0, 150, 255), 2, Qt.PenStyle.DashLine)
+        pen = QPen(ACCENT_QCOLOR, 1.6, Qt.PenStyle.DashLine)
+        pen.setDashPattern([4, 3])
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(bounds)
@@ -1200,7 +1392,7 @@ class CanvasPreview(QWidget):
 
         painter.setPen(Qt.PenStyle.NoPen)
         for hx, hy in handles:
-            painter.setBrush(QBrush(QColor(0, 150, 255)))
+            painter.setBrush(QBrush(ACCENT_QCOLOR))
             painter.drawRect(int(hx - hs / 2), int(hy - hs / 2), hs, hs)
 
     def get_handle_at(self, pos, element):
@@ -1370,6 +1562,7 @@ class CanvasPreview(QWidget):
                 if not any_locked:
                     self.drag_started.emit()
                     self.dragging = True
+                    self._active_guides.clear()
                     # Store start positions for all selected elements
                     self.drag_start_positions = {}
                     for idx in self.selected_indices:
@@ -1499,6 +1692,11 @@ class CanvasPreview(QWidget):
             dx = (pos.x() - self.drag_start_mouse.x()) / self.scale
             dy = (pos.y() - self.drag_start_mouse.y()) / self.scale
 
+            # Snap to smart guides and update the temporary alignment lines
+            snap_dx, snap_dy, self._active_guides = self._compute_snap(dx, dy, event.modifiers())
+            dx += snap_dx
+            dy += snap_dy
+
             # Clamp against the active canvas bounds - swapped when vertical mode
             # is enabled, since the logical design space is then DISPLAY_HEIGHT x
             # DISPLAY_WIDTH instead of DISPLAY_WIDTH x DISPLAY_HEIGHT.
@@ -1550,6 +1748,7 @@ class CanvasPreview(QWidget):
             self.dragging = False
             self.resizing = False
             self.resize_handle = self.HANDLE_NONE
+            self._active_guides = []
 
     def keyPressEvent(self, event):
         """Handle arrow key nudging for selected elements."""

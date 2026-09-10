@@ -98,6 +98,85 @@ for category, sources in DATA_SOURCES_CATEGORIZED.items():
             "symbol": unit_symbol
         }
 
+# Per-element-type field visibility, shared by the Qt properties panel so all
+# UI surfaces agree on which controls apply to which element type.
+ELEMENT_FIELD_VISIBILITY = {
+    "circle_gauge": {
+        "width": False, "height": False, "radius": True,
+        "color": True, "bg_color": True, "text": False,
+        "font": False, "font_size": False, "font_style": False,
+        "value_text_group": True, "label_text_group": True,
+        "align": False, "clip": False, "source": True, "value": True, "image": False,
+        "auto_color_change": True, "animate_gauge": True, "gauge_rounded_ends": True
+    },
+    "text": {
+        "width": True, "height": True, "radius": False,
+        "color": True, "bg_color": False, "text": True,
+        "font": False, "font_size": False, "font_style": False,
+        "value_text_group": True, "label_text_group": False,
+        "align": True, "clip": True, "source": True, "value": True, "image": False
+    },
+    "clock": {
+        "width": True, "height": True, "radius": False,
+        "color": True, "bg_color": False, "text": False,
+        "font": False, "font_size": False, "font_style": False,
+        "value_text_group": True, "label_text_group": False,
+        "align": True, "clip": True, "source": False, "value": False, "image": False,
+        "time_format": True, "show_am_pm": True, "show_seconds": True, "show_leading_zero": True
+    },
+    "rectangle": {
+        "width": True, "height": True, "radius": False,
+        "color": True, "bg_color": False, "text": False,
+        "font": False, "font_size": False, "font_style": False,
+        "align": False, "clip": False, "source": False, "value": False, "image": False,
+        "border_radius": True, "glass_effect": True
+    },
+    "image": {
+        "width": True, "height": True, "radius": False,
+        "color": False, "bg_color": False, "text": False,
+        "font": False, "font_size": False, "font_style": False,
+        "align": False, "clip": False, "source": False, "value": False, "image": True
+    },
+    "gif": {
+        "width": True, "height": True, "radius": False,
+        "color": True, "bg_color": False, "text": False,
+        "font": False, "font_size": False, "font_style": False,
+        "align": False, "clip": False, "source": False, "value": False, "image": False,
+        "gif": True, "scale_mode": True
+    },
+    "line_chart": {
+        "width": True, "height": True, "radius": False,
+        "color": True, "bg_color": True, "text": True,
+        "font": False, "font_size": False, "font_style": False,
+        "value_text_group": True, "label_text_group": False,
+        "align": False, "clip": False, "source": True, "value": True, "image": False,
+        "show_background": True, "show_label": True, "show_gradient": True,
+        "rounded_corners": False, "gradient_fill": False,
+        "line_thickness": True, "smooth": True
+    },
+    "bar_gauge": {
+        "width": True, "height": True, "radius": False,
+        "color": True, "bg_color": True, "text": False,
+        "font": False, "font_size": False, "font_style": False,
+        "value_text_group": True, "label_text_group": True,
+        "align": False, "clip": False, "source": True, "value": True, "image": False,
+        "show_background": False, "show_label": False, "show_gradient": False,
+        "rounded_corners": True, "gradient_fill": True,
+        "auto_color_change": True, "animate_gauge": True,
+        "bar_text_mode": True, "bar_text_position": True,
+        "bar_border": True
+    },
+    "analog_clock": {
+        "width": False, "height": False, "radius": True,
+        "color": True, "bg_color": True, "text": False,
+        "font": False, "font_size": False, "font_style": False,
+        "value_text_group": True, "label_text_group": False,
+        "align": False, "clip": False, "source": False, "value": False, "image": False,
+        "show_seconds_hand": True, "show_clock_border": True,
+        "clock_face_style": True, "smooth_animation": True
+    }
+}
+
 # Default element properties by type
 DEFAULT_ELEMENT_PROPS = {
     "circle_gauge": {"radius": 120, "x": 200, "y": 240, "text": "GAUGE"},

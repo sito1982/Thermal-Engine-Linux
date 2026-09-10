@@ -38,6 +38,11 @@ class ThemeElement:
         self.aspect_ratio = kwargs.get("aspect_ratio", 1.0)
         self.name = kwargs.get("name", f"{element_type}_{id(self)}")
 
+        # Visibility: hidden elements are not rendered to the LCD/preview but can
+        # still be selected and edited from the element list. Defaults to True so
+        # themes saved before this field existed keep working unchanged.
+        self.visible = kwargs.get("visible", True)
+
         # Line chart options
         self.show_background = kwargs.get("show_background", True)
         self.show_label = kwargs.get("show_label", True)
@@ -168,6 +173,7 @@ class ThemeElement:
             "smooth_animation": self.smooth_animation,
             "group": self.group,
             "locked": self.locked,
+            "visible": self.visible,
             "temp_hide_unit": self.temp_hide_unit
         }
 

@@ -1,7 +1,7 @@
 ---
 generated: true
 source_path: "elements/__init__.py"
-source_sha256: ba6d14ccdfe1586f91825fd413f59bcd5379b153ea6473c435e85a0910da60c5
+source_sha256: 29a9b7c165fb18dc0449323e5cce4e952c4a1ddbbf9075aaf69c670f9fc2070b
 source_bytes: 3628
 source_lines: 104
 generated_by: "scripts/generate_code_markdown.py"
@@ -34,10 +34,10 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 ### Imports directos
 
-- `import os`
 - `import importlib.util`
-- `import sys`
+- `import os`
 - `import re`
+- `import sys`
 
 ### Clases directas
 
@@ -65,10 +65,10 @@ Each element file should define:
   - render_image(draw, img, element) - PIL rendering for display
 """
 
-import os
 import importlib.util
-import sys
+import os
 import re
+import sys
 
 # Store loaded custom elements
 CUSTOM_ELEMENTS = {}

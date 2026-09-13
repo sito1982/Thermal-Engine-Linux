@@ -2,7 +2,7 @@
 setlocal EnableDelayedExpansion
 
 echo ============================================
-echo   Thermal Engine - Installation Script
+echo   Thermal Engine Studio - Installation Script
 echo ============================================
 echo.
 

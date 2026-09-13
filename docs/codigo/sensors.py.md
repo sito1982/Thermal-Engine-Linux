@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "sensors.py"
-source_sha256: d877f6cc0f79cb239a595f436c83a0c3f6014c60602fe6d2717cc73a17185356
-source_bytes: 7047
-source_lines: 228
+source_sha256: f828e9411d7e024c617b77821d68a338d3a12f1f46f6041a9a021e01978fe6c7
+source_bytes: 7199
+source_lines: 236
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -81,15 +81,23 @@ IS_WINDOWS = sys.platform == "win32"
 if IS_WINDOWS:
     from hwinfo_reader import (
         get_hwinfo_reader as _get_reader,
-        is_hwinfo_available as _backend_available,
+    )
+    from hwinfo_reader import (
         get_hwinfo_sensors as _backend_sensors,
+    )
+    from hwinfo_reader import (
+        is_hwinfo_available as _backend_available,
     )
     SENSOR_BACKEND_NAME = "HWiNFO"
 else:
     from linux_sensors import (
         get_linux_reader as _get_reader,
-        is_linux_sensors_available as _backend_available,
+    )
+    from linux_sensors import (
         get_linux_sensors as _backend_sensors,
+    )
+    from linux_sensors import (
+        is_linux_sensors_available as _backend_available,
     )
     SENSOR_BACKEND_NAME = "Sensores de Linux"
 

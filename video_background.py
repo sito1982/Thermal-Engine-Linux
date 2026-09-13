@@ -7,8 +7,9 @@ Pre-buffers all frames in memory for smooth playback.
 """
 
 import os
-import time
 import threading
+import time
+
 from PIL import Image
 
 try:
@@ -20,7 +21,7 @@ except ImportError:
     cv2 = None
     np = None
 
-from constants import DISPLAY_WIDTH, DISPLAY_HEIGHT
+from constants import DISPLAY_HEIGHT, DISPLAY_WIDTH
 
 
 class VideoBackground:
@@ -347,7 +348,7 @@ class VideoBackground:
 
     def get_frame_qpixmap(self, scale=1.0):
         """Get the current frame as a QPixmap for Qt rendering."""
-        from PySide6.QtGui import QPixmap, QImage
+        from PySide6.QtGui import QImage, QPixmap
 
         if not self.enabled:
             return None
@@ -396,8 +397,8 @@ class VideoBackground:
 
     def _create_loading_pixmap(self, scale):
         """Create a loading indicator pixmap."""
-        from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
         from PySide6.QtCore import Qt
+        from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 
         width = int(DISPLAY_WIDTH * scale)
         height = int(DISPLAY_HEIGHT * scale)

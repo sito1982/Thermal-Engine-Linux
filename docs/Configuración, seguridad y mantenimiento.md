@@ -37,7 +37,7 @@ La nota describe las funciones presentes, no garantiza que cubran todos los esce
 
 ## Git y archivos generados
 
-[`.gitignore`](../.gitignore) ignora, entre otros elementos, `settings.json`, `presets/*` salvo los ejemplos `Default` y `Analog Clock`, `__pycache__/` y artefactos de construcción. Esto explica por qué `settings.json` y `presets/Untitled Theme.*` aparecen como contenido local no rastreado.
+[`.gitignore`](../.gitignore) ignora, entre otros elementos, `settings.json`, `presets/*` salvo el ejemplo `Default`, `__pycache__/` y artefactos de construcción. Esto explica por qué `settings.json` y `presets/Untitled Theme.*` aparecen como contenido local no rastreado.
 
 Los tres archivos bajo `elements/__pycache__/` tienen extensión `.pyc`; son bytecode generado por Python. Se registran en el índice para cobertura del inventario, pero no constituyen código fuente ni se editan como notas.
 

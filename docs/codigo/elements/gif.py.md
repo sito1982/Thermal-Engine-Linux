@@ -1,8 +1,8 @@
 ---
 generated: true
 source_path: "elements/gif.py"
-source_sha256: e6e0266c6c47d623239ab5ac575b0f054b71eda688f1bf6c1cf29bf65eac0603
-source_bytes: 10075
+source_sha256: 645c82c2a88396998986248a2a6a9ea140f0a4007cd04754592dd575d995bd6e
+source_bytes: 10260
 source_lines: 312
 generated_by: "scripts/generate_code_markdown.py"
 ---
@@ -29,11 +29,10 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 ### Imports directos
 
 - `import os`
-- `import time`
 - `import sys`
+- `import time`
 - `from PIL import Image as PILImage`
-- `from PySide6.QtCore import Qt`
-- `from PySide6.QtGui import QPixmap, QImage, QPen, QColor`
+- `from PySide6.QtGui import QColor, QImage, QPen, QPixmap`
 - `from security import is_safe_path`
 
 ### Clases directas
@@ -60,12 +59,11 @@ Displays animated GIF images with proper frame timing.
 """
 
 import os
-import time
 import sys
-from PIL import Image as PILImage
+import time
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap, QImage, QPen, QColor
+from PIL import Image as PILImage
+from PySide6.QtGui import QColor, QImage, QPen, QPixmap
 
 # Add parent directory to path for security import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -120,30 +118,31 @@ class GifData:
                 self.error = "File not found"
                 return False
 
-            gif = PILImage.open(self.path)
-            self.width = gif.width
-            self.height = gif.height
+            # Open the GIF safely using a context manager to ensure the file is closed
+            with PILImage.open(self.path) as gif:
+                self.width = gif.width
+                self.height = gif.height
 
-            # Extract all frames
-            self.frames = []
-            self.durations = []
+                # Extract all frames
+                self.frames = []
+                self.durations = []
 
-            try:
-                while True:
-                    # Convert frame to RGBA
-                    frame = gif.convert('RGBA')
-                    self.frames.append(frame.copy())
+                try:
+                    while True:
+                        # Convert frame to RGBA and copy it so we don't hold the source file
+                        frame = gif.convert('RGBA')
+                        self.frames.append(frame.copy())
 
-                    # Get frame duration (in milliseconds, default to 100ms)
-                    duration = gif.info.get('duration', 100) / 1000.0
-                    if duration <= 0:
-                        duration = 0.1
-                    self.durations.append(duration)
-                    self.total_duration += duration
+                        # Get frame duration (in milliseconds, default to 100ms)
+                        duration = gif.info.get('duration', 100) / 1000.0
+                        if duration <= 0:
+                            duration = 0.1
+                        self.durations.append(duration)
+                        self.total_duration += duration
 
-                    gif.seek(gif.tell() + 1)
-            except EOFError:
-                pass  # End of frames
+                        gif.seek(gif.tell() + 1)
+                except EOFError:
+                    pass  # End of frames
 
             if len(self.frames) == 0:
                 self.error = "No frames found"

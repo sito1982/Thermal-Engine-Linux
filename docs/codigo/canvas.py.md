@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "canvas.py"
-source_sha256: 2906ed208531c3bc53fd36c7501a3914b8e987915c964dbe0955415683c1d5cc
-source_bytes: 72502
-source_lines: 1594
+source_sha256: 8e22ac552b301ddc21fe6e8d7d92cac30962c961f05cecdd016c04c9bb71e45a
+source_bytes: 93768
+source_lines: 2113
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -28,20 +28,27 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 - `import os`
 - `import time`
-- `from PySide6.QtWidgets import QWidget`
-- `from PySide6.QtCore import Qt, QPointF, QRectF, Signal`
-- `from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPixmap, QImage, QTransform`
-- `from constants import DISPLAY_WIDTH, DISPLAY_HEIGHT, PREVIEW_SCALE, SOURCE_UNITS`
+- `from PySide6.QtCore import QPointF, QRectF, Qt, Signal`
+- `from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap`
+- `from PySide6.QtWidgets import QScrollArea, QWidget`
+- `from constants import DISPLAY_HEIGHT, DISPLAY_WIDTH, PREVIEW_SCALE, SOURCE_UNITS`
 - `from elements import get_custom_element`
+- `from ui_style import ACCENT, BORDER`
 - `from video_background import video_background`
 
 ### Clases directas
 
+- `CanvasScrollArea`
 - `CanvasPreview`
+- `DMDCanvas`
+- `HDMICanvas`
 
 ### Funciones directas
 
 - `apply_opacity`
+- `dim_color`
+- `get_bar_chart_history`
+- `add_bar_chart_value`
 - `get_text_color`
 - `get_label_text_color`
 - `interpolate_gradient_color`
@@ -57,13 +64,34 @@ CanvasPreview - Visual preview and editing widget.
 import os
 import time
 
-from PySide6.QtWidgets import QWidget
-from PySide6.QtCore import Qt, QPointF, QRectF, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPixmap, QImage, QTransform
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QScrollArea, QWidget
 
-from constants import DISPLAY_WIDTH, DISPLAY_HEIGHT, PREVIEW_SCALE, SOURCE_UNITS
+from constants import DISPLAY_HEIGHT, DISPLAY_WIDTH, PREVIEW_SCALE, SOURCE_UNITS
 from elements import get_custom_element
+from ui_style import ACCENT, BORDER
 from video_background import video_background
+
+ACCENT_QCOLOR = QColor(ACCENT)
+BORDER_QCOLOR = QColor(BORDER)
+
+MIN_ZOOM_SCALE = 0.05
+MAX_ZOOM_SCALE = 4.0
+
+# Smart guides: snap tolerance in on-screen pixels (converted to scene units via /scale)
+SNAP_TOLERANCE_PX = 6.0
+GUIDE_COLOR = QColor(255, 46, 151)
+
+
+class CanvasScrollArea(QScrollArea):
+    """Scroll area that reports viewport resizes (used to keep ``Fit`` current)."""
+
+    viewport_resized = Signal()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.viewport_resized.emit()
 
 
 def apply_opacity(color, opacity):
@@ -75,6 +103,49 @@ def apply_opacity(color, opacity):
     alpha = int(255 * opacity / 100)
     color.setAlpha(alpha)
     return color
+
+
+def dim_color(color, factor=0.4):
+    """Return a darker version of ``color`` (used for DMD empty/outline states)."""
+    c = QColor(color) if isinstance(color, str) else QColor(color)
+    c.setRed(int(c.red() * factor))
+    c.setGreen(int(c.green() * factor))
+    c.setBlue(int(c.blue() * factor))
+    return c
+
+
+# --- DMD bar chart history ------------------------------------------------
+# The bar chart mirrors the line chart approach: it keeps a small history of
+# samples so the bars show a trend instead of a single value.
+_BAR_CHART_HISTORY: dict = {}
+_BAR_CHART_LAST_TS: dict = {}
+_BAR_CHART_MAX = 64
+_BAR_CHART_MIN_INTERVAL = 0.05
+
+
+def get_bar_chart_history(element):
+    key = getattr(element, 'name', id(element))
+    if key not in _BAR_CHART_HISTORY:
+        value = float(getattr(element, 'value', 0))
+        profile = (0.22, 0.48, 0.85, 0.6, 0.33, 0.95, 0.72, 0.5,
+                   0.28, 0.88, 0.66, 0.4, 0.55, 0.78, 0.3, 0.7)
+        seed = [value * profile[i % len(profile)] for i in range(_BAR_CHART_MAX)]
+        _BAR_CHART_HISTORY[key] = seed
+    return _BAR_CHART_HISTORY[key]
+
+
+def add_bar_chart_value(element, value):
+    import time
+    key = getattr(element, 'name', id(element))
+    now = time.time()
+    if now - _BAR_CHART_LAST_TS.get(key, 0) < _BAR_CHART_MIN_INTERVAL:
+        return False
+    history = get_bar_chart_history(element)
+    history.append(float(value))
+    if len(history) > _BAR_CHART_MAX:
+        del history[:len(history) - _BAR_CHART_MAX]
+    _BAR_CHART_LAST_TS[key] = now
+    return True
 
 
 def get_text_color(element):
@@ -166,12 +237,12 @@ class CanvasPreview(QWidget):
         self.dragging = False
         self.resizing = False
         self.resize_handle = self.HANDLE_NONE
-        self.drag_offset = QPointF(0, 0)
         self.drag_start_positions = {}  # Store start positions for multi-drag
         self.resize_start_pos = QPointF(0, 0)
         self.resize_start_pos_element = (0, 0)
         self.resize_start_size = (0, 0)
         self.resize_start_bounds = None  # For multi-element resize
+        self._active_guides = []  # Smart guides visible during a drag: [(axis, value, a, b), ...]
         self.scale = PREVIEW_SCALE
         self.vertical_mode = False  # Rotates the preview 90 degrees to match a vertically mounted LCD
         self.background_color = QColor(15, 15, 25)
@@ -180,7 +251,6 @@ class CanvasPreview(QWidget):
         self._glass_background = None  # Cached background for glass effect
         self._glass_cache_valid = False  # Track if glass cache needs rebuild
         self._has_glass_cache = None  # Cache result of _has_glass_elements()
-        self._animated_values = {}  # Track display values for animated gauges {element_name: current_display_value}
 
         self._update_fixed_size()
         self.setMouseTracking(True)
@@ -206,11 +276,59 @@ class CanvasPreview(QWidget):
         self._update_fixed_size()
         self.update()
 
+    # ------------------------------------------------------------------
+    # Zoom
+    # ------------------------------------------------------------------
+    def set_zoom_scale(self, scale):
+        """Set the paint scale directly (1.0 == 100%, actual LCD pixels)."""
+        scale = max(MIN_ZOOM_SCALE, min(MAX_ZOOM_SCALE, scale))
+        if abs(scale - self.scale) < 0.001:
+            return
+        self.scale = scale
+        self._glass_cache_valid = False  # Glass background is rendered at this scale
+        self._active_guides = []  # Guides are transient; drop them on zoom changes
+        self._update_fixed_size()
+        self.update()
+
+    def fit_scale_for(self, avail_w, avail_h, margin=28):
+        """Compute the largest scale that fits ``avail_w x avail_h`` (preview px)."""
+        base_w = DISPLAY_HEIGHT if self.vertical_mode else DISPLAY_WIDTH
+        base_h = DISPLAY_WIDTH if self.vertical_mode else DISPLAY_HEIGHT
+        avail_w = max(1, avail_w - margin)
+        avail_h = max(1, avail_h - margin)
+        return max(MIN_ZOOM_SCALE, min(MAX_ZOOM_SCALE, min(avail_w / base_w, avail_h / base_h)))
+
+    def zoom_percent(self):
+        return int(round(self.scale * 100))
+
     def set_elements(self, elements):
         self.elements = elements
+        # Selection indices can go stale when the element list shrinks (e.g. the
+        # shared list is mutated by element deletion or a theme reload). Drop any
+        # index that no longer points at an element to avoid crashes on the next
+        # mouse/key event.
+        count = len(elements)
+        self.selected_indices = [i for i in self.selected_indices if 0 <= i < count]
+        if not self.selected_indices:
+            self.group_selection_mode = False
         self._glass_cache_valid = False  # Invalidate glass cache when elements change
         self._has_glass_cache = None  # Clear has_glass cache
+        self._active_guides = []  # Guides belong to a drag; drop them with the element set
         self.update()
+
+    def _valid_selected_indices(self):
+        """Return the current selection filtered to indices that still exist."""
+        count = len(self.elements)
+        return [i for i in self.selected_indices if 0 <= i < count]
+
+    def _reconcile_selection(self):
+        """Drop stale selection indices (e.g. after the element list shrank)."""
+        valid = self._valid_selected_indices()
+        if valid != self.selected_indices:
+            self.selected_indices = valid
+            if not valid:
+                self.group_selection_mode = False
+        return bool(valid)
 
     def get_animated_value(self, element):
         """Get the display value for a gauge, handling animation if enabled.
@@ -280,10 +398,6 @@ class CanvasPreview(QWidget):
         self.selected_indices = list(indices)
         self.group_selection_mode = group_selection
         self.update()
-
-    def get_selected_index(self):
-        """Get single selected index (backwards compatible)."""
-        return self.selected_indices[0] if len(self.selected_indices) == 1 else -1
 
     def set_background_color(self, color):
         self.background_color = QColor(color)
@@ -365,7 +479,9 @@ class CanvasPreview(QWidget):
         else:
             painter.fillRect(draw_rect, self.background_color)
 
-        painter.setPen(QPen(QColor(60, 60, 80), 2))
+        pen = QPen(ACCENT_QCOLOR, 2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(draw_rect.adjusted(1, 1, -1, -1))
 
         # Draw elements in reverse: last in list drawn first (back), first in list drawn last (front)
@@ -382,11 +498,35 @@ class CanvasPreview(QWidget):
         if len(self.selected_indices) > 1:
             self.draw_multi_selection_box(painter)
 
+        # Draw active smart guides on top
+        if self._active_guides:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            guide_pen = QPen(GUIDE_COLOR, 1, Qt.PenStyle.DashLine)
+            guide_pen.setDashPattern([4, 3])
+            painter.setPen(guide_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for axis, value, extent_a, extent_b in self._active_guides:
+                px = int(value * self.scale)
+                a = int(extent_a * self.scale)
+                b = int(extent_b * self.scale)
+                if axis == 'x':
+                    painter.drawLine(px, a, px, b)
+                else:
+                    painter.drawLine(a, px, b, px)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
         painter.end()
 
     def draw_element(self, painter, element, selected):
         x = int(element.x * self.scale)
         y = int(element.y * self.scale)
+
+        # Hidden elements are not drawn, but keep a selection outline so they can
+        # still be moved/resized after selecting them from the element list.
+        if not getattr(element, 'visible', True):
+            if selected:
+                self.draw_selection_box(painter, element, x, y)
+            return
 
         # Only apply clipping for text/clock elements that have clip enabled
         needs_clip = element.clip and element.type in ["text", "clock"]
@@ -404,10 +544,14 @@ class CanvasPreview(QWidget):
             self.draw_rectangle(painter, element, x, y, selected)
         elif element.type == "clock":
             self.draw_clock(painter, element, x, y, selected)
-        elif element.type == "analog_clock":
-            self.draw_analog_clock(painter, element, x, y, selected)
         elif element.type == "image":
             self.draw_image(painter, element, x, y, selected)
+        elif element.type == "gauge_circle_dmd":
+            self.draw_gauge_circle_dmd(painter, element, x, y, selected)
+        elif element.type == "segmented_bar":
+            self.draw_segmented_bar(painter, element, x, y, selected)
+        elif element.type == "bar_chart":
+            self.draw_bar_chart(painter, element, x, y, selected)
         else:
             # Try custom element
             custom = get_custom_element(element.type)
@@ -457,7 +601,7 @@ class CanvasPreview(QWidget):
 
         # Check for rounded ends (pill shape)
         rounded_ends = getattr(element, 'gauge_rounded_ends', False)
-        pen_width = int(15 * self.scale)
+        pen_width = max(1, int(getattr(element, 'line_width', 15) * self.scale))
 
         # Draw background arc
         bg_pen = QPen(bg_color, pen_width)
@@ -524,7 +668,7 @@ class CanvasPreview(QWidget):
         painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, element.text)
 
     def draw_bar_gauge(self, painter, element, x, y, selected):
-        from PySide6.QtGui import QPainterPath, QLinearGradient
+        from PySide6.QtGui import QLinearGradient, QPainterPath
 
         width = int(element.width * self.scale)
         height = int(element.height * self.scale)
@@ -873,6 +1017,129 @@ class CanvasPreview(QWidget):
                     text_rect = QRectF(text_x, text_y, text_width, text_height)
                     painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, element.text)
 
+    def draw_gauge_circle_dmd(self, painter, element, x, y, selected):
+        """Segmented ring gauge designed for DMD panels (128x32).
+
+        Draws a dashed 270-degree arc (gap centred on top) plus a centred label.
+        ``color`` fills the reached segments, ``background_color`` the empty ones.
+        """
+        radius = max(1, int(getattr(element, 'radius', 7) * self.scale))
+        line_width = max(1, int(getattr(element, 'line_width', 2) * self.scale))
+        max_value = max(float(getattr(element, 'max_value', 100) or 100), 0.0001)
+        display_value = self.get_animated_value(element)
+        ratio = max(0.0, min(1.0, display_value / max_value))
+
+        color = apply_opacity(element.color, getattr(element, 'color_opacity', 100))
+        empty_color = apply_opacity(element.background_color,
+                                    getattr(element, 'background_color_opacity', 100))
+
+        segments = max(3, int(getattr(element, 'segments', 24) or 24))
+        total_deg = 270.0
+        start_deg = 45.0  # gap centred on top (90 degrees)
+        seg_span = total_deg / segments
+        dash_ratio = 0.62
+        filled = ratio * segments
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for i in range(segments):
+            a0 = start_deg - i * seg_span
+            a1 = a0 - seg_span * dash_ratio
+            reached = (i + 0.5) <= filled
+            pen = QPen(color if reached else empty_color, line_width,
+                       Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap)
+            painter.setPen(pen)
+            painter.drawArc(x - radius, y - radius, radius * 2, radius * 2,
+                            int(a0 * 16), int((a1 - a0) * 16))
+
+        text = element.text or ""
+        if text:
+            font = QFont(element.font_family)
+            font.setPixelSize(max(1, int(getattr(element, 'font_size', 5) * self.scale)))
+            font.setBold(element.font_bold)
+            font.setItalic(element.font_italic)
+            painter.setFont(font)
+            painter.setPen(QPen(get_text_color(element)))
+            painter.drawText(QRectF(x - radius, y - radius, radius * 2, radius * 2),
+                             Qt.AlignmentFlag.AlignCenter, text)
+
+    def draw_segmented_bar(self, painter, element, x, y, selected):
+        """Horizontal bar split into square segments (MultiPart Bar look)."""
+        width = int(element.width * self.scale)
+        height = int(element.height * self.scale)
+        segments = max(1, int(getattr(element, 'segments', 8) or 8))
+        gap = max(0, int(getattr(element, 'gap', 1)))
+        max_value = max(float(getattr(element, 'max_value', 100) or 100), 0.0001)
+        display_value = self.get_animated_value(element)
+        ratio = max(0.0, min(1.0, display_value / max_value))
+
+        color = apply_opacity(element.color, getattr(element, 'color_opacity', 100))
+        empty_color = apply_opacity(element.color_empty,
+                                    getattr(element, 'color_empty_opacity', 100))
+        outline = dim_color(color, 0.45)
+
+        total_gap = gap * (segments - 1)
+        seg_w = max(1.0, (width - total_gap) / segments)
+        filled = ratio * segments
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        for i in range(segments):
+            sx = x + i * (seg_w + gap)
+            fill = color if (i + 0.5) <= filled else empty_color
+            painter.fillRect(QRectF(sx, y, seg_w, height), fill)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(outline, 1))
+        for i in range(segments):
+            sx = x + i * (seg_w + gap)
+            painter.drawRect(QRectF(sx, y, seg_w, height))
+        painter.drawRect(QRectF(x, y, width, height))
+
+    def draw_bar_chart(self, painter, element, x, y, selected):
+        """History bar chart with scanline stripes, framed (bars-chart look)."""
+        width = int(element.width * self.scale)
+        height = int(element.height * self.scale)
+        max_value = max(float(getattr(element, 'max_value', 100) or 100), 0.0001)
+        color = apply_opacity(element.color, getattr(element, 'color_opacity', 100))
+        bg = apply_opacity(element.background_color,
+                           getattr(element, 'background_color_opacity', 100))
+        frame = dim_color(color, 0.6)
+
+        if getattr(element, 'show_background', True) and width > 0 and height > 0:
+            painter.fillRect(QRectF(x, y, width, height), bg)
+
+        add_bar_chart_value(element, element.value)
+        history = get_bar_chart_history(element)
+
+        bars = int(getattr(element, 'segments', 0) or 0)
+        if bars <= 0:
+            bars = max(1, width // 5)
+        gap = max(0, int(getattr(element, 'gap', 1)))
+        bar_w = max(1.0, (width - gap * (bars - 1)) / bars)
+
+        samples = history[-bars:]
+        if len(samples) < bars:
+            samples = [0.0] * (bars - len(samples)) + samples
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        for i, sample in enumerate(samples):
+            r = max(0.0, min(1.0, float(sample) / max_value))
+            bh = max(1.0, r * max(1, height - 2))
+            bx = x + i * (bar_w + gap)
+            by = y + height - bh
+            painter.fillRect(QRectF(bx, by, bar_w, bh), color)
+
+            stripe_pen = QPen(dim_color(color, 0.3), 1)
+            painter.setPen(stripe_pen)
+            stripe_y = by + 2.0
+            while stripe_y < y + height:
+                painter.drawLine(QPointF(bx, stripe_y), QPointF(bx + bar_w, stripe_y))
+                stripe_y += 3.0
+            painter.setPen(Qt.PenStyle.NoPen)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(frame, 1))
+        painter.drawRect(QRectF(x, y, width, height))
+
     def draw_text(self, painter, element, x, y, selected):
         color = apply_opacity(element.color, getattr(element, 'color_opacity', 100))
 
@@ -1033,123 +1300,6 @@ class CanvasPreview(QWidget):
 
         painter.drawText(draw_x, draw_y, current_time)
 
-    def draw_analog_clock(self, painter, element, x, y, selected):
-        import math
-        import datetime
-
-        radius = int(element.radius * self.scale)
-        color = apply_opacity(element.color, getattr(element, 'color_opacity', 100))
-        bg_color = apply_opacity(element.background_color, getattr(element, 'background_color_opacity', 100))
-
-        # Get options
-        show_seconds = getattr(element, 'show_seconds_hand', True)
-        show_border = getattr(element, 'show_clock_border', True)
-        face_style = getattr(element, 'clock_face_style', 'numbers')
-        smooth = getattr(element, 'smooth_animation', True)
-
-        # Get current time with milliseconds for smooth animation
-        now = datetime.datetime.now()
-        hours = now.hour % 12
-        minutes = now.minute
-        seconds = now.second
-        microseconds = now.microsecond
-
-        if smooth:
-            # Smooth movement - include fractional parts
-            second_angle = (seconds + microseconds / 1000000) * 6  # 360/60 = 6 degrees per second
-            minute_angle = (minutes + seconds / 60) * 6  # 6 degrees per minute
-            hour_angle = (hours + minutes / 60) * 30  # 30 degrees per hour
-        else:
-            # Tick movement - discrete steps
-            second_angle = seconds * 6
-            minute_angle = minutes * 6
-            hour_angle = hours * 30 + minutes * 0.5  # Still smooth hour hand
-
-        # Draw clock face background
-        painter.setBrush(QBrush(bg_color))
-        if show_border:
-            painter.setPen(QPen(color, 2 * self.scale))
-        else:
-            painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(x - radius, y - radius, radius * 2, radius * 2)
-
-        # Draw tick marks or numbers
-        text_color = get_text_color(element)
-        painter.setPen(QPen(text_color, 1 * self.scale))
-        font = QFont(getattr(element, 'font_family', 'Arial'))
-        font.setPixelSize(int(getattr(element, 'font_size', 14) * self.scale * 0.8))
-        painter.setFont(font)
-
-        for i in range(12):
-            angle_rad = math.radians(i * 30 - 90)  # Start at 12 o'clock
-
-            if face_style == 'numbers':
-                # Draw numbers 1-12
-                num = i if i > 0 else 12
-                text = str(num)
-                metrics = painter.fontMetrics()
-                text_width = metrics.horizontalAdvance(text)
-                text_height = metrics.height()
-
-                text_radius = radius * 0.78
-                tx = x + text_radius * math.cos(angle_rad) - text_width / 2
-                ty = y + text_radius * math.sin(angle_rad) + text_height / 4
-
-                painter.drawText(int(tx), int(ty), text)
-
-            elif face_style == 'ticks':
-                # Draw tick marks
-                inner_radius = radius * 0.85
-                outer_radius = radius * 0.95
-
-                # Longer ticks for 12, 3, 6, 9
-                if i % 3 == 0:
-                    inner_radius = radius * 0.75
-                    painter.setPen(QPen(text_color, 2 * self.scale))
-                else:
-                    painter.setPen(QPen(text_color, 1 * self.scale))
-
-                x1 = x + inner_radius * math.cos(angle_rad)
-                y1 = y + inner_radius * math.sin(angle_rad)
-                x2 = x + outer_radius * math.cos(angle_rad)
-                y2 = y + outer_radius * math.sin(angle_rad)
-
-                painter.drawLine(int(x1), int(y1), int(x2), int(y2))
-
-        # Draw center dot
-        painter.setBrush(QBrush(color))
-        painter.setPen(Qt.PenStyle.NoPen)
-        center_radius = int(4 * self.scale)
-        painter.drawEllipse(x - center_radius, y - center_radius, center_radius * 2, center_radius * 2)
-
-        # Draw hour hand (shortest, thickest)
-        hour_length = radius * 0.5
-        hour_rad = math.radians(hour_angle - 90)
-        hx = x + hour_length * math.cos(hour_rad)
-        hy = y + hour_length * math.sin(hour_rad)
-        painter.setPen(QPen(color, 4 * self.scale, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        painter.drawLine(x, y, int(hx), int(hy))
-
-        # Draw minute hand (longer, medium thickness)
-        minute_length = radius * 0.7
-        minute_rad = math.radians(minute_angle - 90)
-        mx = x + minute_length * math.cos(minute_rad)
-        my = y + minute_length * math.sin(minute_rad)
-        painter.setPen(QPen(color, 3 * self.scale, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        painter.drawLine(x, y, int(mx), int(my))
-
-        # Draw second hand (longest, thinnest) - optional
-        if show_seconds:
-            second_length = radius * 0.85
-            second_rad = math.radians(second_angle - 90)
-            sx = x + second_length * math.cos(second_rad)
-            sy = y + second_length * math.sin(second_rad)
-            # Second hand in a slightly different shade (reddish)
-            second_color = QColor(255, 80, 80)
-            second_color.setAlpha(color.alpha())
-            painter.setPen(QPen(second_color, 1.5 * self.scale, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            painter.drawLine(x, y, int(sx), int(sy))
-
     def draw_image(self, painter, element, x, y, selected):
         width = int(element.width * self.scale)
         height = int(element.height * self.scale)
@@ -1174,7 +1324,7 @@ class CanvasPreview(QWidget):
         x = int(element.x * self.scale)
         y = int(element.y * self.scale)
 
-        if element.type in ["circle_gauge", "analog_clock"]:
+        if element.type in ["circle_gauge", "gauge_circle_dmd"]:
             radius = int(element.radius * self.scale)
             return QRectF(x - radius, y - radius, radius * 2, radius * 2)
         elif hasattr(element, 'width') and hasattr(element, 'height') and element.width > 0 and element.height > 0:
@@ -1184,10 +1334,127 @@ class CanvasPreview(QWidget):
         else:
             return QRectF(x, y, 100, 50)
 
+    # ------------------------------------------------------------------
+    # Smart guides
+    # ------------------------------------------------------------------
+    def get_element_logical_bounds(self, element):
+        """Get the bounding rectangle of an element in logical (unscaled) units."""
+        if element.type in ["circle_gauge", "gauge_circle_dmd"]:
+            radius = int(element.radius)
+            return (element.x - radius, element.y - radius,
+                    element.x + radius, element.y + radius)
+        elif hasattr(element, 'width') and hasattr(element, 'height') and element.width > 0 and element.height > 0:
+            return (element.x, element.y,
+                    element.x + element.width, element.y + element.height)
+        else:
+            return (element.x, element.y, element.x + 100, element.y + 50)
+
+    def _active_canvas_bounds(self):
+        """Logical canvas extent for the current orientation: (w, h)."""
+        if self.vertical_mode:
+            return DISPLAY_HEIGHT, DISPLAY_WIDTH
+        return DISPLAY_WIDTH, DISPLAY_HEIGHT
+
+    def _logical_bounds_from(self, element, ox, oy):
+        """Logical bounds of an element anchored at origin (ox, oy)."""
+        if element.type in ["circle_gauge", "gauge_circle_dmd"]:
+            radius = int(element.radius)
+            return (ox - radius, oy - radius, ox + radius, oy + radius)
+        elif hasattr(element, 'width') and hasattr(element, 'height') and element.width > 0 and element.height > 0:
+            return (ox, oy, ox + element.width, oy + element.height)
+        else:
+            return (ox, oy, ox + 100, oy + 50)
+
+    def _moving_selection_bounds(self, base_x, base_y):
+        """Union logical bounds of the dragged selection at a raw offset from its start."""
+        min_x = min_y = None
+        max_x = max_y = None
+        for idx in self.selected_indices:
+            if idx not in self.drag_start_positions:
+                continue
+            sx, sy = self.drag_start_positions[idx]
+            l, t, r, b = self._logical_bounds_from(self.elements[idx], sx, sy)
+            l += base_x
+            r += base_x
+            t += base_y
+            b += base_y
+            if min_x is None:
+                min_x, max_x, min_y, max_y = l, r, t, b
+            else:
+                min_x, max_x = min(min_x, l), max(max_x, r)
+                min_y, max_y = min(min_y, t), max(max_y, b)
+        if min_x is None:
+            return (0, 0, 0, 0)
+        return (min_x, min_y, max_x, max_y)
+
+    def _collect_guide_candidates(self, axis):
+        """Reference coordinates for a guide axis: each non-moving element's
+        left/center/right (x) or top/center/bottom (y), plus the canvas extent."""
+        bound_w, bound_h = self._active_canvas_bounds()
+        if bound_w <= 0 or bound_h <= 0:
+            return []
+        candidates = []
+        for idx, el in enumerate(self.elements):
+            if idx in self.selected_indices:
+                continue
+            l, t, r, b = self.get_element_logical_bounds(el)
+            if axis == 'x':
+                candidates.extend((l, (l + r) / 2.0, r))
+            else:
+                candidates.extend((t, (t + b) / 2.0, b))
+        if axis == 'x':
+            candidates.extend((0, bound_w / 2.0, bound_w))
+        else:
+            candidates.extend((0, bound_h / 2.0, bound_h))
+        return candidates
+
+    def _compute_snap(self, base_x, base_y, modifiers):
+        """Resolve smart-guide snapping for the dragged selection.
+
+        Returns (snap_dx, snap_dy, guides): the offsets to add to the raw drag
+        translation and the guide lines (axis, value, extent_a, extent_b) to draw.
+        """
+        snap_off_x = snap_off_y = 0.0
+        guides = []
+        if modifiers & Qt.KeyboardModifier.AltModifier:
+            return 0.0, 0.0, []
+
+        min_x, min_y, max_x, max_y = self._moving_selection_bounds(base_x, base_y)
+        tol = SNAP_TOLERANCE_PX / self.scale
+
+        for axis, (a, b), _offset_attr in (
+                ('x', (min_x, max_x), 'snap_off_x'),
+                ('y', (min_y, max_y), 'snap_off_y')):
+            # edges/centers of the moving selection: 0=start-edge, 1=center, 2=end-edge
+            moving_vals = (a, (a + b) / 2.0, b)
+            best_delta = None
+            best_ref = None
+            best_i = 0
+            for cand in self._collect_guide_candidates(axis):
+                for i, mval in enumerate(moving_vals):
+                    delta = cand - mval
+                    if best_delta is None or abs(delta) < abs(best_delta):
+                        best_delta = delta
+                        best_ref = cand
+                        best_i = i
+            if best_delta is not None and abs(best_delta) <= tol:
+                if axis == 'x':
+                    snap_off_x = best_delta
+                else:
+                    snap_off_y = best_delta
+                bound_w, bound_h = self._active_canvas_bounds()
+                if axis == 'x':
+                    guides.append(('x', best_ref, 0, bound_h))
+                else:
+                    guides.append(('y', best_ref, 0, bound_w))
+
+        return snap_off_x, snap_off_y, guides
+
     def draw_selection_box(self, painter, element, x, y):
         bounds = self.get_element_bounds(element)
 
-        pen = QPen(QColor(0, 150, 255), 2, Qt.PenStyle.DashLine)
+        pen = QPen(ACCENT_QCOLOR, 1.6, Qt.PenStyle.DashLine)
+        pen.setDashPattern([4, 3])
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(bounds)
@@ -1203,7 +1470,7 @@ class CanvasPreview(QWidget):
 
         painter.setPen(Qt.PenStyle.NoPen)
         for hx, hy in handles:
-            painter.setBrush(QBrush(QColor(0, 150, 255)))
+            painter.setBrush(QBrush(ACCENT_QCOLOR))
             painter.drawRect(int(hx - hs / 2), int(hy - hs / 2), hs, hs)
 
     def get_multi_selection_bounds(self):
@@ -1236,7 +1503,8 @@ class CanvasPreview(QWidget):
             return
 
         # Draw outer selection box
-        pen = QPen(QColor(0, 150, 255), 2, Qt.PenStyle.DashLine)
+        pen = QPen(ACCENT_QCOLOR, 1.6, Qt.PenStyle.DashLine)
+        pen.setDashPattern([4, 3])
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(bounds)
@@ -1252,7 +1520,7 @@ class CanvasPreview(QWidget):
 
         painter.setPen(Qt.PenStyle.NoPen)
         for hx, hy in handles:
-            painter.setBrush(QBrush(QColor(0, 150, 255)))
+            painter.setBrush(QBrush(ACCENT_QCOLOR))
             painter.drawRect(int(hx - hs / 2), int(hy - hs / 2), hs, hs)
 
     def get_handle_at(self, pos, element):
@@ -1282,7 +1550,7 @@ class CanvasPreview(QWidget):
             x = element.x * self.scale
             y = element.y * self.scale
 
-            if element.type in ["circle_gauge", "analog_clock"]:
+            if element.type in ["circle_gauge", "gauge_circle_dmd"]:
                 radius = element.radius * self.scale
                 dist = ((pos.x() - x) ** 2 + (pos.y() - y) ** 2) ** 0.5
                 if dist <= radius:
@@ -1294,6 +1562,29 @@ class CanvasPreview(QWidget):
                 if x <= pos.x() <= x + width and y <= pos.y() <= y + height:
                     return i
 
+        return -1
+
+    @staticmethod
+    def hit_test_elements(elements, x, y, visible_only=False):
+        """Hit-test a escala 1.0 (coordenadas lógicas del canvas).
+
+        Recorre de frente a fondo (índice 0 = dibujado al final = encima),
+        igual que ``get_element_at``. Se usa para el toque en el monitor HDMI,
+        donde la salida se renderiza 1:1 con el canvas. Con ``visible_only``
+        los elementos ocultos no son "tocables".
+        """
+        for i, element in enumerate(elements):
+            if visible_only and not getattr(element, "visible", True):
+                continue
+            if element.type in ("circle_gauge", "gauge_circle_dmd"):
+                radius = element.radius
+                dist = ((x - element.x) ** 2 + (y - element.y) ** 2) ** 0.5
+                if dist <= radius:
+                    return i
+            elif getattr(element, "width", 0) > 0 and getattr(element, "height", 0) > 0:
+                if (element.x <= x <= element.x + element.width and
+                        element.y <= y <= element.y + element.height):
+                    return i
         return -1
 
     def get_multi_handle_at(self, pos):
@@ -1318,6 +1609,7 @@ class CanvasPreview(QWidget):
         return self.HANDLE_NONE
 
     def mousePressEvent(self, event):
+        self._reconcile_selection()
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position()
             modifiers = event.modifiers()
@@ -1341,7 +1633,7 @@ class CanvasPreview(QWidget):
                     self.resize_start_elements = {}
                     for idx in self.selected_indices:
                         el = self.elements[idx]
-                        if el.type in ["circle_gauge", "analog_clock"]:
+                        if el.type in ["circle_gauge", "gauge_circle_dmd"]:
                             self.resize_start_elements[idx] = (el.x, el.y, el.radius, el.radius)
                         else:
                             self.resize_start_elements[idx] = (el.x, el.y, el.width, el.height)
@@ -1355,7 +1647,7 @@ class CanvasPreview(QWidget):
                     self.resize_handle = handle
                     self.resize_start_pos = pos
                     self.resize_start_pos_element = (element.x, element.y)
-                    if element.type in ["circle_gauge", "analog_clock"]:
+                    if element.type in ["circle_gauge", "gauge_circle_dmd"]:
                         self.resize_start_size = (element.radius, element.radius)
                     else:
                         self.resize_start_size = (element.width, element.height)
@@ -1422,6 +1714,7 @@ class CanvasPreview(QWidget):
                 if not any_locked:
                     self.drag_started.emit()
                     self.dragging = True
+                    self._active_guides.clear()
                     # Store start positions for all selected elements
                     self.drag_start_positions = {}
                     for idx in self.selected_indices:
@@ -1445,6 +1738,7 @@ class CanvasPreview(QWidget):
             self.update()
 
     def mouseMoveEvent(self, event):
+        self._reconcile_selection()
         pos = event.position()
 
         # Handle multi-element resizing
@@ -1480,7 +1774,7 @@ class CanvasPreview(QWidget):
 
             for idx, (ox, oy, ow, oh) in self.resize_start_elements.items():
                 el = self.elements[idx]
-                if el.type in ["circle_gauge", "analog_clock"]:
+                if el.type in ["circle_gauge", "gauge_circle_dmd"]:
                     new_radius = max(30, int(ow * (scale_x + scale_y) / 2))
                     el.radius = new_radius
                     el.x = int(anchor_x + (ox - anchor_x) * scale_x)
@@ -1501,7 +1795,7 @@ class CanvasPreview(QWidget):
             dx = (pos.x() - self.resize_start_pos.x()) / self.scale
             dy = (pos.y() - self.resize_start_pos.y()) / self.scale
 
-            if element.type in ["circle_gauge", "analog_clock"]:
+            if element.type in ["circle_gauge", "gauge_circle_dmd"]:
                 if self.resize_handle in [self.HANDLE_BR, self.HANDLE_TR]:
                     new_radius = max(30, int(self.resize_start_size[0] + (dx + dy) / 2))
                 else:
@@ -1550,6 +1844,11 @@ class CanvasPreview(QWidget):
         if self.dragging and self.selected_indices:
             dx = (pos.x() - self.drag_start_mouse.x()) / self.scale
             dy = (pos.y() - self.drag_start_mouse.y()) / self.scale
+
+            # Snap to smart guides and update the temporary alignment lines
+            snap_dx, snap_dy, self._active_guides = self._compute_snap(dx, dy, event.modifiers())
+            dx += snap_dx
+            dy += snap_dy
 
             # Clamp against the active canvas bounds - swapped when vertical mode
             # is enabled, since the logical design space is then DISPLAY_HEIGHT x
@@ -1602,10 +1901,11 @@ class CanvasPreview(QWidget):
             self.dragging = False
             self.resizing = False
             self.resize_handle = self.HANDLE_NONE
+            self._active_guides = []
 
     def keyPressEvent(self, event):
         """Handle arrow key nudging for selected elements."""
-        if not self.selected_indices:
+        if not self._reconcile_selection():
             return
 
         # Check if any selected element is locked
@@ -1644,4 +1944,230 @@ class CanvasPreview(QWidget):
             self.element_moved.emit(idx, element.x, element.y)
 
         self.update()
+
+
+class DMDCanvas(CanvasPreview):
+    """Canvas adaptado a resolución DMD (128×32 nativo).
+
+    Hereda de CanvasPreview para reutilizar los draw_* existentes.
+    Produces RGB565 bytes para enviar por TCP al ESP32.
+    """
+
+    def __init__(self, width=128, height=32):
+        self.dmd_width = width
+        self.dmd_height = height
+        super().__init__()
+        self.scale = 1.0
+        self.vertical_mode = False
+        self.background_color = QColor(0, 0, 0)
+        self._update_fixed_size()
+
+    def _update_fixed_size(self):
+        self.setFixedSize(
+            int(self.dmd_width * self.scale),
+            int(self.dmd_height * self.scale),
+        )
+
+    def fit_scale_for(self, avail_w, avail_h, margin=28):
+        avail_w = max(1, avail_w - margin)
+        avail_h = max(1, avail_h - margin)
+        return max(1.0, min(8.0, min(avail_w / self.dmd_width,
+                                     avail_h / self.dmd_height)))
+
+    def set_zoom_scale(self, scale):
+        scale = max(1.0, min(8.0, scale))
+        if abs(scale - self.scale) < 0.001:
+            return
+        self.scale = scale
+        self._active_guides = []
+        self._update_fixed_size()
+        self.update()
+
+    # ------------------------------------------------------------------
+    # Paint
+    # ------------------------------------------------------------------
+    def paintEvent(self, event):
+        cw = int(self.dmd_width * self.scale)
+        ch = int(self.dmd_height * self.scale)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        # Fondo del viewport (área fuera del canvas nativo)
+        painter.fillRect(0, 0, self.width(), self.height(), QColor("#08090b"))
+
+        # Canvas nativo (negro) con borde sutil
+        draw_rect = QRectF(0, 0, cw, ch)
+        painter.fillRect(draw_rect, self.background_color)
+        pen = QPen(BORDER_QCOLOR, 1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(draw_rect.adjusted(0, 0, -1, -1))
+
+        # Elementos en orden inverso (último en lista = fondo)
+        for i in range(len(self.elements) - 1, -1, -1):
+            is_selected = i in self.selected_indices
+            draw_individual = is_selected and not self.group_selection_mode
+            self.draw_element(painter, self.elements[i], draw_individual)
+
+        if len(self.selected_indices) > 1:
+            self.draw_multi_selection_box(painter)
+
+        if self._active_guides:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            guide_pen = QPen(GUIDE_COLOR, 1, Qt.PenStyle.DashLine)
+            guide_pen.setDashPattern([4, 3])
+            painter.setPen(guide_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for axis, value, extent_a, extent_b in self._active_guides:
+                px = int(value * self.scale)
+                a = int(extent_a * self.scale)
+                b = int(extent_b * self.scale)
+                if axis == 'x':
+                    painter.drawLine(px, a, px, b)
+                else:
+                    painter.drawLine(a, px, b, px)
+
+        painter.end()
+
+    # ------------------------------------------------------------------
+    # RGB565 frame generation
+    # ------------------------------------------------------------------
+    def get_frame_rgb565(self):
+        """Renderiza los elementos a un buffer RGB565 (bytes) del tamaño nativo DMD.
+
+        Returns:
+            bytes: payload de 8192 bytes (128×32×2) listo para enviar por TCP.
+        """
+        img = QImage(self.dmd_width, self.dmd_height,
+                     QImage.Format.Format_RGB16)
+        img.fill(self.background_color)
+
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        # Temporarily set scale=1 for 1:1 rendering
+        old_scale = self.scale
+        self.scale = 1.0
+
+        for i in range(len(self.elements) - 1, -1, -1):
+            self.draw_element(painter, self.elements[i], False)
+
+        self.scale = old_scale
+        painter.end()
+
+        return img.bits().tobytes()
+
+    def set_dmd_size(self, width, height):
+        self.dmd_width = width
+        self.dmd_height = height
+        self._update_fixed_size()
+        self.update()
+
+
+class HDMICanvas(DMDCanvas):
+    """Canvas de edición para una salida en monitor (HDMI), a resolución nativa.
+
+    Reutiliza de ``DMDCanvas`` el zoom, el tamaño fijo y los ``draw_*`` de
+    ``CanvasPreview``, pero trabaja en color completo (RGB888) y con
+    antialiasing, que es lo que espera la ventana fullscreen de salida.
+    El tamaño del canvas es la resolución física del monitor seleccionado.
+    """
+
+    def __init__(self, width=1920, height=1080):
+        super().__init__(width, height)
+
+    @property
+    def hdmi_width(self):
+        return self.dmd_width
+
+    @property
+    def hdmi_height(self):
+        return self.dmd_height
+
+    def set_hdmi_size(self, width, height):
+        self.set_dmd_size(int(width), int(height))
+
+    def fit_scale_for(self, avail_w, avail_h, margin=28):
+        # Límite de zoom más laxo que DMD: los monitores tienen mucha más
+        # resolución, así que el rango útil (fracciones) empieza por debajo de 1.
+        avail_w = max(1, avail_w - margin)
+        avail_h = max(1, avail_h - margin)
+        return max(0.05, min(4.0, min(avail_w / self.dmd_width,
+                                       avail_h / self.dmd_height)))
+
+    def set_zoom_scale(self, scale):
+        scale = max(0.05, min(4.0, scale))
+        if abs(scale - self.scale) < 0.001:
+            return
+        self.scale = scale
+        self._active_guides = []
+        self._update_fixed_size()
+        self.update()
+
+    def paintEvent(self, event):
+        cw = int(self.dmd_width * self.scale)
+        ch = int(self.dmd_height * self.scale)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        painter.fillRect(0, 0, self.width(), self.height(), QColor("#08090b"))
+
+        draw_rect = QRectF(0, 0, cw, ch)
+        painter.fillRect(draw_rect, self.background_color)
+        pen = QPen(BORDER_QCOLOR, 1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(draw_rect.adjusted(0, 0, -1, -1))
+
+        for i in range(len(self.elements) - 1, -1, -1):
+            is_selected = i in self.selected_indices
+            draw_individual = is_selected and not self.group_selection_mode
+            self.draw_element(painter, self.elements[i], draw_individual)
+
+        if len(self.selected_indices) > 1:
+            self.draw_multi_selection_box(painter)
+
+        if self._active_guides:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            guide_pen = QPen(GUIDE_COLOR, 1, Qt.PenStyle.DashLine)
+            guide_pen.setDashPattern([4, 3])
+            painter.setPen(guide_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for axis, value, extent_a, extent_b in self._active_guides:
+                px = int(value * self.scale)
+                a = int(extent_a * self.scale)
+                b = int(extent_b * self.scale)
+                if axis == 'x':
+                    painter.drawLine(px, a, px, b)
+                else:
+                    painter.drawLine(a, px, b, px)
+
+        painter.end()
+
+    def get_frame_rgb888(self):
+        """Renderiza los elementos a un ``QImage`` RGB888 a resolución nativa.
+
+        Se usa directamente como frame de la ventana HDMI (sin pasar por JPEG).
+        """
+        img = QImage(self.dmd_width, self.dmd_height,
+                     QImage.Format.Format_RGB888)
+        img.fill(self.background_color)
+
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        old_scale = self.scale
+        self.scale = 1.0
+        try:
+            for i in range(len(self.elements) - 1, -1, -1):
+                self.draw_element(painter, self.elements[i], False)
+        finally:
+            self.scale = old_scale
+            painter.end()
+
+        return img
 ```

@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "element_list.py"
-source_sha256: 8d072789e914082647197f8c228946c4a48f6348b173b944254647e17829d936
-source_bytes: 40306
-source_lines: 997
+source_sha256: fb7ca449f28327262a22c5a1775b316988d888b3ab910e625094e2ccef407a3c
+source_bytes: 45878
+source_lines: 1157
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -26,15 +26,17 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 ### Imports directos
 
-- `from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox, QTreeWidget, QTreeWidgetItem, QMenu, QInputDialog, QAbstractItemView`
 - `from PySide6.QtCore import Qt, Signal`
-- `from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPixmap, QIcon`
-- `from constants import ELEMENT_TYPES, DEFAULT_ELEMENT_PROPS`
+- `from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap, QStandardItem, QStandardItemModel`
+- `from PySide6.QtWidgets import QAbstractItemView, QComboBox, QHBoxLayout, QInputDialog, QLabel, QMenu, QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget`
+- `from constants import DEFAULT_ELEMENT_PROPS, DMD_DEFAULT_ELEMENT_PROPS, DMD_ELEMENT_TYPES, ELEMENT_TYPES`
 - `from element import ThemeElement`
 - `from elements import get_custom_element`
+- `from ui_style import ACCENT, TEXT_DIM, TEXT_FAINT, IconButton, SectionLabel`
 
 ### Clases directas
 
+- `_ElementRowWidget`
 - `ElementTreeWidget`
 - `ElementListPanel`
 
@@ -49,17 +51,96 @@ Ninguna función declarada directamente en el módulo.
 ElementListPanel - Element list management widget with group support.
 """
 
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QComboBox, QTreeWidget, QTreeWidgetItem,
-    QMenu, QInputDialog, QAbstractItemView
-)
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPixmap, QIcon
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QIcon,
+    QPainter,
+    QPen,
+    QPixmap,
+    QStandardItem,
+    QStandardItemModel,
+)
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QMenu,
+    QSizePolicy,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
-from constants import ELEMENT_TYPES, DEFAULT_ELEMENT_PROPS
+from constants import (
+    DEFAULT_ELEMENT_PROPS,
+    DMD_DEFAULT_ELEMENT_PROPS,
+    DMD_ELEMENT_TYPES,
+    ELEMENT_TYPES,
+)
 from element import ThemeElement
 from elements import get_custom_element
+from ui_style import ACCENT, TEXT_DIM, TEXT_FAINT, IconButton, SectionLabel
+
+# Agrupación del combo "Añadir elemento". Los tipos se muestran con nombres
+# amigables y agrupados en secciones; el id real se guarda como itemData.
+ELEMENT_TYPE_GROUPS = (
+    ("Simple Elements", ("circle_gauge", "bar_gauge", "text", "rectangle",
+                         "clock", "image")),
+    ("Complex Elements", ("line_chart", "gif", "gauge_circle_dmd",
+                          "segmented_bar", "bar_chart")),
+)
+ELEMENT_TYPE_LABELS = {
+    "circle_gauge": "Gauge",
+    "bar_gauge": "Bar",
+    "text": "Text",
+    "rectangle": "Rectangle",
+    "clock": "Clock",
+    "image": "Image",
+    "line_chart": "Line Chart",
+    "gif": "GIF",
+    "gauge_circle_dmd": "DMD Gauge",
+    "segmented_bar": "MultiPart Bar",
+    "bar_chart": "Bars Chart",
+}
+
+
+class _ElementRowWidget(QWidget):
+    """In-cell row for the elements tree: icon + label + eye (visibility) + lock."""
+
+    def __init__(self, icon, text, hidden, locked, on_eye, on_lock, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 1, 4, 1)
+        lay.setSpacing(5)
+
+        self.icon_label = QLabel()
+        self.icon_label.setPixmap(icon.pixmap(20, 20))
+        lay.addWidget(self.icon_label)
+
+        self.label = QLabel(text)
+        if locked:
+            self.label.setStyleSheet("color: %s;" % TEXT_FAINT)
+        elif hidden:
+            self.label.setStyleSheet("color: %s;" % TEXT_DIM)
+        lay.addWidget(self.label, 1)
+
+        self.eye_btn = IconButton("eye", checkable=True, check_color=ACCENT, size=13,
+                                  tooltip="Toggle visibility")
+        self.eye_btn.setChecked(not hidden)
+        self.eye_btn.clicked.connect(on_eye)
+        lay.addWidget(self.eye_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.lock_btn = IconButton("lock" if locked else "lock_open", checkable=True,
+                                   check_color=ACCENT, size=13, tooltip="Toggle lock")
+        self.lock_btn.setChecked(locked)
+        self.lock_btn.clicked.connect(on_lock)
+        lay.addWidget(self.lock_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
 
 class ElementTreeWidget(QTreeWidget):
@@ -89,25 +170,29 @@ class ElementListPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.elements = []
-        self.groups = {}  # group_name -> list of element indices
         self._icon_cache = {}  # Cache for element type icons
         self._group_icon = None  # Cache for group icon
+        self._dmd_mode = False  # True when the active project targets a DMD
         self.setup_ui()
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 8)
+        layout.setSpacing(8)
 
-        title = QLabel("Elements")
-        title.setStyleSheet("font-weight: bold; font-size: 14px; padding: 5px;")
-        layout.addWidget(title)
+        layout.addWidget(SectionLabel("Elements"))
 
         add_layout = QHBoxLayout()
+        add_layout.setSpacing(6)
 
         self.add_combo = QComboBox()
-        self.add_combo.addItems(ELEMENT_TYPES)
-        add_layout.addWidget(self.add_combo)
+        self.add_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._populate_add_combo(ELEMENT_TYPES)
+        add_layout.addWidget(self.add_combo, 1)
 
-        self.add_btn = QPushButton("+ Add")
+        self.add_btn = IconButton("plus", color=TEXT_DIM, hover_color=ACCENT, size=14)
+        self.add_btn.setFixedSize(34, 28)
+        self.add_btn.setToolTip("Add element")
         self.add_btn.clicked.connect(self.add_element)
         add_layout.addWidget(self.add_btn)
 
@@ -118,59 +203,70 @@ class ElementListPanel(QWidget):
         self.tree_widget.items_reordered.connect(self.on_items_reordered)
         self.tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree_widget.customContextMenuRequested.connect(self.show_context_menu)
-        layout.addWidget(self.tree_widget)
+        layout.addWidget(self.tree_widget, 1)
 
-        btn_layout = QHBoxLayout()
+    def _populate_add_combo(self, types_list):
+        """Rellena el combo con secciones Simple/Complex y nombres amigables.
 
-        self.duplicate_btn = QPushButton("Duplicate")
-        self.duplicate_btn.clicked.connect(self.duplicate_element)
-        btn_layout.addWidget(self.duplicate_btn)
+        Las cabeceras no son seleccionables y el id real del elemento queda en
+        ``itemData(UserRole)``; ``add_element`` lee ese id, no el texto.
+        """
+        model = QStandardItemModel()
+        covered = set()
 
-        self.remove_btn = QPushButton("Remove")
-        self.remove_btn.clicked.connect(self.remove_element)
-        btn_layout.addWidget(self.remove_btn)
+        def add_header(title):
+            header = QStandardItem(title)
+            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+            header.setForeground(QColor(TEXT_DIM))
+            model.appendRow(header)
 
-        layout.addLayout(btn_layout)
+        def add_type(element_type):
+            covered.add(element_type)
+            label = ELEMENT_TYPE_LABELS.get(
+                element_type, element_type.replace("_", " ").title())
+            item = QStandardItem(label)
+            item.setData(element_type, Qt.ItemDataRole.UserRole)
+            model.appendRow(item)
 
-        group_layout = QHBoxLayout()
+        for title, members in ELEMENT_TYPE_GROUPS:
+            present = [m for m in members if m in types_list]
+            if not present:
+                continue
+            add_header(title)
+            for element_type in present:
+                add_type(element_type)
 
-        self.group_btn = QPushButton("Group")
-        self.group_btn.clicked.connect(self.group_selected)
-        self.group_btn.setToolTip("Group selected elements (Ctrl+G)")
-        group_layout.addWidget(self.group_btn)
+        remaining = [t for t in types_list if t not in covered]
+        if remaining:
+            add_header("Other")
+            for element_type in remaining:
+                add_type(element_type)
 
-        self.ungroup_btn = QPushButton("Ungroup")
-        self.ungroup_btn.clicked.connect(self.ungroup_selected)
-        self.ungroup_btn.setToolTip("Ungroup selected elements (Ctrl+Shift+G)")
-        group_layout.addWidget(self.ungroup_btn)
+        self.add_combo.setModel(model)
+        for row in range(model.rowCount()):
+            item = model.item(row)
+            if item is not None and (item.flags() & Qt.ItemFlag.ItemIsSelectable):
+                self.add_combo.setCurrentIndex(row)
+                break
 
-        layout.addLayout(group_layout)
+    def set_available_types(self, types_list):
+        """Refresca el combo de tipos según el dispositivo activo (LCD vs DMD)."""
+        current = self.add_combo.currentData()
+        self._populate_add_combo(types_list)
+        if current:
+            idx = self.add_combo.findData(current)
+            if idx >= 0:
+                self.add_combo.setCurrentIndex(idx)
 
-        lock_layout = QHBoxLayout()
-
-        self.lock_btn = QPushButton("Lock")
-        self.lock_btn.clicked.connect(self.lock_selected)
-        self.lock_btn.setToolTip("Lock selected elements (prevent editing)")
-        lock_layout.addWidget(self.lock_btn)
-
-        self.unlock_btn = QPushButton("Unlock")
-        self.unlock_btn.clicked.connect(self.unlock_selected)
-        self.unlock_btn.setToolTip("Unlock selected elements")
-        lock_layout.addWidget(self.unlock_btn)
-
-        layout.addLayout(lock_layout)
-
-        move_layout = QHBoxLayout()
-
-        self.up_btn = QPushButton("Move Up")
-        self.up_btn.clicked.connect(self.move_up)
-        move_layout.addWidget(self.up_btn)
-
-        self.down_btn = QPushButton("Move Down")
-        self.down_btn.clicked.connect(self.move_down)
-        move_layout.addWidget(self.down_btn)
-
-        layout.addLayout(move_layout)
+    def set_dmd_mode(self, dmd_active):
+        """Activa/desactiva el modo DMD: limita los tipos al catálogo DMD y
+        usa los tamaños por defecto a resolución 128×32."""
+        self._dmd_mode = dmd_active
+        types = DMD_ELEMENT_TYPES if dmd_active else ELEMENT_TYPES
+        self.set_available_types(types)
 
     def show_context_menu(self, position):
         """Show context menu for tree items."""
@@ -213,6 +309,28 @@ class ElementListPanel(QWidget):
 
             menu.addSeparator()
 
+            # Check if any selected elements are visible/hidden
+            selected_elements = [self.elements[i] for i in self.get_selected_element_indices()]
+            has_visible = any(getattr(el, 'visible', True) for el in selected_elements)
+            has_hidden = any(not getattr(el, 'visible', True) for el in selected_elements)
+
+            if has_visible:
+                hide_action = menu.addAction("Hide")
+                hide_action.triggered.connect(self.hide_selected)
+
+            if has_hidden:
+                show_action = menu.addAction("Show")
+                show_action.triggered.connect(self.show_selected)
+
+            menu.addSeparator()
+
+            up_action = menu.addAction("Move Up")
+            up_action.triggered.connect(self.move_up)
+            down_action = menu.addAction("Move Down")
+            down_action.triggered.connect(self.move_down)
+
+            menu.addSeparator()
+
             duplicate_action = menu.addAction("Duplicate")
             duplicate_action.triggered.connect(self.duplicate_element)
 
@@ -237,7 +355,6 @@ class ElementListPanel(QWidget):
             "text": ("#ffffff", "text"),
             "rectangle": ("#ff9900", "rect"),
             "clock": ("#ffff00", "clock"),
-            "analog_clock": ("#ffff00", "clock"),
             "image": ("#ff66ff", "image"),
             "line_chart": ("#00ff96", "chart"),
             "gif": ("#ff66ff", "image"),
@@ -306,16 +423,35 @@ class ElementListPanel(QWidget):
             "text": "Text",
             "rectangle": "Rectangle",
             "clock": "Clock",
-            "analog_clock": "Analog Clock",
             "image": "Image",
             "line_chart": "Chart",
             "gif": "GIF",
+            "gauge_circle_dmd": "DMD Gauge",
+            "segmented_bar": "MultiPart Bar",
+            "bar_chart": "Bars Chart",
         }
 
         type_label = type_names.get(element.type, element.type.replace("_", " ").title())
 
         # Use element name from properties panel
         return f"{type_label} - {element.name}"
+
+    def _build_element_item(self, element, idx):
+        """Create a tree item for an element and its eye/lock row widget."""
+        item = QTreeWidgetItem([""])
+        item.setData(0, Qt.ItemDataRole.UserRole, idx)  # Store element index
+        item.setData(0, Qt.ItemDataRole.UserRole + 1, "element")  # Mark as element
+
+        hidden = not getattr(element, 'visible', True)
+        row = _ElementRowWidget(
+            icon=self.get_element_icon(element.type),
+            text=self.get_friendly_label(element),
+            hidden=hidden,
+            locked=element.locked,
+            on_eye=lambda i=idx: self.toggle_visible(i),
+            on_lock=lambda i=idx: self.toggle_lock(i),
+        )
+        return item, row
 
     def refresh_list(self, preserve_state=True):
         """Refresh the tree widget to reflect current elements and groups."""
@@ -379,32 +515,16 @@ class ElementListPanel(QWidget):
 
                 # Add elements in this group
                 for idx, element in group_elements:
-                    icon = self.get_element_icon(element.type)
-                    label = self.get_friendly_label(element)
-                    if element.locked:
-                        label = f"🔒 {label}"
-                    child_item = QTreeWidgetItem([label])
-                    child_item.setIcon(0, icon)
-                    child_item.setData(0, Qt.ItemDataRole.UserRole, idx)  # Store element index
-                    child_item.setData(0, Qt.ItemDataRole.UserRole + 1, "element")  # Mark as element
-                    if element.locked:
-                        child_item.setForeground(0, QColor(128, 128, 128))  # Gray out locked
+                    child_item, row = self._build_element_item(element, idx)
                     group_item.addChild(child_item)
+                    self.tree_widget.setItemWidget(child_item, 0, row)
 
             else:  # item_type == 'element' (ungrouped)
                 idx = item_data
                 element = self.elements[idx]
-                icon = self.get_element_icon(element.type)
-                label = self.get_friendly_label(element)
-                if element.locked:
-                    label = f"🔒 {label}"
-                item = QTreeWidgetItem([label])
-                item.setIcon(0, icon)
-                item.setData(0, Qt.ItemDataRole.UserRole, idx)  # Store element index
-                item.setData(0, Qt.ItemDataRole.UserRole + 1, "element")  # Mark as element
-                if element.locked:
-                    item.setForeground(0, QColor(128, 128, 128))  # Gray out locked
+                item, row = self._build_element_item(element, idx)
                 self.tree_widget.addTopLevelItem(item)
+                self.tree_widget.setItemWidget(item, 0, row)
 
         # Restore expanded state and selection
         if preserve_state:
@@ -495,14 +615,22 @@ class ElementListPanel(QWidget):
         self.elements_changed.emit()
 
     def add_element(self):
+        element_type = self.add_combo.currentData()
+        if not element_type:
+            return
         self.elements_will_change.emit()
-        element_type = self.add_combo.currentText()
 
         custom = get_custom_element(element_type)
-        if custom:
+        defaults = (DMD_DEFAULT_ELEMENT_PROPS if self._dmd_mode
+                    else DEFAULT_ELEMENT_PROPS)
+        if self._dmd_mode and element_type in defaults:
+            # DMD panels are tiny: prefer the DMD-sized defaults even for custom
+            # elements (e.g. line_chart would otherwise be added at 300x100).
+            props = defaults[element_type].copy()
+        elif custom:
             props = custom.get('defaults', {}).copy()
         else:
-            props = DEFAULT_ELEMENT_PROPS.get(element_type, {}).copy()
+            props = defaults.get(element_type, {}).copy()
         props["name"] = f"{element_type}_{len(self.elements) + 1}"
 
         element = ThemeElement(element_type, **props)
@@ -629,10 +757,49 @@ class ElementListPanel(QWidget):
         self.select_elements(indices)
         self.elements_changed.emit()
 
-    def is_selection_locked(self):
-        """Check if any selected element is locked."""
+    def hide_selected(self):
+        """Hide selected elements (skip rendering, keep editable)."""
         indices = self.get_selected_element_indices()
-        return any(self.elements[idx].locked for idx in indices)
+        if not indices:
+            return
+
+        self.elements_will_change.emit()
+        for idx in indices:
+            self.elements[idx].visible = False
+
+        self.refresh_list()
+        self.select_elements(indices)
+        self.elements_changed.emit()
+
+    def show_selected(self):
+        """Show (un-hide) selected elements."""
+        indices = self.get_selected_element_indices()
+        if not indices:
+            return
+
+        self.elements_will_change.emit()
+        for idx in indices:
+            self.elements[idx].visible = True
+
+        self.refresh_list()
+        self.select_elements(indices)
+        self.elements_changed.emit()
+
+    def toggle_visible(self, idx):
+        """Toggle visibility for a single element by index (used by the eye icon)."""
+        if 0 <= idx < len(self.elements):
+            self.elements_will_change.emit()
+            self.elements[idx].visible = not getattr(self.elements[idx], 'visible', True)
+            self.refresh_list()
+            self.elements_changed.emit()
+
+    def toggle_lock(self, idx):
+        """Toggle the locked state for a single element by index (used by the lock icon)."""
+        if 0 <= idx < len(self.elements):
+            self.elements_will_change.emit()
+            self.elements[idx].locked = not self.elements[idx].locked
+            self.refresh_list()
+            self.elements_changed.emit()
 
     def rename_selected(self):
         """Rename selected group or element."""
@@ -1037,9 +1204,4 @@ class ElementListPanel(QWidget):
             else:
                 self.element_selected.emit(-1)
             self.elements_selected.emit(indices)
-
-    # Keep old list_widget reference for compatibility
-    @property
-    def list_widget(self):
-        return self.tree_widget
 ```

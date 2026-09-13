@@ -3,8 +3,8 @@ Application path utilities.
 Handles path resolution for both script and frozen executable.
 """
 
-import sys
 import os
+import sys
 
 
 def get_app_dir():

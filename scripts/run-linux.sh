@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Lanza Thermal Engine usando el entorno virtual creado por install-linux.sh.
+# Lanza Thermal Engine Studio usando el entorno virtual creado por install-linux.sh.
 #
 set -euo pipefail
 

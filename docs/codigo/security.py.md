@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "security.py"
-source_sha256: 7aeb73bff3159e0bf69e5c92cead3a854da0e1068044bec0ea7de195a58c714f
-source_bytes: 7755
-source_lines: 252
+source_sha256: 1e14624d53f8f42f1eb75673c334ef2057e4e32853d21ca00be26c90c6b15b6b
+source_bytes: 9284
+source_lines: 283
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -16,7 +16,7 @@ generated_by: "scripts/generate_code_markdown.py"
 
 ```python
 """
-Security utilities for Thermal Engine.
+Security utilities for Thermal Engine Studio.
 Handles path validation, schema validation, and integrity checks.
 """
 ```
@@ -49,12 +49,13 @@ Ninguna clase declarada directamente en el módulo.
 
 ```python
 """
-Security utilities for Thermal Engine.
+Security utilities for Thermal Engine Studio.
 Handles path validation, schema validation, and integrity checks.
 """
 
 import os
 import re
+
 from app_path import get_app_dir
 
 # Allowed directories for file loading (relative to app dir)
@@ -157,7 +158,8 @@ def validate_preset_schema(data):
     # Validate top-level fields
     allowed_keys = {
         'name', 'background_color', 'display_width', 'display_height',
-        'elements', 'video_background'
+        'elements', 'video_background', 'targets', 'lcd_model', 'dmd_config',
+        'lcd', 'dmd', 'hdmi', 'hdmi_config'
     }
     for key in data.keys():
         if key not in allowed_keys:
@@ -251,6 +253,35 @@ def validate_element_schema(element, index):
                 errors.append(f"{prefix}: '{field}' must be a string")
             elif len(element[field]) > 500:
                 errors.append(f"{prefix}: '{field}' too long")
+
+    # Validate interaction (HDMI touch) fields. No execution happens here; this
+    # only guarantees the stored action is well-formed before the app gates and
+    # confirms it at runtime.
+    if 'tap_action' in element:
+        if element['tap_action'] not in ('none', 'command'):
+            errors.append(f"{prefix}: invalid 'tap_action'")
+    for field in ('tap_command', 'tap_workdir'):
+        if field in element and element[field]:
+            if not isinstance(element[field], str):
+                errors.append(f"{prefix}: '{field}' must be a string")
+            elif '\x00' in element[field]:
+                errors.append(f"{prefix}: '{field}' contains a null byte")
+            elif len(element[field]) > 1000:
+                errors.append(f"{prefix}: '{field}' too long")
+    if 'tap_args' in element and element['tap_args']:
+        args = element['tap_args']
+        if not isinstance(args, (list, tuple)):
+            errors.append(f"{prefix}: 'tap_args' must be a list")
+        elif len(args) > 50:
+            errors.append(f"{prefix}: 'tap_args' has too many items")
+        else:
+            for arg in args:
+                if not isinstance(arg, str):
+                    errors.append(f"{prefix}: 'tap_args' items must be strings")
+                    break
+                if '\x00' in arg or len(arg) > 500:
+                    errors.append(f"{prefix}: invalid 'tap_args' item")
+                    break
 
     return errors
 

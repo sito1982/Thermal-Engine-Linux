@@ -6,7 +6,7 @@
 
 [`element.py`](../element.py) serializa `ThemeElement`; [`security.py`](../security.py) valida estructuras de preset y nombres de archivo; [`presets.py`](../presets.py) carga, guarda, muestra y elimina presets. La ventana principal integra ese panel y entrega una imagen de miniatura al guardar.
 
-Un preset es un JSON con nombre, dimensiones y elementos. Los ejemplos observados incluyen texto, gauges circulares y de barra, imágenes, gráfica de línea y reloj analógico. Los datos de cada elemento pueden usar una fuente de sensor o `static`.
+Un preset es un JSON con nombre, dimensiones y elementos. Los ejemplos observados incluyen texto, gauges circulares y de barra, imágenes y gráfica de línea. Los datos de cada elemento pueden usar una fuente de sensor o `static`.
 
 ## Presets incluidos
 
@@ -19,14 +19,6 @@ La aplicación asocia cada JSON con una miniatura PNG de igual nombre cuando exi
 ![[presets/Default.png]]
 
 El preset declara tamaño lógico 1280×480 y contiene gauges de CPU/GPU y un elemento de texto.
-
-### Analog Clock
-
-[JSON fuente](../presets/Analog%20Clock.json)
-
-![[presets/Analog Clock.png]]
-
-El preset declara tamaño lógico 1280×480 y contiene un elemento de reloj analógico.
 
 ### Untitled Theme
 
@@ -62,8 +54,6 @@ La inclusión de iconos y presets en los paquetes se resume en [[Compilación, d
 - `main_window.py`
 - `presets/Default.json`
 - `presets/Default.png`
-- `presets/Analog Clock.json`
-- `presets/Analog Clock.png`
 - `presets/Untitled Theme.json`
 - `presets/Untitled Theme.png`
 - ` Theme.json`

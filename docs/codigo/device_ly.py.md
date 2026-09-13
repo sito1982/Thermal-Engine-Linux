@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "device_ly.py"
-source_sha256: 8dc089f93c9ab1b3f2e9ace575cd84cb67b267e143715a173d3bba5774d988ea
-source_bytes: 7979
-source_lines: 253
+source_sha256: ba2725ca1a79eceb462e405ad4162920eca0cc6541f0d952ae39b1615432b010
+source_bytes: 9708
+source_lines: 281
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -54,7 +54,6 @@ import struct
 import usb.core
 import usb.util
 
-
 LY_VID = 0x0416
 LY_PID = 0x5408
 
@@ -80,6 +79,20 @@ HANDSHAKE_PAYLOAD = bytes([
 class LYDevice:
     """Controlador del protocolo LY para el dispositivo USB 0416:5408."""
 
+    # --- Capacidades de envío declaradas por este panel (usadas por la UI) ---
+    # frame_rate_options: valores que ofrece el submenú Frame Rate para este
+    #   dispositivo. Otros paneles pueden declarar [10,20,30,60] (o más); la
+    #   vista se reconstruye automáticamente en función de lo que declare cada
+    #   driver. Faltar estos atributos => comportamiento legado 10/20/30/60.
+    # El hardware LY 0416:5408 decodifica ~12fps con 4:4:4 y ~24fps con 4:2:2
+    # (medido en bench), por eso solo ofrece Low(12)/High(24).
+    frame_rate_options = [12, 24]
+    # use_send_thread: ruta "Alta" -> hilo de envío dedicado + subsampling 4:2:2.
+    # Faltar este atributo (drivers legados) => envío síncrono 4:4:4 como siempre.
+    use_send_thread = True
+    fast_subsampling = 1      # High (24fps): 4:2:2
+    slow_subsampling = 0      # Low  (12fps): 4:4:4
+
     def __init__(self):
         self.dev = None
         self.interface_number = 0
@@ -87,6 +100,12 @@ class LYDevice:
         self.ep_in = None
         self.pm = None
         self.sub_type = None
+        # Identificación del panel (para buscar en el catálogo de LCDs).
+        self.vid = LY_VID
+        self.pid = LY_PID
+        # Buffer persistente de empaquetado de frames (reutilizado entre envíos).
+        self._chunk_buf = None
+        self._frame_size = -1
         # Resolución nativa del LCD Trofeo Vision 9.16
         self.width = 1920
         self.height = 480
@@ -224,35 +243,44 @@ class LYDevice:
         num_chunks = total_size // CHUNK_DATA_SIZE + 1
         last_chunk_data = total_size % CHUNK_DATA_SIZE
 
-        chunks = bytearray(num_chunks * CHUNK_SIZE)
-
-        for index in range(num_chunks):
-            chunk_offset = index * CHUNK_SIZE
-            is_last = index == num_chunks - 1
-            data_length = last_chunk_data if is_last else CHUNK_DATA_SIZE
-
-            # Cabecera LY de 16 bytes.
-            chunks[chunk_offset] = 0x01
-            chunks[chunk_offset + 1] = 0xFF
-            struct.pack_into("<I", chunks, chunk_offset + 2, total_size)
-            struct.pack_into("<H", chunks, chunk_offset + 6, data_length)
-            chunks[chunk_offset + 8] = 0x02  # Modo reportado por el handshake (response[8]).
-            struct.pack_into("<H", chunks, chunk_offset + 9, num_chunks)
-            struct.pack_into("<H", chunks, chunk_offset + 11, index)
-
-            source_offset = index * CHUNK_DATA_SIZE
-            payload = jpeg_data[source_offset:source_offset + data_length]
-            payload_offset = chunk_offset + CHUNK_HEADER_SIZE
-            chunks[payload_offset:payload_offset + len(payload)] = payload
-
         # LY exige que el total de bloques sea múltiplo de cuatro.
         padded_chunks = num_chunks
         remainder = padded_chunks % 4
         if remainder:
             padded_chunks += 4 - remainder
 
-        total_bytes = padded_chunks * CHUNK_SIZE
-        send_buffer = bytes(chunks) + bytes(total_bytes - len(chunks))
+        # Reusa un buffer de bloque persistente: el empaquetado con
+        # struct.pack_into + memoryview evita las copias grandes de bytes
+        # que se hacían por frame (bytearray(num) -> bytes(chunks)+padding).
+        # El rebuild garantiza que len(buffer) == total_bytes siempre.
+        need = padded_chunks * CHUNK_SIZE
+        if self._frame_size != total_size or self._chunk_buf is None or len(self._chunk_buf) < need:
+            self._chunk_buf = bytearray(need)
+            self._frame_size = total_size
+
+        chunks_view = memoryview(self._chunk_buf)
+        for index in range(num_chunks):
+            chunk_offset = index * CHUNK_SIZE
+            is_last = index == num_chunks - 1
+            data_length = last_chunk_data if is_last else CHUNK_DATA_SIZE
+
+            # Cabecera LY de 16 bytes.
+            self._chunk_buf[chunk_offset] = 0x01
+            self._chunk_buf[chunk_offset + 1] = 0xFF
+            struct.pack_into("<I", self._chunk_buf, chunk_offset + 2, total_size)
+            struct.pack_into("<H", self._chunk_buf, chunk_offset + 6, data_length)
+            self._chunk_buf[chunk_offset + 8] = 0x02  # Modo reportado por el handshake (response[8]).
+            struct.pack_into("<H", self._chunk_buf, chunk_offset + 9, num_chunks)
+            struct.pack_into("<H", self._chunk_buf, chunk_offset + 11, index)
+
+            source_offset = index * CHUNK_DATA_SIZE
+            payload = jpeg_data[source_offset:source_offset + data_length]
+            chunks_view[chunk_offset + CHUNK_HEADER_SIZE:
+                        chunk_offset + CHUNK_HEADER_SIZE + len(payload)] = payload
+
+        total_bytes = need
+        if total_bytes < len(chunks_view):
+            chunks_view = chunks_view[:total_bytes]
 
         try:
             position = 0
@@ -265,7 +293,7 @@ class LYDevice:
                     write_size = min(2048, remaining)
 
                 self.ep_out.write(
-                    send_buffer[position:position + write_size],
+                    chunks_view[position:position + write_size],
                     timeout=WRITE_TIMEOUT_MS,
                 )
                 position += write_size

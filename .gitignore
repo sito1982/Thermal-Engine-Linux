@@ -60,8 +60,6 @@ settings.json
 presets/*
 !presets/Default.json
 !presets/Default.png
-!presets/Analog Clock.json
-!presets/Analog Clock.png
 !presets/Theme Horizontal.json
 
 # Old/backup files

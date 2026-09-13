@@ -1,5 +1,3 @@
-import sys
-import os
 try:
     from device_ly import LYDevice
     print("[DIAG] Importación de device_ly: OK")

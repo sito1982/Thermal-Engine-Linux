@@ -10,10 +10,10 @@ Each element file should define:
   - render_image(draw, img, element) - PIL rendering for display
 """
 
-import os
 import importlib.util
-import sys
+import os
 import re
+import sys
 
 # Store loaded custom elements
 CUSTOM_ELEMENTS = {}

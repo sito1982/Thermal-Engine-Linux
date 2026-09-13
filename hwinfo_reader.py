@@ -7,9 +7,9 @@ Requires HWiNFO to be running with "Shared Memory Support" enabled in settings.
 Reference: https://www.hwinfo.com/forum/threads/shared-memory-layout.5149/
 """
 
-import sys
 import ctypes
-from ctypes import Structure, c_uint, c_double, c_char, c_uint32, c_uint64
+import sys
+from ctypes import Structure, c_char, c_double, c_uint, c_uint32, c_uint64
 
 # HWiNFO shared memory is a Windows-only mechanism. On other platforms this
 # module must still be importable (so the rest of the app keeps working), it
@@ -406,7 +406,7 @@ class HWiNFOReader:
 
     def get_thermal_sensors(self):
         """
-        Get all thermal-related sensors in the format expected by ThermalEngine.
+        Get all thermal-related sensors in the format expected by Thermal Engine Studio.
 
         Returns:
             dict with keys matching sensors.py format
@@ -442,7 +442,7 @@ def is_hwinfo_available():
 
 
 def get_hwinfo_sensors():
-    """Get sensor data from HWiNFO in ThermalEngine format."""
+    """Get sensor data from HWiNFO in Thermal Engine Studio format."""
     reader = get_hwinfo_reader()
     if reader.is_available():
         return reader.get_thermal_sensors()
@@ -460,7 +460,7 @@ if __name__ == "__main__":
         print("Connected to HWiNFO shared memory!")
         print()
 
-        # Get thermal sensors in ThermalEngine format
+        # Get thermal sensors in Thermal Engine Studio format
         sensors = reader.get_thermal_sensors()
         print("Thermal Sensors:")
         for key, value in sensors.items():

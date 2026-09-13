@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "settings.py"
-source_sha256: 4843a5ddc771c18a01360546defdc475059cb01b2138236cb583c712534ce0e6
-source_bytes: 7114
-source_lines: 223
+source_sha256: bb3a780f0a0e283d3cc5d183cd37f7fbead81b8d6bafbb7753380ea399c2d5f2
+source_bytes: 8198
+source_lines: 242
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -16,7 +16,7 @@ generated_by: "scripts/generate_code_markdown.py"
 
 ```python
 """
-Settings management for Thermal Engine.
+Settings management for Thermal Engine Studio.
 Handles persistent settings and Windows autostart.
 """
 ```
@@ -27,10 +27,10 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 ### Imports directos
 
+- `import json`
 - `import os`
 - `import sys`
-- `import json`
-- `from app_path import get_app_dir, get_resource_path`
+- `from app_path import get_resource_path`
 - `from security import escape_registry_path`
 
 ### Clases directas
@@ -55,13 +55,13 @@ Ninguna clase declarada directamente en el módulo.
 
 ```python
 """
-Settings management for Thermal Engine.
+Settings management for Thermal Engine Studio.
 Handles persistent settings and Windows autostart.
 """
 
+import json
 import os
 import sys
-import json
 
 # Windows-only imports
 IS_WINDOWS = sys.platform == "win32"
@@ -69,7 +69,7 @@ IS_LINUX = sys.platform.startswith("linux")
 if IS_WINDOWS:
     import winreg
 
-from app_path import get_app_dir, get_resource_path
+from app_path import get_resource_path
 from security import escape_registry_path
 
 APP_NAME = "ThermalEngine"
@@ -89,6 +89,25 @@ DEFAULT_SETTINGS = {
     "lcd_brightness": 1.0,   # 0.5 - 1.5, multiplier applied to the final frame before sending to the LCD
     "lcd_contrast": 1.15,    # 0.5 - 1.5, multiplier applied to the final frame before sending to the LCD
     "lcd_saturation": 1.25,  # 0.5 - 2.0, multiplier applied to the final frame before sending to the LCD
+    # Objetivos del proyecto actual (Web / LCD / DMD / HDMI) y panel seleccionado.
+    "project_targets": {"web": True, "lcd": True, "dmd": False, "hdmi": False},
+    # Configuración persistida del target HDMI: {screen_id, width, height,
+    # refresh, connector, scale_mode}.
+    "hdmi_config": None,
+    "lcd_model": "trofeo_9_16",  # Default: Thermalright Trofeo Vision 9.16
+    # Resultados del benchmark del panel: key "vid:pid" -> {passed, fps_*,
+    # requirement, date}. Si passed, el panel desbloquea las tasas extendidas.
+    "lcd_benchmarks": {},
+    # Puerto del webserver (arranca solo cuando el proyecto tiene target Web).
+    "web_port": 4241,
+    # Reanudar el último proyecto abierto al iniciar la app.
+    "load_at_startup": False,
+    "startup_theme_path": None,
+    # Interacción táctil en el monitor HDMI. Desactivada por defecto: aunque un
+    # tema defina acciones, no se ejecutan hasta habilitar esto y aprobar cada
+    # comando (approved_actions guarda los hashes ya aceptados).
+    "allow_element_actions": False,
+    "approved_actions": {},
 }
 
 _settings = None
@@ -185,8 +204,8 @@ def _set_autostart_linux(enabled):
             content = (
                 "[Desktop Entry]\n"
                 "Type=Application\n"
-                "Name=Thermal Engine\n"
-                "Comment=Editor de temas para pantallas LCD de refrigeración AIO\n"
+                "Name=Thermal Engine Studio\n"
+                "Comment=Editor visual de temas para pantallas LCD/LED (DMD) y salida HDMI\n"
                 f"Exec={exec_cmd}\n"
                 f"Icon={icon_path}\n"
                 "Terminal=false\n"

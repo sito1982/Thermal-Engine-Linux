@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "main.py"
-source_sha256: 04b121ad6a36360938955fba4d2bdb562db47fe0230fba2102a8ac30f7ef7168
-source_bytes: 8536
-source_lines: 250
+source_sha256: 8056ee5deb047f9eab5756afb65ecf5991d6003b9a40936072b016ea92cfe358
+source_bytes: 8929
+source_lines: 261
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -16,7 +16,7 @@ generated_by: "scripts/generate_code_markdown.py"
 
 ```python
 """
-Thermal Engine
+Thermal Engine Studio
 A visual theme editor for LCD displays.
 
 Entry point for the application.
@@ -29,19 +29,18 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 ### Imports directos
 
-- `import sys`
-- `import os`
 - `import argparse`
 - `import atexit`
+- `import os`
 - `import signal`
+- `import sys`
 - `import webbrowser`
-- `from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon, QMenu, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton`
-- `from PySide6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush, QFont`
 - `from PySide6.QtCore import Qt`
-- `from sensors import init_sensors, HAS_HWINFO`
-- `from main_window import ThemeEditorWindow`
+- `from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap`
+- `from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QSystemTrayIcon, QVBoxLayout`
 - `from app_path import get_app_dir`
-- `import settings`
+- `from main_window import ThemeEditorWindow`
+- `from sensors import HAS_HWINFO, init_sensors`
 
 ### Clases directas
 
@@ -56,30 +55,36 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 ```python
 """
-Thermal Engine
+Thermal Engine Studio
 A visual theme editor for LCD displays.
 
 Entry point for the application.
 """
 
-import sys
-import os
 import argparse
 import atexit
+import os
 import signal
+import sys
 import webbrowser
 
-from PySide6.QtWidgets import (
-    QApplication, QMessageBox, QSystemTrayIcon, QMenu,
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
-)
-from PySide6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush, QFont
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QSystemTrayIcon,
+    QVBoxLayout,
+)
 
-from sensors import init_sensors, HAS_HWINFO
-from main_window import ThemeEditorWindow
 from app_path import get_app_dir
-import settings
+from main_window import ThemeEditorWindow
+from sensors import HAS_HWINFO, init_sensors
 
 
 class HWiNFOSetupDialog(QDialog):
@@ -105,7 +110,7 @@ class HWiNFOSetupDialog(QDialog):
 
         # Explanation
         explanation = QLabel(
-            "ThermalEngine uses HWiNFO to read CPU and GPU sensor data.\n"
+            "Thermal Engine Studio uses HWiNFO to read CPU and GPU sensor data.\n"
             "HWiNFO is a free, trusted hardware monitoring tool used by\n"
             "millions of users worldwide."
         )
@@ -209,15 +214,16 @@ def create_tray_icon():
 
 def main():
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Thermal Engine')
+    parser = argparse.ArgumentParser(description='Thermal Engine Studio')
     parser.add_argument('--minimized', action='store_true', help='Start minimized to system tray')
+    parser.add_argument('--port', type=int, default=4241, help='Port for the web server (default: 4241)')
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Keep running when minimized to tray
 
-    # Apply dark theme first (so dialog looks correct)
-    app.setStyle("Fusion")
+    from ui_style import apply_dark_theme
+    apply_dark_theme(app)
 
     palette = app.palette()
     palette.setColor(palette.ColorRole.Window, QColor(45, 45, 50))
@@ -240,7 +246,6 @@ def main():
     # Show HWiNFO setup dialog if not connected (skip if minimized/auto-start).
     # HWiNFO only exists on Windows; on Linux los sensores se leen directamente
     # del sistema (psutil + NVML), así que no se muestra este diálogo.
-    from sensors import HAS_HWINFO
     if sys.platform == "win32" and not HAS_HWINFO and not args.minimized:
         dialog = HWiNFOSetupDialog()
         dialog.exec()
@@ -248,7 +253,12 @@ def main():
         init_sensors()
 
     # Create main window
-    window = ThemeEditorWindow()
+    window = ThemeEditorWindow(port=args.port)
+
+    # NOTA: el webserver ya no se arranca aquí de forma incondicional. Se
+    # levanta bajo demanda desde la ventana cuando el proyecto activo tiene
+    # target Web (ver ThemeEditorWindow.apply_targets). Así se ahorran recursos
+    # cuando el proyecto es solo de panel LCD.
 
     # Register cleanup handlers to ensure HID device is released on any exit
     def cleanup_on_exit():
@@ -270,7 +280,7 @@ def main():
 
     # Create system tray icon
     tray_icon = QSystemTrayIcon(create_tray_icon(), app)
-    tray_icon.setToolTip("Thermal Engine")
+    tray_icon.setToolTip("Thermal Engine Studio")
 
     # Tray menu
     tray_menu = QMenu()

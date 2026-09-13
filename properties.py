@@ -2,17 +2,48 @@
 PropertiesPanel - Element property editing widget.
 """
 
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QSpinBox, QDoubleSpinBox, QColorDialog, QFileDialog, QComboBox,
-    QFormLayout, QScrollArea, QFrame, QCheckBox, QPushButton,
-    QStyledItemDelegate, QStyle, QSlider, QDialog, QDialogButtonBox,
-    QSizePolicy, QGroupBox
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QFontDatabase,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPen,
+    QPixmap,
 )
-from PySide6.QtCore import Qt, Signal, QSize, QRect, QPoint
-from PySide6.QtGui import QColor, QFont, QPixmap, QFontDatabase, QPainter, QLinearGradient, QPen, QBrush, QIcon
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSlider,
+    QSpinBox,
+    QStyle,
+    QStyledItemDelegate,
+    QVBoxLayout,
+    QWidget,
+)
 
-from ui_style import SectionLabel, TEXT_DIM
+from ui_style import TEXT_DIM, SectionLabel
+
+DMD_FONT_NAMES = ["Matrix Sans Print", "Matrix Sans Screen", "Matrix Sans",
+                  "Pixel Operator", "Tiny5", "Silkscreen", "Press Start 2P",
+                  "Micro 5", "VT323"]
 
 
 class NoScrollComboBox(QComboBox):
@@ -209,9 +240,6 @@ class GradientPreviewWidget(QPushButton):
         """Set gradient stops as list of (position, color) tuples."""
         self.gradient_stops = stops if stops else [(0.0, "#00ff00"), (1.0, "#ff0000")]
         self._update_style()
-
-    def get_gradient(self):
-        return self.gradient_stops
 
     def _update_style(self):
         """Update button style to show gradient."""
@@ -549,8 +577,11 @@ class GradientBarEditor(QWidget):
         return "#ffffff"
 
 
+from actions import args_to_text, parse_args_text
 from constants import (
-    DISPLAY_WIDTH, DISPLAY_HEIGHT, DATA_SOURCES, DATA_SOURCES_CATEGORIZED,
+    DATA_SOURCES_CATEGORIZED,
+    DISPLAY_HEIGHT,
+    DISPLAY_WIDTH,
     ELEMENT_FIELD_VISIBILITY,
 )
 
@@ -593,14 +624,17 @@ class PropertiesPanel(QWidget):
     property_will_change = Signal()  # Emitted before first change (for undo)
     alignment_changed = Signal()  # Emitted when elements are aligned
     alignment_will_change = Signal()  # Emitted before alignment (for undo)
+    test_action_requested = Signal()  # Test button for the HDMI touch action
 
     def __init__(self):
         super().__init__()
         self.current_element = None
         self.multi_selection_elements = []
-        self.multi_selection_indices = []
         self._undo_state_saved = False  # Track if undo state was saved for current edit session
         self.vertical_mode = False  # When True, X/Y/W/H spin ranges are swapped (portrait canvas)
+        self._dmd_mode = False  # True cuando la pestaña activa es DMD (fuentes Matrix Sans)
+        self._dmd_size = None  # (width, height) del canvas DMD activo
+        self._hdmi_size = None  # (width, height) del canvas HDMI activo
 
         # Section headers for visibility control
         self.section_headers = {}
@@ -616,41 +650,113 @@ class PropertiesPanel(QWidget):
         old DISPLAY_HEIGHT (480) even though elements can now be placed much
         further down the vertical canvas."""
         self.vertical_mode = enabled
-        canvas_w = DISPLAY_HEIGHT if enabled else DISPLAY_WIDTH
-        canvas_h = DISPLAY_WIDTH if enabled else DISPLAY_HEIGHT
+        self._apply_dimension_ranges()
 
-        for spin in (self.x_spin,):
-            spin.blockSignals(True)
-            spin.setRange(0, canvas_w)
-            spin.blockSignals(False)
-        for spin in (self.y_spin,):
-            spin.blockSignals(True)
-            spin.setRange(0, canvas_h)
-            spin.blockSignals(False)
-        for spin in (self.width_spin,):
-            spin.blockSignals(True)
-            spin.setRange(10, canvas_w)
-            spin.blockSignals(False)
-        for spin in (self.height_spin,):
-            spin.blockSignals(True)
-            spin.setRange(10, canvas_h)
-            spin.blockSignals(False)
-        for spin in (self.multi_x_spin,):
-            spin.blockSignals(True)
-            spin.setRange(-1000, canvas_w + 1000)
-            spin.blockSignals(False)
-        for spin in (self.multi_y_spin,):
-            spin.blockSignals(True)
-            spin.setRange(-1000, canvas_h + 1000)
-            spin.blockSignals(False)
-        for spin in (self.multi_w_spin,):
-            spin.blockSignals(True)
-            spin.setRange(1, canvas_w * 2)
-            spin.blockSignals(False)
-        for spin in (self.multi_h_spin,):
-            spin.blockSignals(True)
-            spin.setRange(1, canvas_h * 2)
-            spin.blockSignals(False)
+    def _set_spin_range(self, spin, low, high):
+        spin.blockSignals(True)
+        spin.setRange(low, high)
+        spin.blockSignals(False)
+
+    def _apply_dimension_ranges(self):
+        """Set the transform spin ranges for the active canvas.
+
+        DMD panels are tiny (128x32 by default) so the LCD minima (width/height
+        10, radius 20, font 8) would clamp - and silently overwrite - the DMD
+        defaults. This applies per-mode ranges instead.
+        """
+        if self._dmd_mode:
+            width, height = self._dmd_size or (128, 32)
+            self._set_spin_range(self.x_spin, 0, width)
+            self._set_spin_range(self.y_spin, 0, height)
+            self._set_spin_range(self.width_spin, 1, width)
+            self._set_spin_range(self.height_spin, 1, height)
+            self._set_spin_range(self.radius_spin, 1, max(1, min(width, height)))
+            self._set_spin_range(self.font_size_spin, 4, 32)
+            self._set_spin_range(self.label_font_size_spin, 4, 32)
+            self._set_spin_range(self.line_width_spin, 1, max(2, min(width, height)))
+            self._set_spin_range(self.multi_x_spin, -1000, width + 1000)
+            self._set_spin_range(self.multi_y_spin, -1000, height + 1000)
+            self._set_spin_range(self.multi_w_spin, 1, width * 2)
+            self._set_spin_range(self.multi_h_spin, 1, height * 2)
+        elif self._hdmi_size:
+            canvas_w, canvas_h = self._hdmi_size
+            radius_max = max(300, min(canvas_w, canvas_h) // 2)
+            self._set_spin_range(self.x_spin, 0, canvas_w)
+            self._set_spin_range(self.y_spin, 0, canvas_h)
+            self._set_spin_range(self.width_spin, 10, canvas_w)
+            self._set_spin_range(self.height_spin, 10, canvas_h)
+            self._set_spin_range(self.radius_spin, 20, radius_max)
+            self._set_spin_range(self.font_size_spin, 8, 400)
+            self._set_spin_range(self.label_font_size_spin, 8, 400)
+            self._set_spin_range(self.line_width_spin, 1, max(80, min(canvas_w, canvas_h) // 2))
+            self._set_spin_range(self.multi_x_spin, -1000, canvas_w + 1000)
+            self._set_spin_range(self.multi_y_spin, -1000, canvas_h + 1000)
+            self._set_spin_range(self.multi_w_spin, 1, canvas_w * 2)
+            self._set_spin_range(self.multi_h_spin, 1, canvas_h * 2)
+        else:
+            canvas_w = DISPLAY_HEIGHT if self.vertical_mode else DISPLAY_WIDTH
+            canvas_h = DISPLAY_WIDTH if self.vertical_mode else DISPLAY_HEIGHT
+            self._set_spin_range(self.x_spin, 0, canvas_w)
+            self._set_spin_range(self.y_spin, 0, canvas_h)
+            self._set_spin_range(self.width_spin, 10, canvas_w)
+            self._set_spin_range(self.height_spin, 10, canvas_h)
+            self._set_spin_range(self.radius_spin, 20, 300)
+            self._set_spin_range(self.font_size_spin, 8, 200)
+            self._set_spin_range(self.label_font_size_spin, 8, 200)
+            self._set_spin_range(self.line_width_spin, 1, 80)
+            self._set_spin_range(self.multi_x_spin, -1000, canvas_w + 1000)
+            self._set_spin_range(self.multi_y_spin, -1000, canvas_h + 1000)
+            self._set_spin_range(self.multi_w_spin, 1, canvas_w * 2)
+            self._set_spin_range(self.multi_h_spin, 1, canvas_h * 2)
+
+    def set_dmd_mode(self, dmd_active, width=None, height=None):
+        """Restringe las fuentes disponibles a las de la familia Matrix Sans
+        cuando la pestaña activa es DMD. En LCD restaura todas las del sistema.
+
+        Cualquier texto que se muestre en el DMD solo puede usar estas fuentes.
+        También ajusta los rangos de los spin boxes a la resolución DMD para que
+        los tamaños pequeños (radius, altura, fuente) no se recorten a los
+        mínimos de LCD.
+        """
+        self._dmd_mode = bool(dmd_active)
+        self._hdmi_size = None
+        if dmd_active and width and height:
+            self._dmd_size = (int(width), int(height))
+        self._apply_dimension_ranges()
+        if dmd_active:
+            # Avisar (por consola) de cuáles no están registradas
+            font_db = QFontDatabase()
+            fams = set(font_db.families())
+            missing = [n for n in DMD_FONT_NAMES if n not in fams]
+            if missing:
+                print(f"[DMD] Fuentes Matrix Sans no disponibles: {missing}")
+
+            for combo in (self.font_family_combo, self.label_font_family_combo):
+                combo.blockSignals(True)
+                combo.clear()
+                for name in DMD_FONT_NAMES:
+                    combo.addItem(name)
+                combo.blockSignals(False)
+        else:
+            self.load_system_fonts()
+
+        # Re-sincronizar el elemento seleccionado con las fuentes disponibles
+        if getattr(self, "current_element", None) is not None:
+            self.set_element(self.current_element)
+
+    def set_hdmi_mode(self, width=None, height=None):
+        """Ajusta los rangos al canvas HDMI (resolución del monitor).
+
+        HDMI usa el catálogo completo de elementos y las fuentes del sistema,
+        pero los límites de X/Y/Ancho/Alto/Radio deben corresponder al tamaño
+        real del monitor para no recortar los valores.
+        """
+        self._dmd_mode = False
+        self._hdmi_size = (int(width), int(height)) if width and height else None
+        self._apply_dimension_ranges()
+        self.load_system_fonts()
+        if getattr(self, "current_element", None) is not None:
+            self.set_element(self.current_element)
 
     def create_section(self, title):
         """Create a styled section container with title."""
@@ -683,28 +789,6 @@ class PropertiesPanel(QWidget):
         label = QLabel(text)
         label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         return label
-
-    def _set_svg_icon(self, button, svg_content):
-        """Set an SVG icon on a button using QIcon."""
-        from PySide6.QtSvg import QSvgRenderer
-        from PySide6.QtGui import QPixmap, QPainter
-        from PySide6.QtCore import QByteArray
-
-        # Replace currentColor with actual color based on palette
-        color = TEXT_DIM
-        svg_content = svg_content.replace("currentColor", color)
-
-        svg_bytes = QByteArray(svg_content.encode('utf-8'))
-        renderer = QSvgRenderer(svg_bytes)
-
-        pixmap = QPixmap(20, 20)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        renderer.render(painter)
-        painter.end()
-
-        button.setIcon(QIcon(pixmap))
-        button.setIconSize(pixmap.size())
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1154,6 +1238,13 @@ class PropertiesPanel(QWidget):
         self.value_label = self.create_label("Preview Value:")
         data_layout.addRow(self.value_label, self.value_spin)
 
+        self.max_value_spin = NoScrollDoubleSpinBox()
+        self.max_value_spin.setRange(0.001, 100000.0)
+        self.max_value_spin.setDecimals(2)
+        self.max_value_spin.valueChanged.connect(self.on_property_changed)
+        self.max_value_label = self.create_label("Max Value:")
+        data_layout.addRow(self.max_value_label, self.max_value_spin)
+
         self.section_fields['data'] = [
             (self.source_label, self.source_combo),
             (self.value_label, self.value_spin)
@@ -1315,29 +1406,34 @@ class PropertiesPanel(QWidget):
         self.show_leading_zero_label = QLabel("")
         options_layout.addRow(self.show_leading_zero_label, self.show_leading_zero_check)
 
-        # Analog clock options
-        self.show_seconds_hand_check = QCheckBox("Show Seconds Hand")
-        self.show_seconds_hand_check.stateChanged.connect(self.on_property_changed)
-        self.show_seconds_hand_label = QLabel("")
-        options_layout.addRow(self.show_seconds_hand_label, self.show_seconds_hand_check)
+        # DMD component options (segmented bar / DMD gauge / bar chart)
+        self.segments_spin = NoScrollSpinBox()
+        self.segments_spin.setRange(1, 64)
+        self.segments_spin.setValue(8)
+        self.segments_spin.valueChanged.connect(self.on_property_changed)
+        self.segments_label = self.create_label("Segments:")
+        options_layout.addRow(self.segments_label, self.segments_spin)
 
-        self.show_clock_border_check = QCheckBox("Show Clock Border")
-        self.show_clock_border_check.stateChanged.connect(self.on_property_changed)
-        self.show_clock_border_label = QLabel("")
-        options_layout.addRow(self.show_clock_border_label, self.show_clock_border_check)
+        self.gap_spin = NoScrollSpinBox()
+        self.gap_spin.setRange(0, 20)
+        self.gap_spin.setValue(1)
+        self.gap_spin.valueChanged.connect(self.on_property_changed)
+        self.gap_label = self.create_label("Gap:")
+        options_layout.addRow(self.gap_label, self.gap_spin)
 
-        self.clock_face_style_combo = NoScrollComboBox()
-        self.clock_face_style_combo.addItem("Numbers (1-12)", "numbers")
-        self.clock_face_style_combo.addItem("Tick Marks", "ticks")
-        self.clock_face_style_combo.addItem("None", "none")
-        self.clock_face_style_combo.currentIndexChanged.connect(self.on_property_changed)
-        self.clock_face_style_label = self.create_label("Face Style:")
-        options_layout.addRow(self.clock_face_style_label, self.clock_face_style_combo)
+        self.line_width_spin = NoScrollSpinBox()
+        self.line_width_spin.setRange(1, 80)
+        self.line_width_spin.setValue(2)
+        self.line_width_spin.valueChanged.connect(self.on_property_changed)
+        self.line_width_label = self.create_label("Line Width:")
+        options_layout.addRow(self.line_width_label, self.line_width_spin)
 
-        self.smooth_animation_check = QCheckBox("Smooth Animation")
-        self.smooth_animation_check.stateChanged.connect(self.on_property_changed)
-        self.smooth_animation_label = QLabel("")
-        options_layout.addRow(self.smooth_animation_label, self.smooth_animation_check)
+        self.color_empty_btn = QPushButton()
+        self.color_empty_btn.setFixedHeight(26)
+        self.color_empty_btn.setStyleSheet("background-color: #1a1a2e;")
+        self.color_empty_btn.clicked.connect(self.choose_color_empty)
+        self.color_empty_label = self.create_label("Empty Color:")
+        options_layout.addRow(self.color_empty_label, self.color_empty_btn)
 
         self.section_fields['options'] = [
             (self.show_background_label, self.show_background_check),
@@ -1354,11 +1450,68 @@ class PropertiesPanel(QWidget):
             (self.show_am_pm_label, self.show_am_pm_check),
             (self.show_seconds_label, self.show_seconds_check),
             (self.show_leading_zero_label, self.show_leading_zero_check),
-            (self.show_seconds_hand_label, self.show_seconds_hand_check),
-            (self.show_clock_border_label, self.show_clock_border_check),
-            (self.clock_face_style_label, self.clock_face_style_combo),
-            (self.smooth_animation_label, self.smooth_animation_check)
+            (self.segments_label, self.segments_spin),
+            (self.gap_label, self.gap_spin),
+            (self.line_width_label, self.line_width_spin),
+            (self.color_empty_label, self.color_empty_btn)
         ]
+
+        # --- Interaction (HDMI touch) ---
+        interaction_frame, interaction_layout = self.create_section("Interaction")
+        self.section_headers['interaction'] = interaction_frame
+        self.props_layout.addWidget(interaction_frame)
+
+        self.tap_action_combo = NoScrollComboBox()
+        self.tap_action_combo.addItem("None", "none")
+        self.tap_action_combo.addItem("Run command", "command")
+        self.tap_action_combo.currentIndexChanged.connect(self.on_tap_action_changed)
+        self.tap_action_label = self.create_label("On tap:")
+        interaction_layout.addRow(self.tap_action_label, self.tap_action_combo)
+
+        self.tap_command_edit = QLineEdit()
+        self.tap_command_edit.textChanged.connect(self.on_property_changed)
+        self.tap_command_btn = QPushButton("...")
+        self.tap_command_btn.setFixedWidth(30)
+        self.tap_command_btn.clicked.connect(self.browse_tap_command)
+        tap_cmd_row = QHBoxLayout()
+        tap_cmd_row.setContentsMargins(0, 0, 0, 0)
+        tap_cmd_row.setSpacing(4)
+        tap_cmd_row.addWidget(self.tap_command_edit, 1)
+        tap_cmd_row.addWidget(self.tap_command_btn)
+        self.tap_command_label = self.create_label("Command:")
+        interaction_layout.addRow(self.tap_command_label, tap_cmd_row)
+
+        self.tap_args_edit = QLineEdit()
+        self.tap_args_edit.setPlaceholderText('p.ej. --fullscreen "mi arg"')
+        self.tap_args_edit.textChanged.connect(self.on_property_changed)
+        self.tap_args_label = self.create_label("Arguments:")
+        interaction_layout.addRow(self.tap_args_label, self.tap_args_edit)
+
+        self.tap_workdir_edit = QLineEdit()
+        self.tap_workdir_edit.textChanged.connect(self.on_property_changed)
+        self.tap_workdir_btn = QPushButton("...")
+        self.tap_workdir_btn.setFixedWidth(30)
+        self.tap_workdir_btn.clicked.connect(self.browse_tap_workdir)
+        tap_wd_row = QHBoxLayout()
+        tap_wd_row.setContentsMargins(0, 0, 0, 0)
+        tap_wd_row.setSpacing(4)
+        tap_wd_row.addWidget(self.tap_workdir_edit, 1)
+        tap_wd_row.addWidget(self.tap_workdir_btn)
+        self.tap_workdir_label = self.create_label("Working dir:")
+        interaction_layout.addRow(self.tap_workdir_label, tap_wd_row)
+
+        self.tap_test_btn = QPushButton("Test action")
+        self.tap_test_btn.clicked.connect(self.test_tap_action)
+        self.tap_test_label = self.create_label("")
+        interaction_layout.addRow(self.tap_test_label, self.tap_test_btn)
+
+        self.section_fields['interaction'] = [
+            (self.tap_action_label, self.tap_action_combo),
+            (self.tap_command_label, self.tap_command_edit),
+            (self.tap_args_label, self.tap_args_edit),
+            (self.tap_workdir_label, self.tap_workdir_edit),
+        ]
+        self._update_tap_controls()
 
         # Add stretch at the end to push sections to top
         self.props_layout.addStretch()
@@ -1825,10 +1978,6 @@ class PropertiesPanel(QWidget):
         show_am_pm_visible = visibility.get("show_am_pm", False)
         show_seconds_visible = visibility.get("show_seconds", False)
         show_leading_zero_visible = visibility.get("show_leading_zero", False)
-        show_seconds_hand_visible = visibility.get("show_seconds_hand", False)
-        show_clock_border_visible = visibility.get("show_clock_border", False)
-        clock_face_style_visible = visibility.get("clock_face_style", False)
-        smooth_animation_visible = visibility.get("smooth_animation", False)
 
         self.show_background_label.setVisible(show_background_visible)
         self.show_background_check.setVisible(show_background_visible)
@@ -1871,14 +2020,20 @@ class PropertiesPanel(QWidget):
         self.show_seconds_check.setVisible(show_seconds_visible)
         self.show_leading_zero_label.setVisible(show_leading_zero_visible)
         self.show_leading_zero_check.setVisible(show_leading_zero_visible)
-        self.show_seconds_hand_label.setVisible(show_seconds_hand_visible)
-        self.show_seconds_hand_check.setVisible(show_seconds_hand_visible)
-        self.show_clock_border_label.setVisible(show_clock_border_visible)
-        self.show_clock_border_check.setVisible(show_clock_border_visible)
-        self.clock_face_style_label.setVisible(clock_face_style_visible)
-        self.clock_face_style_combo.setVisible(clock_face_style_visible)
-        self.smooth_animation_label.setVisible(smooth_animation_visible)
-        self.smooth_animation_check.setVisible(smooth_animation_visible)
+
+        # DMD component options
+        segments_visible = visibility.get("segments", False)
+        gap_visible = visibility.get("gap", False)
+        line_width_visible = visibility.get("line_width", False)
+        color_empty_visible = visibility.get("color_empty", False)
+        self.segments_label.setVisible(segments_visible)
+        self.segments_spin.setVisible(segments_visible)
+        self.gap_label.setVisible(gap_visible)
+        self.gap_spin.setVisible(gap_visible)
+        self.line_width_label.setVisible(line_width_visible)
+        self.line_width_spin.setVisible(line_width_visible)
+        self.color_empty_label.setVisible(color_empty_visible)
+        self.color_empty_btn.setVisible(color_empty_visible)
 
         section_visible['options'] = (show_background_visible or show_label_visible or
                                       show_gradient_visible or line_thickness_visible or
@@ -1887,9 +2042,11 @@ class PropertiesPanel(QWidget):
                                       animate_gauge_visible or gauge_rounded_ends_visible or
                                       time_format_visible or
                                       show_am_pm_visible or show_seconds_visible or
-                                      show_leading_zero_visible or show_seconds_hand_visible or
-                                      show_clock_border_visible or clock_face_style_visible or
-                                      smooth_animation_visible)
+                                      show_leading_zero_visible or segments_visible or
+                                      gap_visible or line_width_visible or color_empty_visible)
+
+        # Interaction (HDMI touch) está disponible para todos los tipos.
+        section_visible['interaction'] = True
 
         # Update section header visibility
         for section, header in self.section_headers.items():
@@ -1898,7 +2055,6 @@ class PropertiesPanel(QWidget):
     def set_element(self, element):
         self.current_element = None
         self.multi_selection_elements = []
-        self.multi_selection_indices = []
 
         # Batch visibility updates to prevent flicker
         self.setUpdatesEnabled(False)
@@ -1968,10 +2124,9 @@ class PropertiesPanel(QWidget):
         self.show_am_pm_check.blockSignals(True)
         self.show_seconds_check.blockSignals(True)
         self.show_leading_zero_check.blockSignals(True)
-        self.show_seconds_hand_check.blockSignals(True)
-        self.show_clock_border_check.blockSignals(True)
-        self.clock_face_style_combo.blockSignals(True)
-        self.smooth_animation_check.blockSignals(True)
+        self.segments_spin.blockSignals(True)
+        self.gap_spin.blockSignals(True)
+        self.line_width_spin.blockSignals(True)
 
         self.name_edit.setText(element.name)
         self.x_spin.setValue(element.x)
@@ -1987,6 +2142,7 @@ class PropertiesPanel(QWidget):
         self.label_text_edit.setText(element.text)  # For circle gauge label
         self.font_size_spin.setValue(element.font_size)
         self.value_spin.setValue(element.value)
+        self.max_value_spin.setValue(element.max_value)
         self.image_path_edit.setText(element.image_path)
         self.clip_checkbox.setChecked(element.clip)
         self.scale_proportionally_check.setChecked(element.scale_proportionally)
@@ -1995,6 +2151,12 @@ class PropertiesPanel(QWidget):
         self.show_gradient_check.setChecked(element.show_gradient)
         self.line_thickness_spin.setValue(getattr(element, 'line_thickness', 2))
         self.smooth_check.setChecked(getattr(element, 'smooth', False))
+        # DMD component options
+        self.segments_spin.setValue(getattr(element, 'segments', 8) or 8)
+        self.gap_spin.setValue(getattr(element, 'gap', 1))
+        self.line_width_spin.setValue(getattr(element, 'line_width', 2))
+        self.color_empty_btn.setStyleSheet(
+            f"background-color: {getattr(element, 'color_empty', '#1a1a2e')};")
         self.rounded_corners_check.setChecked(element.rounded_corners)
         # Load bar border settings
         self.bar_border_check.setChecked(getattr(element, 'bar_border', False))
@@ -2048,15 +2210,6 @@ class PropertiesPanel(QWidget):
         self.show_seconds_check.setChecked(getattr(element, 'show_seconds', True))
         self.show_leading_zero_check.setChecked(getattr(element, 'show_leading_zero', True))
 
-        # Analog clock options
-        self.show_seconds_hand_check.setChecked(getattr(element, 'show_seconds_hand', True))
-        self.show_clock_border_check.setChecked(getattr(element, 'show_clock_border', True))
-        clock_face_style = getattr(element, 'clock_face_style', 'numbers')
-        clock_face_style_idx = self.clock_face_style_combo.findData(clock_face_style)
-        if clock_face_style_idx >= 0:
-            self.clock_face_style_combo.setCurrentIndex(clock_face_style_idx)
-        self.smooth_animation_check.setChecked(getattr(element, 'smooth_animation', True))
-
         idx = self.font_family_combo.findText(element.font_family)
         if idx >= 0:
             self.font_family_combo.setCurrentIndex(idx)
@@ -2080,6 +2233,23 @@ class PropertiesPanel(QWidget):
         self.label_text_color_btn.setStyleSheet(f"background-color: {label_text_color};")
 
         self.set_source_by_id(element.source)
+
+        # Interaction (HDMI touch): bloquea señales mientras se cargan valores.
+        self.tap_action_combo.blockSignals(True)
+        self.tap_command_edit.blockSignals(True)
+        self.tap_args_edit.blockSignals(True)
+        self.tap_workdir_edit.blockSignals(True)
+        tap_action = getattr(element, 'tap_action', 'none') or 'none'
+        tap_idx = self.tap_action_combo.findData(tap_action)
+        self.tap_action_combo.setCurrentIndex(tap_idx if tap_idx >= 0 else 0)
+        self.tap_command_edit.setText(getattr(element, 'tap_command', '') or '')
+        self.tap_args_edit.setText(args_to_text(getattr(element, 'tap_args', []) or []))
+        self.tap_workdir_edit.setText(getattr(element, 'tap_workdir', '') or '')
+        self.tap_action_combo.blockSignals(False)
+        self.tap_command_edit.blockSignals(False)
+        self.tap_args_edit.blockSignals(False)
+        self.tap_workdir_edit.blockSignals(False)
+        self._update_tap_controls()
 
         self.name_edit.blockSignals(False)
         self.x_spin.blockSignals(False)
@@ -2131,10 +2301,9 @@ class PropertiesPanel(QWidget):
         self.show_am_pm_check.blockSignals(False)
         self.show_seconds_check.blockSignals(False)
         self.show_leading_zero_check.blockSignals(False)
-        self.show_seconds_hand_check.blockSignals(False)
-        self.show_clock_border_check.blockSignals(False)
-        self.clock_face_style_combo.blockSignals(False)
-        self.smooth_animation_check.blockSignals(False)
+        self.segments_spin.blockSignals(False)
+        self.gap_spin.blockSignals(False)
+        self.line_width_spin.blockSignals(False)
 
         self.current_element = element
         self._undo_state_saved = False
@@ -2219,11 +2388,46 @@ class PropertiesPanel(QWidget):
         self.show_seconds_check.setEnabled(enabled)
         self.show_leading_zero_check.setEnabled(enabled)
 
-        # Analog clock options
-        self.show_seconds_hand_check.setEnabled(enabled)
-        self.show_clock_border_check.setEnabled(enabled)
-        self.clock_face_style_combo.setEnabled(enabled)
-        self.smooth_animation_check.setEnabled(enabled)
+        # DMD component options
+        self.segments_spin.setEnabled(enabled)
+        self.gap_spin.setEnabled(enabled)
+        self.line_width_spin.setEnabled(enabled)
+        self.color_empty_btn.setEnabled(enabled)
+
+        # Interaction (HDMI touch)
+        self.tap_action_combo.setEnabled(enabled)
+        self.tap_test_btn.setEnabled(enabled)
+        self._update_tap_controls(enabled)
+
+    def _update_tap_controls(self, enabled=True):
+        """Habilita/deshabilita los campos según el tipo de acción elegido."""
+        is_command = (self.tap_action_combo.currentData() or "none") == "command"
+        for widget in (self.tap_command_edit, self.tap_command_btn,
+                       self.tap_args_edit, self.tap_workdir_edit,
+                       self.tap_workdir_btn, self.tap_test_btn):
+            widget.setEnabled(enabled and is_command)
+
+    def on_tap_action_changed(self):
+        self._update_tap_controls()
+        self.on_property_changed()
+
+    def browse_tap_command(self):
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select executable", self.tap_command_edit.text() or "")
+        if path:
+            self.tap_command_edit.setText(path)
+
+    def browse_tap_workdir(self):
+        from PySide6.QtWidgets import QFileDialog
+        path = QFileDialog.getExistingDirectory(
+            self, "Select working directory", self.tap_workdir_edit.text() or "")
+        if path:
+            self.tap_workdir_edit.setText(path)
+
+    def test_tap_action(self):
+        """Emite la petición de test; la ventana principal aplica el gate."""
+        self.test_action_requested.emit()
 
     def on_property_changed(self):
         if self.current_element is None:
@@ -2269,6 +2473,7 @@ class PropertiesPanel(QWidget):
         # Source is handled by on_source_changed, but sync here for safety
         self.current_element.source = self.get_selected_source()
         self.current_element.value = self.value_spin.value()
+        self.current_element.max_value = self.max_value_spin.value()
         self.current_element.image_path = self.image_path_edit.text()
         self.current_element.scale_proportionally = self.scale_proportionally_check.isChecked()
 
@@ -2312,11 +2517,21 @@ class PropertiesPanel(QWidget):
         self.current_element.show_seconds = self.show_seconds_check.isChecked()
         self.current_element.show_leading_zero = self.show_leading_zero_check.isChecked()
 
-        # Analog clock options
-        self.current_element.show_seconds_hand = self.show_seconds_hand_check.isChecked()
-        self.current_element.show_clock_border = self.show_clock_border_check.isChecked()
-        self.current_element.clock_face_style = self.clock_face_style_combo.currentData() or 'numbers'
-        self.current_element.smooth_animation = self.smooth_animation_check.isChecked()
+        # DMD component options
+        self.current_element.segments = self.segments_spin.value()
+        self.current_element.gap = self.gap_spin.value()
+        self.current_element.line_width = self.line_width_spin.value()
+
+        # Interaction (HDMI touch). El parseo de argumentos puede fallar
+        # mientras se escribe (comillas sin cerrar): en ese caso se conserva la
+        # lista anterior en vez de romper.
+        self.current_element.tap_action = self.tap_action_combo.currentData() or "none"
+        self.current_element.tap_command = self.tap_command_edit.text()
+        try:
+            self.current_element.tap_args = parse_args_text(self.tap_args_edit.text())
+        except Exception:
+            pass
+        self.current_element.tap_workdir = self.tap_workdir_edit.text()
 
         # Handle proportional scaling for images
         if self.current_element.type == "image" and self.current_element.scale_proportionally:
@@ -2441,6 +2656,23 @@ class PropertiesPanel(QWidget):
 
         self.setUpdatesEnabled(True)
         self.property_changed.emit()
+
+    def choose_color_empty(self):
+        if self.current_element is None:
+            return
+        if self.current_element.locked:
+            return
+
+        color_empty = getattr(self.current_element, 'color_empty', '#1a1a2e')
+        dialog = ColorPickerDialog(
+            color_empty, 100, "Select Empty Segment Color", self
+        )
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            color = dialog.get_color()
+            self.current_element.color_empty = color.name()
+            self.color_empty_btn.setStyleSheet(f"background-color: {color.name()};")
+            self.property_changed.emit()
 
     def choose_bar_border_color(self):
         if self.current_element is None:
@@ -2580,7 +2812,6 @@ class PropertiesPanel(QWidget):
         """Show alignment panel for multiple selected elements."""
         self.current_element = None
         self.multi_selection_elements = elements
-        self.multi_selection_indices = indices
         self._multi_transform_updating = True  # Prevent feedback loops
 
         self.no_selection_container.setVisible(False)
@@ -2744,7 +2975,7 @@ class PropertiesPanel(QWidget):
             new_el_h = el_h * scale_y
 
             # Apply changes based on element type
-            if el.type in ["circle_gauge", "analog_clock"]:
+            if el.type in ["circle_gauge", "gauge_circle_dmd"]:
                 el.radius = int(max(new_el_w, new_el_h) / 2)
                 el.x = int(new_el_x + el.radius)
                 el.y = int(new_el_y + el.radius)
@@ -2761,7 +2992,7 @@ class PropertiesPanel(QWidget):
 
     def get_element_bounds(self, element):
         """Get the bounding box for an element."""
-        if element.type in ["circle_gauge", "analog_clock"]:
+        if element.type in ["circle_gauge", "gauge_circle_dmd"]:
             return (
                 element.x - element.radius,
                 element.y - element.radius,
@@ -2772,8 +3003,8 @@ class PropertiesPanel(QWidget):
             return (element.x, element.y, element.width, element.height)
 
     def set_element_position(self, element, x, y):
-        """Set element position, accounting for circle_gauge and analog_clock center."""
-        if element.type in ["circle_gauge", "analog_clock"]:
+        """Set element position, accounting for circle_gauge and gauge_circle_dmd center."""
+        if element.type in ["circle_gauge", "gauge_circle_dmd"]:
             element.x = int(x + element.radius)
             element.y = int(y + element.radius)
         else:

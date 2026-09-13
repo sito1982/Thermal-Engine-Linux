@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "video_background.py"
-source_sha256: 7438900462f9884666a8a9b95c08331cd780605ad84d04bc576dda0427ac3577
-source_bytes: 14618
-source_lines: 450
+source_sha256: a633705f6f85810d161741113aab8d72e1a95ff0848a2f32acff7374c4df50f7
+source_bytes: 15962
+source_lines: 485
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -31,10 +31,10 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 ### Imports directos
 
 - `import os`
-- `import time`
 - `import threading`
+- `import time`
 - `from PIL import Image`
-- `from constants import DISPLAY_WIDTH, DISPLAY_HEIGHT`
+- `from constants import DISPLAY_HEIGHT, DISPLAY_WIDTH`
 
 ### Clases directas
 
@@ -56,8 +56,9 @@ Pre-buffers all frames in memory for smooth playback.
 """
 
 import os
-import time
 import threading
+import time
+
 from PIL import Image
 
 try:
@@ -69,7 +70,7 @@ except ImportError:
     cv2 = None
     np = None
 
-from constants import DISPLAY_WIDTH, DISPLAY_HEIGHT
+from constants import DISPLAY_HEIGHT, DISPLAY_WIDTH
 
 
 class VideoBackground:
@@ -107,6 +108,11 @@ class VideoBackground:
         self._cached_pil = None
         self._cached_pixmap = None
         self._cached_frame_idx = -1
+
+        # Cache de fondo RGBA ya convertido+redimensionado por (idx, tamaño):
+        # evita re-convertir/re-escalar el frame en cada render de la app.
+        self._cached_resized_key = None
+        self._cached_resized = None
 
         # Threading
         self._lock = threading.Lock()
@@ -151,6 +157,8 @@ class VideoBackground:
             self._cached_pil = None
             self._cached_pixmap = None
             self._cached_frame_idx = -1
+            self._cached_resized_key = None
+            self._cached_resized = None
 
         # Start loading in background thread
         self._load_thread = threading.Thread(
@@ -360,9 +368,36 @@ class VideoBackground:
 
             return pil_image
 
+    def get_frame_pil_resized(self, size):
+        """Get the current frame as a PIL RGBA image converted+resized to
+        ``size``, cached por (idx, tamaño). Si el frame no cambió, se evita la
+        conversión numpy->PIL, el convert('RGBA') y el resize de cada render."""
+        if not self.enabled:
+            return None
+
+        with self._lock:
+            if not self._buffer_ready or not self._frame_buffer:
+                return None
+
+            self._advance_frame()
+
+            key = (self._current_frame_idx, size[0], size[1])
+            if key == self._cached_resized_key and self._cached_resized is not None:
+                return self._cached_resized
+
+            pil = Image.fromarray(
+                self._frame_buffer[self._current_frame_idx]
+            ).convert('RGBA')
+            if pil.size != (size[0], size[1]):
+                pil = pil.resize((size[0], size[1]), Image.BILINEAR)
+
+            self._cached_resized_key = key
+            self._cached_resized = pil
+            return pil
+
     def get_frame_qpixmap(self, scale=1.0):
         """Get the current frame as a QPixmap for Qt rendering."""
-        from PySide6.QtGui import QPixmap, QImage
+        from PySide6.QtGui import QImage, QPixmap
 
         if not self.enabled:
             return None
@@ -411,8 +446,8 @@ class VideoBackground:
 
     def _create_loading_pixmap(self, scale):
         """Create a loading indicator pixmap."""
-        from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
         from PySide6.QtCore import Qt
+        from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 
         width = int(DISPLAY_WIDTH * scale)
         height = int(DISPLAY_HEIGHT * scale)

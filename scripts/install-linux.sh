@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Instalador de Thermal Engine para Linux (optimizado para Bazzite / Fedora
+# Instalador de Thermal Engine Studio para Linux (optimizado para Bazzite / Fedora
 # Universal Blue, que son sistemas inmutables).
 #
 # Estrategia: NO toca el sistema base. Crea un entorno virtual de Python
@@ -20,7 +20,7 @@ VENV_DIR="$PROJECT_DIR/.venv"
 RULES_FILE="$SCRIPT_DIR/99-thermalright-trofeo.rules"
 
 echo "=============================================="
-echo " Thermal Engine - Instalación para Linux/Bazzite"
+echo " Thermal Engine Studio - Instalación para Linux/Bazzite"
 echo "=============================================="
 echo "Proyecto: $PROJECT_DIR"
 echo
@@ -91,7 +91,7 @@ ICON_PATH="$PROJECT_DIR/assets/icon.png"
 cat > "$APP_DESKTOP_DIR/ThermalEngine.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Thermal Engine
+Name=Thermal Engine Studio
 Comment=Editor de temas para pantallas LCD de refrigeración AIO
 Exec=$VENV_DIR/bin/python $PROJECT_DIR/main.py
 Icon=$ICON_PATH

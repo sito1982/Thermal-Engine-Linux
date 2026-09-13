@@ -2,87 +2,36 @@
 PresetsPanel - Theme preset management widget.
 """
 
-import os
 import json
 import math
-import copy
+import os
 
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QGridLayout, QMessageBox, QInputDialog
-)
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import (
+    QGridLayout,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
-from constants import DISPLAY_WIDTH, DISPLAY_HEIGHT
-from element import ThemeElement
 from app_path import get_resource_path
-from security import validate_preset_schema, is_safe_filename, sanitize_preset_name
+from constants import DISPLAY_HEIGHT, DISPLAY_WIDTH
+from security import is_safe_filename, sanitize_preset_name, validate_preset_schema
 from settings import get_setting, set_setting
-from ui_style import SectionLabel, TEXT, TEXT_DIM, TEXT_FAINT, TEXT_SECONDARY, ACCENT, BORDER, PANEL_BG, WARN
-
-
-def list_presets():
-    """List available templates: [(name, element_count, width, height), ...].
-
-    Default goes first. Width/height describe the logical display the template
-    is designed for (orientation = height > width → vertical).
-    """
-    names = [("Default", len(DEFAULT_THEME.get("elements", [])),
-              DISPLAY_WIDTH, DISPLAY_HEIGHT)]
-    presets_dir = get_resource_path("presets")
-    if os.path.isdir(presets_dir):
-        for fn in sorted(os.listdir(presets_dir)):
-            if not fn.endswith(".json"):
-                continue
-            safe, _ = is_safe_filename(fn)
-            if not safe:
-                continue
-            try:
-                with open(os.path.join(presets_dir, fn)) as f:
-                    data = json.load(f)
-                if validate_preset_schema(data)[0]:
-                    preset_name = data.get("name", fn[:-5])
-                    if preset_name == "Default":
-                        continue  # el builtin "Default" tiene prioridad
-                    w = data.get("display_width", DISPLAY_WIDTH)
-                    h = data.get("display_height", DISPLAY_HEIGHT)
-                    names.append((preset_name, len(data.get("elements", [])),
-                                  w, h))
-            except Exception:
-                continue
-    return names
-
-
-def get_preset_thumbnail_path(name):
-    """Return the thumbnail PNG path for a template, or None if missing."""
-    if name == "Default":
-        return None  # el builtin usa preview generada
-    presets_dir = get_resource_path("presets")
-    if not os.path.isdir(presets_dir):
-        return None
-    path = os.path.join(presets_dir, f"{name}.png")
-    return path if os.path.exists(path) else None
-
-
-def get_preset_data(name):
-    """Return the preset data dict for a template name (None if missing)."""
-    if name == "Default":
-        return copy.deepcopy(DEFAULT_THEME)
-    presets_dir = get_resource_path("presets")
-    if not os.path.isdir(presets_dir):
-        return None
-    for fn in os.listdir(presets_dir):
-        if not fn.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(presets_dir, fn)) as f:
-                data = json.load(f)
-            if data.get("name") == name and validate_preset_schema(data)[0]:
-                return data
-        except Exception:
-            continue
-    return None
+from ui_style import (
+    ACCENT,
+    BORDER,
+    PANEL_BG,
+    TEXT,
+    TEXT_SECONDARY,
+    WARN,
+    SectionLabel,
+)
 
 # Thumbnail dimensions (maintain aspect ratio of display)
 THUMBNAIL_WIDTH = 150
@@ -132,7 +81,6 @@ class PresetThumbnail(QWidget):
         self.preset_data = preset_data
         self.is_builtin = is_builtin
         self.is_default = is_default
-        self.thumbnail_path = thumbnail_path
         self.thumbnail_pixmap = None
         self._dw = dw or DISPLAY_WIDTH
         self._dh = dh or DISPLAY_HEIGHT
@@ -204,7 +152,7 @@ class PresetThumbnail(QWidget):
                     x = el_data.get("x", 0)
                     y = el_data.get("y", 0)
 
-                    if el_type in ["circle_gauge", "analog_clock"]:
+                    if el_type in ["circle_gauge", "gauge_circle_dmd"]:
                         radius = el_data.get("radius", 50)
                         painter.setPen(QPen(color, 2))
                         painter.setBrush(Qt.BrushStyle.NoBrush)

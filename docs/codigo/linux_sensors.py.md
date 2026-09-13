@@ -1,8 +1,8 @@
 ---
 generated: true
 source_path: "linux_sensors.py"
-source_sha256: 355575ec5746a2b97c83d4fb0cbd68705a814ebe228279e7591494a6ecc21e83
-source_bytes: 16304
+source_sha256: bc8c05aaa994820d02343d5a857d2e37e279285f48801e7a21858411edd6bf53
+source_bytes: 16311
 source_lines: 483
 generated_by: "scripts/generate_code_markdown.py"
 ---
@@ -18,7 +18,7 @@ generated_by: "scripts/generate_code_markdown.py"
 """
 Lector de sensores para Linux (equivalente a hwinfo_reader.py en Windows).
 
-En Windows, Thermal Engine obtiene los datos de CPU/GPU desde la memoria
+En Windows, Thermal Engine Studio obtiene los datos de CPU/GPU desde la memoria
 compartida de HWiNFO. En Linux no existe HWiNFO, por lo que este módulo lee los
 sensores directamente del sistema:
 
@@ -41,12 +41,12 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 ### Imports directos
 
-- `import os`
-- `import sys`
 - `import glob`
-- `import time`
+- `import os`
 - `import shutil`
 - `import subprocess`
+- `import sys`
+- `import time`
 
 ### Clases directas
 
@@ -69,7 +69,7 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 """
 Lector de sensores para Linux (equivalente a hwinfo_reader.py en Windows).
 
-En Windows, Thermal Engine obtiene los datos de CPU/GPU desde la memoria
+En Windows, Thermal Engine Studio obtiene los datos de CPU/GPU desde la memoria
 compartida de HWiNFO. En Linux no existe HWiNFO, por lo que este módulo lee los
 sensores directamente del sistema:
 
@@ -85,12 +85,12 @@ cualquiera de los dos backends de forma transparente.
 Probado en Bazzite (Fedora Silverblue / Universal Blue) con GPU NVIDIA.
 """
 
-import os
-import sys
 import glob
-import time
+import os
 import shutil
 import subprocess
+import sys
+import time
 
 try:
     import psutil

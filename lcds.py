@@ -1,12 +1,16 @@
-"""Catálogo de displays LCD compatibles con Thermal Engine.
+"""Catálogo de displays compatibles con Thermal Engine Studio.
 
-Cada entrada describe un modelo físico de panel: identificador, VID/PID,
-driver de envío, resolución nativa, tasas de refresco base y las tasas
-"extendidas" que SOLO se habilitan si el benchmark manual del panel pasa
-(medido sobre el hardware real conectado).
+Dos familias de dispositivos:
 
-La clave de persistencia de resultados del benchmark es "vid:pid"
-(p.ej. "0416:5408"), la misma que usa settings.lcd_benchmarks.
+- LCD (LCDModel): paneles USB con driver nativo (protocolo LY). Tienen tasas
+  base y tasas "extendidas" que SOLO se habilitan si el benchmark manual del
+  panel pasa (medido sobre el hardware real conectado). La clave de
+  persistencia del benchmark es "vid:pid" (p.ej. "0416:5408").
+
+- DMD (DMDModel): matrices de puntos que reciben RGB565 por TCP (fire&forget,
+  puerto 8889 por defecto). La resolución la declara el modelo; el benchmark
+  es un test de conectividad (GET /status) que no desbloquea tasas pero
+  verifica latencia y disponibilidad del dispositivo.
 """
 
 
@@ -83,8 +87,108 @@ class LCDModel:
         return f"<LCDModel {self.id} ({self.width}x{self.height})>"
 
 
+class DMDModel:
+    """Descripción de una pantalla DMD (matriz de puntos) por red TCP.
+
+    El frame es RGB565 little-endian, row-major:
+        HEADER(4B) + PAYLOAD(width*height*2 B)
+        HEADER = 0xAA 0x55 width height
+    Se envía por TCP a IP:port de forma persistente y sin ACK (fire & forget).
+    El receptor vuelve a su contenido local si no recibe datos en 1000 ms.
+    """
+
+    DEFAULT_PORT = 8889
+    DEFAULT_FPS = 12
+
+    def __init__(self, **kw):
+        self.id = kw.get("id", "dmd_128_32")
+        self.name = kw.get("name", "DMD Matrix 128×32")
+        self.width = kw.get("width", 128)
+        self.height = kw.get("height", 32)
+        self.port = kw.get("port", self.DEFAULT_PORT)
+        self.fps = kw.get("fps", self.DEFAULT_FPS)
+        self.protocol = kw.get("protocol", "TCP RGB565 · fire&forget")
+        self.interface = kw.get("interface", "Ethernet / Wi-Fi")
+        self.base_rates = list(kw.get("base_rates", [12]))
+        self.extended_rates = list(kw.get("extended_rates", []))
+        # El benchmark no desbloquea tasas (el firmware decide con su timeout),
+        # pero se usa para verificar conectividad y latencia.
+        self.bench_requirement_fps = kw.get("bench_requirement_fps", 0)
+
+    @property
+    def bench_key(self):
+        """Clave de persistencia: 'tcp:ip:port'."""
+        return f"tcp:{self.id}"
+
+    @property
+    def frame_size(self):
+        return 4 + self.width * self.height * 2
+
+    @property
+    def header(self):
+        return bytes([0xAA, 0x55, self.width, self.height])
+
+    def frame_rate_options(self, bench_passed):
+        options = list(self.base_rates)
+        if bench_passed:
+            for rate in self.extended_rates:
+                if rate not in options:
+                    options.append(rate)
+        return options
+
+    def wants_benchmark(self):
+        return False  # sin tasas extendidas; el test es de conectividad
+
+    def properties(self, bench_state=None):
+        ok = bool(bench_state and bench_state.get("passed"))
+        if ok:
+            latency = bench_state.get("latency_ms")
+            rate = f"{self.fps} FPS"
+            conn = f"Conectado · {latency} ms" if latency is not None else "Conectado"
+        else:
+            rate = f"{self.fps} FPS"
+            conn = "Pendiente — ejecuta 'Test DMD'"
+        return [
+            ("Modelo", self.name),
+            ("Resolución", f"{self.width}×{self.height}"),
+            ("Tamaño frame", f"{self.frame_size} B (RGB565)"),
+            ("Interfaz", self.interface),
+            ("Protocolo", self.protocol),
+            ("Tasas de refresco", rate),
+            ("Estado del benchmark", conn),
+        ]
+
+    def __repr__(self):
+        return f"<DMDModel {self.id} ({self.width}x{self.height})>"
+
+
 # ---------------------------------------------------------------- Catálogo --
 # Primera entrada: la pantalla que tenemos en el banco.
+DMD_CATALOG = [
+    DMDModel(
+        id="dmd_128_32",
+        name="DMD Matrix 128×32",
+        width=128,
+        height=32,
+        port=8889,
+        fps=12,
+    ),
+]
+
+
+def get_dmd(model_id):
+    """Devuelve el modelo DMD por su id, o None si no existe."""
+    for model in DMD_CATALOG:
+        if model.id == model_id:
+            return model
+    return None
+
+
+def default_dmd():
+    """Primer modelo del catálogo DMD (128×32 por defecto)."""
+    return DMD_CATALOG[0] if DMD_CATALOG else None
+
+
 LCD_CATALOG = [
     LCDModel(
         id="trofeo_9_16",
@@ -159,12 +263,20 @@ DEVICE_TYPES = [
         resolutions=[],
     ),
     DeviceType(
+        id="hdmi",
+        label="HDMI Monitor",
+        tagline="Monitor externo por HDMI. El canvas se adapta a su "
+                "resolución nativa y se muestra a pantalla completa.",
+        badge="Native · Qt",
+        resolutions=[],
+    ),
+    DeviceType(
         id="dmd",
         label="DMD Matrix",
-        tagline="Matriz de puntos LED / OLED de baja resolución.",
-        badge="I2C · SPI",
-        resolutions=["128×64", "160×43", "256×64", "320×132"],
-        disabled=True,
+        tagline="Matriz de puntos LED / OLED de baja resolución. "
+                "Se envía por TCP como RGB565.",
+        badge="TCP · RGB565",
+        resolutions=["128×32"],
     ),
 ]
 

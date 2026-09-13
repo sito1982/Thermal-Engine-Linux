@@ -5,8 +5,8 @@ A smooth line chart that shows current value on the right
 and history of values scrolling left.
 """
 
-from PySide6.QtCore import Qt, QPointF
-from PySide6.QtGui import QColor, QPen, QBrush, QPainterPath, QLinearGradient
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainterPath, QPen
 
 # Import SOURCE_UNITS for proper unit display
 try:
@@ -290,7 +290,8 @@ def hex_to_rgba(hex_color, opacity=100):
 
 def render_image(draw, img, element):
     """Render the chart using PIL for the actual display."""
-    from PIL import Image as PILImage, ImageDraw
+    from PIL import Image as PILImage
+    from PIL import ImageDraw
 
     x, y = element.x, element.y
     width, height = element.width, element.height
@@ -416,9 +417,10 @@ def render_image(draw, img, element):
     # Draw label
     if show_label:
         try:
-            from PIL import ImageFont
             import os
             import sys
+
+            from PIL import ImageFont
             font = None
             # Try platform-specific font paths
             font_paths = []

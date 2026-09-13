@@ -20,15 +20,23 @@ IS_WINDOWS = sys.platform == "win32"
 if IS_WINDOWS:
     from hwinfo_reader import (
         get_hwinfo_reader as _get_reader,
-        is_hwinfo_available as _backend_available,
+    )
+    from hwinfo_reader import (
         get_hwinfo_sensors as _backend_sensors,
+    )
+    from hwinfo_reader import (
+        is_hwinfo_available as _backend_available,
     )
     SENSOR_BACKEND_NAME = "HWiNFO"
 else:
     from linux_sensors import (
         get_linux_reader as _get_reader,
-        is_linux_sensors_available as _backend_available,
+    )
+    from linux_sensors import (
         get_linux_sensors as _backend_sensors,
+    )
+    from linux_sensors import (
+        is_linux_sensors_available as _backend_available,
     )
     SENSOR_BACKEND_NAME = "Sensores de Linux"
 

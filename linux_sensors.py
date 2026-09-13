@@ -1,7 +1,7 @@
 """
 Lector de sensores para Linux (equivalente a hwinfo_reader.py en Windows).
 
-En Windows, Thermal Engine obtiene los datos de CPU/GPU desde la memoria
+En Windows, Thermal Engine Studio obtiene los datos de CPU/GPU desde la memoria
 compartida de HWiNFO. En Linux no existe HWiNFO, por lo que este módulo lee los
 sensores directamente del sistema:
 
@@ -17,12 +17,12 @@ cualquiera de los dos backends de forma transparente.
 Probado en Bazzite (Fedora Silverblue / Universal Blue) con GPU NVIDIA.
 """
 
-import os
-import sys
 import glob
-import time
+import os
 import shutil
 import subprocess
+import sys
+import time
 
 try:
     import psutil

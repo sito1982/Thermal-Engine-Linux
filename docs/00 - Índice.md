@@ -1,8 +1,8 @@
-# Thermal Engine — Índice
+# Thermal Engine Studio — Índice
 
 #arquitectura #operación #hardware #preset #compilación
 
-Este directorio reúne documentación de navegación para el proyecto **Thermal Engine**. Las notas temáticas sintetizan las relaciones verificadas entre sus archivos; las representaciones de código son documentos derivados que conservan el contenido íntegro de cada módulo Python. El código, los presets, los scripts y los documentos existentes siguen siendo las fuentes de verdad.
+Este directorio reúne documentación de navegación para el proyecto **Thermal Engine Studio**. Las notas temáticas sintetizan las relaciones verificadas entre sus archivos; las representaciones de código son documentos derivados que conservan el contenido íntegro de cada módulo Python. El código, los presets, los scripts y los documentos existentes siguen siendo las fuentes de verdad.
 
 ## Empezar aquí
 

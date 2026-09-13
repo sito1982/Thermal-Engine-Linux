@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 from generate_code_markdown import (
     EXPECTED_SOURCE_COUNT,
@@ -65,8 +64,8 @@ def main() -> int:
 
     if errors:
         print("VALIDACIÓN FALLIDA:", file=sys.stderr)
-        for error in errors:
-            print(f"- {error}", file=sys.stderr)
+        for msg in errors:
+            print(f"- {msg}", file=sys.stderr)
         return 1
 
     print(

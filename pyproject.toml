@@ -1,0 +1,39 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [".venv", "__pycache__", "docs", "Versiones", "firmware", "build"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",  # line length handled by the formatter conventions
+    "E402",  # module level imports after sys.path tweaks (main.py, tests)
+    "E722",  # pre-existing defensive bare excepts in device/sensor code
+    "E741",  # pre-existing ambiguous short loop names
+    "F841",  # pre-existing unused locals kept for readability
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+
+[tool.mypy]
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_ignores = false
+warn_redundant_casts = false
+check_untyped_defs = false
+disallow_untyped_defs = false
+no_implicit_optional = false
+disable_error_code = ["var-annotated"]
+exclude = [
+    "^docs/",
+    "^Versiones/",
+    "^firmware/",
+    "^build/",
+    "^\\.venv/",
+]
+
+[[tool.mypy.overrides]]
+# Optional Windows / OpenCV fallbacks assign None to modules on purpose.
+module = ["video_background", "hwinfo_reader"]
+disable_error_code = ["assignment", "attr-defined"]

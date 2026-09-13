@@ -1,165 +1,321 @@
-# Thermal Engine (fork con soporte Linux + LCD Thermalright Trofeo)
+# Thermal Engine Studio
 
-Editor visual de temas para pantallas LCD de refrigeración AIO. Este fork parte del proyecto original de [nathanielhernandez/Thermal-Engine](https://github.com/nathanielhernandez/Thermal-Engine) y añade **soporte nativo para Linux** (incluyendo sistemas inmutables como Bazzite/Fedora Silverblue) y para el **Thermalright Trofeo Vision 9.16 (USB 0416:5408)**, además de varias mejoras de rendimiento y usabilidad.
+**🇪🇸 Español** · [🇬🇧 English](#english)
 
----
-
-## Novedades respecto al proyecto original
-
-### 1. Driver LY para el Thermalright Trofeo Vision (`device_ly.py`)
-- Implementación completa del protocolo **LY** (comunicación USB *bulk*, no HID) para el LCD 0416:5408, basada en la ingeniería inversa del proyecto [thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux).
-- Handshake, envío de frames JPEG por bloques y reconexión automática ante desconexiones/timeouts USB.
-- Resolución nativa configurada a **1920×480**.
-- **Tasas por panel**: el driver declara sus capacidades (`frame_rate_options`, subsampling y hilo de envío). El Trofeo 9.16 ofrece **Low (12 FPS @ 4:4:4)** y **High (24 FPS @ 4:2:2)**; las tasas extendidas 30/60 solo se desbloquean si el benchmark manual pasa.
-- **Rendimiento**: buffer de empaquetado de frames persistente reutilizado entre envíos (elimina copias de memoria por frame) y padding de bloques a múltiplo de 4 según exige el protocolo.
-
-### 2. Soporte completo para Linux
-- `linux_sensors.py`: backend de sensores de sistema para Linux (CPU, RAM, GPU NVIDIA vía NVML/`nvidia-smi`), equivalente al backend HWiNFO usado en Windows.
-- Autostart en Linux mediante archivo `.desktop` (XDG autostart), en lugar de depender del registro de Windows.
-- `scripts/install-linux.sh` y `scripts/run-linux.sh`: instalación y ejecución mediante entorno virtual (`.venv`), sin tocar el sistema base — pensado para distros inmutables (Bazzite, Silverblue, etc.).
-- `scripts/99-thermalright-trofeo.rules`: reglas `udev` para poder acceder al LCD por USB sin permisos de root.
-
-### 3. Modo Vertical (Vertical Mode)
-- Nuevo checkbox **"Vertical Mode"** en el menú Display de la interfaz.
-- Al activarlo:
-  - El **lienzo de diseño** de la interfaz cambia a orientación vertical (480×1920 lógico) para que edites el tema tal y como se verá en el panel montado en vertical.
-  - Puedes mover y redimensionar elementos libremente por todo el lienzo vertical (se corrigieron límites de arrastre que antes seguían fijados a 1920×480).
-  - El **frame final** enviado al LCD se rota de vuelta a la resolución física fija del panel (1920×480) sin ningún reescalado/deformación.
-- Pensado para instalaciones donde el panel físico se monta girado 90°.
-- Configurable también directamente en `settings.json` (`"vertical_mode": true/false`).
-
-### 4. Optimización de CPU (frame signature caching)
-- Antes de renderizar y volver a comprimir cada frame a JPEG, se calcula una "firma" ligera (`_compute_frame_signature`) con todo lo que puede afectar al resultado: valores de sensores (redondeados para evitar jitter), posiciones/visibilidad de elementos, modo vertical, y si hay vídeo de fondo activo.
-- Si la firma no cambia respecto al frame anterior, se reutiliza el JPEG ya generado en lugar de volver a renderizar/codificar.
-- Reduce el consumo de CPU en reposo (sensores estables) de forma notable frente al comportamiento original de renderizar y codificar cada frame sin condición.
-- Aplicado tanto al modo estándar como al modo Overdrive (hilo de renderizado en segundo plano).
-
-### 5. Corrección de color para el LCD (brillo / contraste / saturación)
-- Los paneles LCD de este tipo suelen mostrar los colores algo apagados/desaturados respecto al diseño en pantalla.
-- Nuevo grupo **"LCD Color Correction"** en `Settings → Preferences...` con tres deslizadores: **Brightness**, **Contrast** y **Saturation** (rango 0.5–1.5/2.0, aplicados como multiplicador sobre el frame final antes de convertirlo a JPEG).
-- Por defecto se aplica un contraste (1.15) y saturación (1.25) ligeramente elevados para compensar el aspecto apagado de fábrica; el brillo por defecto es 1.0 (sin cambios).
-- También configurable directamente en `settings.json` (`lcd_brightness`, `lcd_contrast`, `lcd_saturation`).
-- Además, el submuestreo de croma del JPEG enviado al LCD se cambió de `4:2:0` a `4:4:4` (subsampling=0), lo que conserva mucha más fidelidad de color respecto al diseño mostrado en la interfaz, a costa de un JPEG ligeramente más pesado (impacto de CPU/USB despreciable en este uso).
-
-### 6. Corrección del límite del eje Y en modo vertical
-- El panel de propiedades (X/Y/Ancho/Alto) tenía los rangos de los spin boxes fijados siempre a la resolución física del panel (1920×480), por lo que en modo vertical el campo Y no dejaba introducir valores por encima de 480 aunque el lienzo vertical mide 1920 de alto.
-- Ahora los rangos de X/Y/Ancho/Alto (individuales y en selección múltiple) se recalculan automáticamente al activar/desactivar Vertical Mode, y también al iniciar la aplicación si ya estaba guardado como activo.
-
-### 7. Configuración centralizada, menos hardcodeo
-- Todos los parámetros relevantes del hardware/comportamiento están en `settings.json`, gestionados por `settings.py`.
-
-### 8. Asistente "New Project…" (File → New Project…)
-- Nuevo wizard de dos pasos estilo Figma para crear proyectos:
-  1. **Dispositivo**: selección de targets **Web / LCD / DMD** (DMD como placeholder deshabilitado) mediante cards visuales.
-  2. **Configuración**: nombre del proyecto, benchmark del panel y plantilla inicial.
-- El paso LCD incluye un test manual **"Test LCD"** que mide los FPS reales del panel sobre el hardware conectado; si pasa, desbloquea las tasas extendidas (30/60 FPS).
-- El asistente entrega los datos al editor sin manipular el lienzo directamente (`dialog.data()`).
-
-### 9. Templates con orientación (secciones Horizontal / Vertical)
-- El panel **Template** del editor separa ahora las plantillas en dos secciones: **Horizontal** y **Vertical** (la orientación se infiere de `display_width` vs `display_height` de cada preset).
-- Cada miniatura muestra un preview que respeta la proporción real del template (horizontales anchas, verticales altas) y una etiqueta de orientación.
-- Los presets verticales suelen corresponder a paneles montados girados 90° (modo vertical).
-
-### 10. Canvas mejorado (zoom y guías de alineación)
-- **Zoom** con la rueda del ratón (5%–400%) manteniendo el modo "Fit".
-- **Smart guides**: líneas guía de alineación con snapping (6px de tolerancia) al mover/redimensionar elementos.
-
-### 11. Visibilidad y bloqueo de elementos
-- La lista de elementos incluye ahora un **ojo** (ocultar/mostrar) y un **candado** (bloquear) en cada fila.
-- Un elemento oculto no se renderiza en el LCD ni en la preview, pero sigue siendo editable desde la lista (nuevo campo `visible` persistido en el tema).
-
-### 12. Webserver bajo demanda
-- El preview web ya **no se arranca al iniciar la aplicación**: el servidor (puerto `4241`, configurable con `--port`) solo se levanta cuando el proyecto activo tiene target **Web**, y se detiene al cambiar a un proyecto solo LCD.
+Editor visual de temas para pantallas de monitorización: LCD USB (refrigeración AIO), paneles LED **DMD** (ESP32), monitores **HDMI** y **preview web**. Diseñas el tema con un lienzo visual y Thermal Engine Studio lo renderiza en tiempo real con datos de sensores del sistema.
 
 ---
 
-## Opciones de configuración (`settings.json`)
+## Español
 
-| Clave | Tipo | Por defecto | Descripción |
-|---|---|---|---|
-| `launch_at_login` | bool | `true` | Inicia la aplicación automáticamente al arrancar sesión (Windows: registro; Linux: XDG autostart). |
-| `launch_minimized` | bool | `true` | Al iniciar automáticamente, arranca minimizado a la bandeja del sistema. |
-| `minimize_to_tray` | bool | `true` | Al minimizar la ventana, se envía a la bandeja del sistema en lugar de a la barra de tareas. |
-| `close_to_tray` | bool | `true` | Al cerrar la ventana (X), la app sigue ejecutándose en la bandeja en lugar de salir. |
-| `target_fps` | int | `30` | Fotogramas por segundo objetivo enviados al LCD. |
-| `default_preset` | string \| `null` | `null` | Nombre del preset (de `presets/`) que se carga automáticamente al iniciar. |
-| `overdrive_mode` | bool | `false` | Activa un hilo de renderizado en segundo plano que pre-genera frames para una entrega más fluida y compensada en el tiempo (útil con FPS altos). |
-| `suppress_60fps_warning` | bool | `false` | Oculta el aviso al seleccionar 60 FPS. |
-| `vertical_mode` | bool | `false` | Rota tanto la interfaz de diseño como la salida enviada al LCD 90°, para paneles montados verticalmente. También se puede activar/desactivar desde el menú Display → Vertical Mode. |
-| `lcd_brightness` | float | `1.0` | Multiplicador de brillo aplicado al frame final antes de enviarlo al LCD (0.5–1.5). Configurable en Preferences. |
-| `lcd_contrast` | float | `1.15` | Multiplicador de contraste aplicado al frame final antes de enviarlo al LCD (0.5–1.5). Configurable en Preferences. |
-| `lcd_saturation` | float | `1.25` | Multiplicador de saturación aplicado al frame final antes de enviarlo al LCD (0.5–2.0). Configurable en Preferences. |
-| `project_targets` | dict | `{web: true, lcd: true}` | Targets activos del proyecto (Web / LCD). El webserver solo arranca con target `web` y el envío LCD solo con target `lcd`. |
-| `lcd_model` | string | `"trofeo_9_16"` | Modelo LCD activo del catálogo (`lcds.py`), que determina resolución, tasas base y tasas extendidas. |
-| `lcd_benchmarks` | dict | `{}` | Resultados del benchmark por panel, clave `"vid:pid"` → `{passed, fps_*, requirement, date}`. Si `passed`, se desbloquean las tasas extendidas. |
-| `web_port` | int | `4241` | Puerto del webserver de preview (también configurable con `main.py --port`). |
+### ¿Qué es?
 
-Todas estas opciones también son accesibles desde los menús de la interfaz gráfica; los cambios se guardan automáticamente en `settings.json`.
+Thermal Engine Studio es una aplicación de escritorio (Python + Qt/PySide6) para crear y desplegar temas de monitorización. Un **proyecto** puede tener varios **destinos** a la vez y el mismo editor sirve para todos:
 
----
+| Destino | Salida |
+|---|---|
+| **LCD** | Pantalla LCD por USB (driver LY *bulk* o HID), p. ej. Thermalright Trofeo Vision. |
+| **DMD** | Panel LED *Dot Matrix* ESP32 por TCP (frames RGB565). |
+| **HDMI** | Monitor externo a pantalla completa, a su resolución nativa. |
+| **Web** | Servidor local bajo demanda con la imagen renderizada y panel de control. |
 
-## Hardware soportado (Linux)
+### Características principales
 
-- **Thermalright Trofeo Vision 9.16** — USB `VID 0x0416 / PID 0x5408`, protocolo LY (bulk USB), resolución nativa 1920×480.
-- Sensores Linux: CPU/RAM vía `psutil`, temperaturas/frecuencias, GPU NVIDIA vía `nvidia-ml-py` (con fallback automático a `nvidia-smi` si no está instalado).
+- **Proyectos multi-destino** con asistente **New Project…** (dispositivo → configuración) y opción de **añadir dispositivos** a un proyecto existente. Los destinos DMD y HDMI tienen **toggle** para pausar/reanudar su salida sin salir del editor.
+- **Editor visual**: lienzo con **zoom** (rueda del ratón, 5 %–400 %), *smart guides* con ajuste, **deshacer/rehacer**, selección múltiple, **agrupación**, **alineación**, y **ocultar/bloquear** elementos.
+- **Biblioteca de elementos** organizada en *Simple* y *Complex*, más elementos personalizables:
+  - **Simple**: Gauge, Bar, Text, Rectangle, Clock, Image.
+  - **Complex**: Line Chart, GIF, DMD Gauge, MultiPart Bar, Bars Chart.
+- **Propiedades por elemento**: origen de datos, valor/máximo, colores y opacidad, gradientes, fuentes, bordes, esquinas redondeadas, grosor de línea, segmentos, separación, animación suave y cambio de color por umbrales.
+- **Fuentes de datos**: CPU (uso, temperatura, frecuencia, potencia), GPU (uso, temperatura, frecuencia, memoria, potencia), RAM y red, además de valores estáticos.
+- **Rendimiento**: caché por *firma de frame* (reutiliza el JPEG si nada relevante cambia), modo **Overdrive** con hilo de renderizado en segundo plano y objetivo de **FPS** configurable.
+- **Ajuste de imagen**: corrección de **brillo, contraste y saturación** del panel, y **modo vertical** (rota la vista y la salida para paneles montados girados 90°).
+- **Presets y plantillas**: incluidos *Default* y plantillas horizontales/verticales; guarda el tema actual como preset con miniatura.
+- **Integración de escritorio**: tema oscuro, bandeja del sistema, autoarranque, consola de depuración y preferencias persistentes en `settings.json`.
 
----
+### Destinos de salida
 
-## Instalación
+#### LCD (USB)
 
-### Linux (recomendado: Bazzite / Fedora / distros inmutables)
+- Catálogo de paneles en `lcds.py` (resolución nativa, tasas base y extendidas).
+- Driver **LY** por USB *bulk* (`device_ly.py`) y ruta alternativa **HID**.
+- **Benchmark** manual del panel: si pasa sobre el hardware real, desbloquea las tasas extendidas (30/60 FPS).
+- Reconexión automática ante desconexiones/timeouts USB.
+- En Linux se incluyen reglas **udev** para acceder al LCD sin `root`.
+
+#### DMD (paneles LED / ESP32)
+
+- Lienzo a resolución DMD nativa: **128×32**, 128×64, 192×64, 256×64 y 320×132.
+- Elementos y tipografías pensados para pixel-art (fuentes tipo *Matrix Sans*).
+- Envío de frames **RGB565 little-endian** por **TCP** (puerto **8889**), cabecera `AA 55 <ancho> <alto>`, sin ACK (*fire & forget*), desde un hilo dedicado con *backoff*.
+
+El receptor es el firmware del proyecto **[sito1982/RetroPixelLED-ThermalEngine](https://github.com/sito1982/RetroPixelLED-ThermalEngine)**, que implementa el protocolo de **imagen externa** del panel: mientras recibe el *stream* interrumpe los GIFs y pinta los frames al instante; al cesar el envío vuelve solo a la playlist (timeout `IMAGE_TIMEOUT`, por defecto 1000 ms). El toggle **DMD** del editor pausa y reanuda ese *stream*.
+
+#### HDMI
+
+- Salida a pantalla completa en el **monitor seleccionado**, sin bordes ni foco.
+- Render a la **resolución nativa** del monitor con **letterbox** centrado si la proporción no coincide.
+- Detección de **monitores y hotplug** (al conectar/desconectar se reajusta el canvas).
+- El toggle **HDMI** conecta y desconecta la ventana de salida.
+
+#### Web
+
+- Servidor **Flask** que **solo arranca cuando el proyecto tiene destino Web** (ahorro de recursos).
+- Sirve la imagen renderizada y un panel de control; puerto configurable (`--port`, por defecto **4241**).
+
+### Fuentes de datos (sensores)
+
+| Plataforma | Backend |
+|---|---|
+| **Windows** | HWiNFO (memoria compartida). |
+| **Linux** | `psutil` (CPU/RAM/red), temperaturas/frecuencias y **RAPL**; GPU **NVIDIA** vía NVML (`nvidia-ml-py`) con *fallback* a `nvidia-smi`, y soporte **AMD**. |
+
+La lista de fuentes disponibles se declara en `constants.py` (CPU, GPU, memoria, red y estáticas).
+
+### Presets y plantillas
+
+- El panel de plantillas separa **Horizontal** y **Vertical** según las dimensiones del preset.
+- Cada miniatura respeta la proporción real del lienzo.
+- Puedes **guardar el tema actual como preset**, con su miniatura PNG.
+
+### Instalación
+
+#### Linux (recomendado: Bazzite / Fedora / distros inmutables)
 
 ```bash
-git clone https://github.com/<tu-usuario>/Thermal-Engine.git
-cd Thermal-Engine
+git clone <URL-del-repositorio> Thermal-Engine-Studio
+cd Thermal-Engine-Studio
 ./scripts/install-linux.sh
 ```
 
-El script `install-linux.sh`:
-1. Comprueba que tienes Python ≥ 3.10.
+El script:
+
+1. Comprueba **Python ≥ 3.10**.
 2. Crea un entorno virtual en `.venv/` (no toca el Python del sistema).
-3. Instala todas las dependencias de `requirements.txt` dentro del `.venv`, **incluyendo `pyusb`** (necesario para el driver LY del LCD) — ya no hace falta instalarlo manualmente después.
-4. Instala las reglas `udev` (`scripts/99-thermalright-trofeo.rules`) para poder acceder al LCD sin `sudo`, y añade tu usuario al grupo `plugdev` si existe.
-5. Crea un lanzador de escritorio en `~/.local/share/applications/ThermalEngine.desktop`.
+3. Instala `requirements.txt` dentro del `.venv` (incluye `pyusb` para el driver LY).
+4. Instala las reglas **udev** (`scripts/99-thermalright-trofeo.rules`) y añade tu usuario a `plugdev` si existe.
+5. Crea el lanzador de escritorio en `~/.local/share/applications/`.
 
-Después de instalar las reglas udev por primera vez, **desconecta y reconecta el LCD por USB** (o reinicia) para que surtan efecto. Cierra también cualquier software del fabricante (TRCC) que pueda estar bloqueando el acceso al dispositivo.
+Tras instalar las reglas udev por primera vez, **reconecta el LCD por USB** (o reinicia). Cierra cualquier software del fabricante (p. ej. TRCC) que pueda bloquear el dispositivo.
 
-Para ejecutar la aplicación:
+Ejecutar:
 
 ```bash
 ./scripts/run-linux.sh
-```
-
-o directamente con el Python del entorno virtual:
-
-```bash
+# o directamente:
 ./.venv/bin/python main.py
 ```
 
-### Windows
+#### Windows
 
 ```bat
 scripts\install.bat
-```
-
-y para ejecutar:
-
-```bat
 scripts\run.bat
 ```
 
+### Hardware compatible
+
+- **Thermalright Trofeo Vision 9.16** — USB `0416:5408`, protocolo LY (*bulk*)/HID, 1920×480.
+- **Paneles DMD / ESP32** con el firmware [RetroPixelLED-ThermalEngine](https://github.com/sito1982/RetroPixelLED-ThermalEngine) (imagen externa RGB565 por TCP :8889).
+- **Monitores HDMI** (cualquiera, a resolución nativa).
+- **Sensores**: HWiNFO en Windows; `psutil`/RAPL y GPU NVIDIA/AMD en Linux.
+
+### Configuración (`settings.json`)
+
+| Clave | Tipo | Por defecto | Descripción |
+|---|---|---|---|
+| `launch_at_login` | bool | `true` | Inicia la app al arrancar sesión (Windows: registro; Linux: XDG autostart). |
+| `launch_minimized` | bool | `true` | Al iniciar sola, arranca minimizada en la bandeja. |
+| `minimize_to_tray` | bool | `true` | Minimizar envía a la bandeja en lugar de a la barra de tareas. |
+| `close_to_tray` | bool | `true` | Cerrar la ventana la deja en la bandeja en lugar de salir. |
+| `target_fps` | int | `30` | FPS objetivo enviados al panel. |
+| `default_preset` | string \| `null` | `null` | Preset que se carga al iniciar. |
+| `overdrive_mode` | bool | `false` | Hilo de renderizado en segundo plano para una entrega más fluida. |
+| `vertical_mode` | bool | `false` | Rota el diseño y la salida 90° (paneles montados en vertical). |
+| `lcd_brightness` | float | `1.0` | Brillo aplicado al frame final (0.5–1.5). |
+| `lcd_contrast` | float | `1.15` | Contraste aplicado al frame final (0.5–1.5). |
+| `lcd_saturation` | float | `1.25` | Saturación aplicada al frame final (0.5–2.0). |
+| `project_targets` | dict | `{web: true, lcd: true, dmd: false, hdmi: false}` | Destinos activos del proyecto. |
+| `lcd_model` | string | `"trofeo_9_16"` | Modelo LCD activo del catálogo. |
+| `lcd_benchmarks` | dict | `{}` | Resultados del benchmark por panel (`vid:pid`); si pasa, desbloquea tasas extendidas. |
+| `dmd_config` | dict \| `null` | `null` | Config del DMD: `{ip, port, width, height, fps, model_id}`. |
+| `hdmi_config` | dict \| `null` | `null` | Config del HDMI: `{screen_id, width, height, refresh, connector, scale_mode, fps}`. |
+| `web_port` | int | `4241` | Puerto del webserver (también `main.py --port`). |
+| `load_at_startup` | bool | `false` | Reabrir el último proyecto al iniciar. |
+| `allow_element_actions` | bool | `false` | Permite acciones interactivas en el monitor HDMI (con aprobación). |
+
+Todas las opciones también se ajustan desde la interfaz; los cambios se guardan automáticamente.
+
+### Solución de problemas (Linux)
+
+- **`ModuleNotFoundError: No module named 'usb'`** — `pyusb` no está en el entorno activo: `./.venv/bin/python -m pip install pyusb`.
+- **`Failed to connect: open failed`** — reglas udev no instaladas o el usuario no está en `plugdev`; reconecta el LCD y cierra cualquier software TRCC.
+- **`[LY] Handshake error: ... Operation timed out`** — suele resolverse tras el primer *handshake* correcto; si persiste, reconecta el cable USB.
+- **DMD sin imagen** — verifica IP/puerto (`:8889`) y que el panel ejecuta el firmware RetroPixelLED-ThermalEngine; el toggle DMD debe estar activo.
+- **HDMI no aparece** — usa **Actualizar** en la pestaña HDMI para redetectar monitores.
+
+### Créditos
+
+- Proyecto original: [nathanielhernandez/Thermal-Engine](https://github.com/nathanielhernandez/Thermal-Engine).
+- Protocolo LY de referencia: [Lexonight1/thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux).
+- Firmware DMD / imagen externa: [sito1982/RetroPixelLED-ThermalEngine](https://github.com/sito1982/RetroPixelLED-ThermalEngine).
+
 ---
 
-## Solución de problemas rápida (Linux)
+<a id="english"></a>
 
-- **`[LY] device_ly.py not found, skipping LY probe`**: falta el archivo `device_ly.py` en la carpeta del proyecto, o estás ejecutando desde una copia incompleta. Verifica `ls device_ly.py` en la raíz del proyecto.
-- **`ModuleNotFoundError: No module named 'usb'`**: `pyusb` no está instalado en el entorno virtual activo. Ejecuta `./.venv/bin/python -m pip install pyusb` (asegúrate de usar el `pip`/`python` del `.venv`, no el del sistema).
-- **`Failed to connect: open failed`**: revisa que las reglas udev estén instaladas (`scripts/99-thermalright-trofeo.rules`) y que tu usuario pertenezca al grupo `plugdev`; reconecta el LCD por USB. Cierra cualquier software TRCC del fabricante.
-- **`[LY] Handshake error: [Errno 110] Operation timed out`**: normalmente se resuelve solo tras el primer handshake correcto gracias a la reconexión automática; si persiste, reconecta físicamente el cable USB.
+## English
 
----
+Visual theme editor for monitoring displays: USB **LCD** (AIO coolers), **DMD** LED panels (ESP32), **HDMI** monitors and a **web preview**. You design a theme on a visual canvas and Thermal Engine Studio renders it live with system sensor data.
 
-## Créditos
+### What is it?
 
-- Proyecto original: [nathanielhernandez/Thermal-Engine](https://github.com/nathanielhernandez/Thermal-Engine)
-- Protocolo LY de referencia: [Lexonight1/thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux)
+Thermal Engine Studio is a desktop application (Python + Qt/PySide6) to build and deploy monitoring themes. A **project** can target several **outputs** at once and the same editor drives all of them:
+
+| Output | Delivery |
+|---|---|
+| **LCD** | USB LCD (LY *bulk* or HID driver), e.g. Thermalright Trofeo Vision. |
+| **DMD** | ESP32 *Dot Matrix* LED panel over TCP (RGB565 frames). |
+| **HDMI** | External monitor, full screen at native resolution. |
+| **Web** | On-demand local server with the rendered image and a control panel. |
+
+### Main features
+
+- **Multi-target projects** with a **New Project…** wizard (device → config) and the ability to **add devices** to an existing project. DMD and HDMI have a **toggle** to pause/resume their output without leaving the editor.
+- **Visual editor**: canvas with **zoom** (mouse wheel, 5 %–400 %), snapping *smart guides*, **undo/redo**, multi-selection, **grouping**, **alignment**, and **hide/lock**.
+- **Element library** split into *Simple* and *Complex*, plus custom elements:
+  - **Simple**: Gauge, Bar, Text, Rectangle, Clock, Image.
+  - **Complex**: Line Chart, GIF, DMD Gauge, MultiPart Bar, Bars Chart.
+- **Per-element properties**: data source, value/max, colors and opacity, gradients, fonts, borders, rounded corners, line thickness, segments, gap, smooth animation and threshold color changes.
+- **Data sources**: CPU (usage, temp, clock, power), GPU (usage, temp, clock, memory, power), RAM and network, plus static values.
+- **Performance**: *frame signature* caching (reuses the JPEG when nothing relevant changed), **Overdrive** background render thread and configurable **FPS**.
+- **Image tuning**: panel **brightness, contrast and saturation** correction, and **vertical mode** (rotates the view and the output for panels mounted 90°).
+- **Presets and templates**: built-in *Default* plus horizontal/vertical templates; save the current theme as a preset with a thumbnail.
+- **Desktop integration**: dark theme, system tray, autostart, debug console and persistent preferences in `settings.json`.
+
+### Outputs
+
+#### LCD (USB)
+
+- Panel catalog in `lcds.py` (native resolution, base and extended rates).
+- **LY** *bulk* USB driver (`device_ly.py`) and an alternative **HID** path.
+- Manual panel **benchmark**: if it passes on real hardware, it unlocks extended rates (30/60 FPS).
+- Automatic reconnect on USB disconnects/timeouts.
+- On Linux, **udev** rules are included to access the LCD without `root`.
+
+#### DMD (LED panels / ESP32)
+
+- Canvas at native DMD resolution: **128×32**, 128×64, 192×64, 256×64 and 320×132.
+- Pixel-art oriented elements and fonts (*Matrix Sans*-style).
+- Frames are sent as **little-endian RGB565** over **TCP** (port **8889**), header `AA 55 <width> <height>`, no ACK (*fire & forget*), from a dedicated thread with *backoff*.
+
+The receiver is the firmware from **[sito1982/RetroPixelLED-ThermalEngine](https://github.com/sito1982/RetroPixelLED-ThermalEngine)**, which implements the panel's **external image** protocol: while it receives the stream it interrupts the GIFs and paints frames instantly; when the stream stops it returns to the playlist on its own (`IMAGE_TIMEOUT`, 1000 ms by default). The editor's **DMD** toggle pauses and resumes that stream.
+
+#### HDMI
+
+- Full-screen output on the **selected monitor**, borderless and focus-less.
+- Rendered at the monitor's **native resolution** with centered **letterbox** when the aspect ratio differs.
+- **Monitor detection and hotplug** (the canvas re-adjusts when monitors are connected/disconnected).
+- The **HDMI** toggle connects and disconnects the output window.
+
+#### Web
+
+- **Flask** server that **only starts when the project has the Web target** (saves resources).
+- Serves the rendered image and a control panel; configurable port (`--port`, default **4241**).
+
+### Data sources (sensors)
+
+| Platform | Backend |
+|---|---|
+| **Windows** | HWiNFO (shared memory). |
+| **Linux** | `psutil` (CPU/RAM/network), temperatures/frequencies and **RAPL**; **NVIDIA** GPU via NVML (`nvidia-ml-py`) with `nvidia-smi` fallback, and **AMD** support. |
+
+Available sources are declared in `constants.py` (CPU, GPU, memory, network and static).
+
+### Presets and templates
+
+- The template panel separates **Horizontal** and **Vertical** based on each preset's dimensions.
+- Each thumbnail keeps the real canvas aspect ratio.
+- You can **save the current theme as a preset**, with its PNG thumbnail.
+
+### Installation
+
+#### Linux (recommended: Bazzite / Fedora / immutable distros)
+
+```bash
+git clone <repository-url> Thermal-Engine-Studio
+cd Thermal-Engine-Studio
+./scripts/install-linux.sh
+```
+
+The script:
+
+1. Checks **Python ≥ 3.10**.
+2. Creates a virtual environment in `.venv/` (does not touch the system Python).
+3. Installs `requirements.txt` into the `.venv` (includes `pyusb` for the LY driver).
+4. Installs the **udev** rules (`scripts/99-thermalright-trofeo.rules`) and adds your user to `plugdev` if present.
+5. Creates the desktop launcher in `~/.local/share/applications/`.
+
+After installing the udev rules for the first time, **reconnect the LCD over USB** (or reboot). Close any vendor software (e.g. TRCC) that may hold the device.
+
+Run:
+
+```bash
+./scripts/run-linux.sh
+# or directly:
+./.venv/bin/python main.py
+```
+
+#### Windows
+
+```bat
+scripts\install.bat
+scripts\run.bat
+```
+
+### Supported hardware
+
+- **Thermalright Trofeo Vision 9.16** — USB `0416:5408`, LY (*bulk*)/HID protocol, 1920×480.
+- **DMD / ESP32 panels** running the [RetroPixelLED-ThermalEngine](https://github.com/sito1982/RetroPixelLED-ThermalEngine) firmware (external RGB565 image over TCP :8889).
+- **HDMI monitors** (any, at native resolution).
+- **Sensors**: HWiNFO on Windows; `psutil`/RAPL and NVIDIA/AMD GPUs on Linux.
+
+### Configuration (`settings.json`)
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `launch_at_login` | bool | `true` | Start the app on login (Windows: registry; Linux: XDG autostart). |
+| `launch_minimized` | bool | `true` | When autostarted, begin minimized in the tray. |
+| `minimize_to_tray` | bool | `true` | Minimizing sends it to the tray instead of the taskbar. |
+| `close_to_tray` | bool | `true` | Closing the window keeps it in the tray instead of quitting. |
+| `target_fps` | int | `30` | Target FPS sent to the panel. |
+| `default_preset` | string \| `null` | `null` | Preset loaded on startup. |
+| `overdrive_mode` | bool | `false` | Background render thread for smoother delivery. |
+| `vertical_mode` | bool | `false` | Rotates the design and output 90° (vertically mounted panels). |
+| `lcd_brightness` | float | `1.0` | Brightness applied to the final frame (0.5–1.5). |
+| `lcd_contrast` | float | `1.15` | Contrast applied to the final frame (0.5–1.5). |
+| `lcd_saturation` | float | `1.25` | Saturation applied to the final frame (0.5–2.0). |
+| `project_targets` | dict | `{web: true, lcd: true, dmd: false, hdmi: false}` | Active project outputs. |
+| `lcd_model` | string | `"trofeo_9_16"` | Active LCD model from the catalog. |
+| `lcd_benchmarks` | dict | `{}` | Per-panel benchmark results (`vid:pid`); passing unlocks extended rates. |
+| `dmd_config` | dict \| `null` | `null` | DMD config: `{ip, port, width, height, fps, model_id}`. |
+| `hdmi_config` | dict \| `null` | `null` | HDMI config: `{screen_id, width, height, refresh, connector, scale_mode, fps}`. |
+| `web_port` | int | `4241` | Webserver port (also `main.py --port`). |
+| `load_at_startup` | bool | `false` | Reopen the last project on startup. |
+| `allow_element_actions` | bool | `false` | Allow interactive actions on the HDMI monitor (with approval). |
+
+All options are also adjustable from the UI; changes are saved automatically.
+
+### Troubleshooting (Linux)
+
+- **`ModuleNotFoundError: No module named 'usb'`** — `pyusb` is missing from the active environment: `./.venv/bin/python -m pip install pyusb`.
+- **`Failed to connect: open failed`** — udev rules not installed or user not in `plugdev`; reconnect the LCD and close any TRCC software.
+- **`[LY] Handshake error: ... Operation timed out`** — usually resolves after the first successful handshake; if it persists, reconnect the USB cable.
+- **No DMD image** — check IP/port (`:8889`) and that the panel runs the RetroPixelLED-ThermalEngine firmware; the DMD toggle must be enabled.
+- **HDMI not showing** — use **Refresh** in the HDMI tab to re-detect monitors.
+
+### Credits
+
+- Original project: [nathanielhernandez/Thermal-Engine](https://github.com/nathanielhernandez/Thermal-Engine).
+- LY protocol reference: [Lexonight1/thermalright-trcc-linux](https://github.com/Lexonight1/thermalright-trcc-linux).
+- DMD firmware / external image: [sito1982/RetroPixelLED-ThermalEngine](https://github.com/sito1982/RetroPixelLED-ThermalEngine).

@@ -1,27 +1,34 @@
 """
-Thermal Engine
+Thermal Engine Studio
 A visual theme editor for LCD displays.
 
 Entry point for the application.
 """
 
-import sys
-import os
 import argparse
 import atexit
+import os
 import signal
+import sys
+import webbrowser
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QMessageBox, QSystemTrayIcon, QMenu,
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QSystemTrayIcon,
+    QVBoxLayout,
 )
-from PySide6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush, QFont
-from PySide6.QtCore import Qt, QTimer
 
-from sensors import init_sensors, HAS_HWINFO
-from main_window import ThemeEditorWindow
 from app_path import get_app_dir
-import settings
+from main_window import ThemeEditorWindow
+from sensors import HAS_HWINFO, init_sensors
 
 
 class HWiNFOSetupDialog(QDialog):
@@ -47,7 +54,7 @@ class HWiNFOSetupDialog(QDialog):
 
         # Explanation
         explanation = QLabel(
-            "ThermalEngine uses HWiNFO to read CPU and GPU sensor data.\n"
+            "Thermal Engine Studio uses HWiNFO to read CPU and GPU sensor data.\n"
             "HWiNFO is a free, trusted hardware monitoring tool used by\n"
             "millions of users worldwide."
         )
@@ -151,7 +158,7 @@ def create_tray_icon():
 
 def main():
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Thermal Engine')
+    parser = argparse.ArgumentParser(description='Thermal Engine Studio')
     parser.add_argument('--minimized', action='store_true', help='Start minimized to system tray')
     parser.add_argument('--port', type=int, default=4241, help='Port for the web server (default: 4241)')
     args = parser.parse_args()
@@ -183,7 +190,6 @@ def main():
     # Show HWiNFO setup dialog if not connected (skip if minimized/auto-start).
     # HWiNFO only exists on Windows; on Linux los sensores se leen directamente
     # del sistema (psutil + NVML), así que no se muestra este diálogo.
-    from sensors import HAS_HWINFO
     if sys.platform == "win32" and not HAS_HWINFO and not args.minimized:
         dialog = HWiNFOSetupDialog()
         dialog.exec()
@@ -218,7 +224,7 @@ def main():
 
     # Create system tray icon
     tray_icon = QSystemTrayIcon(create_tray_icon(), app)
-    tray_icon.setToolTip("Thermal Engine")
+    tray_icon.setToolTip("Thermal Engine Studio")
 
     # Tray menu
     tray_menu = QMenu()

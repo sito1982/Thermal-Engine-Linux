@@ -1,10 +1,12 @@
 """
-Generate an icon for Thermal Engine.
+Generate an icon for Thermal Engine Studio.
 Creates a simple gauge-style icon.
 """
 
-from PIL import Image, ImageDraw
 import os
+
+from PIL import Image, ImageDraw
+
 
 def create_icon():
     # Create multiple sizes for ICO file

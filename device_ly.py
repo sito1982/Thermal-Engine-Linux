@@ -9,7 +9,6 @@ import struct
 import usb.core
 import usb.util
 
-
 LY_VID = 0x0416
 LY_PID = 0x5408
 

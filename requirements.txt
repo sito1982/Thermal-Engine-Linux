@@ -1,4 +1,4 @@
-# Thermal Engine - Python Dependencies
+# Thermal Engine Studio - Python Dependencies
 
 # Qt GUI framework (multiplataforma: Windows, Linux, macOS)
 PySide6>=6.5.0

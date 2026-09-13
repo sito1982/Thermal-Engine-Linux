@@ -1,5 +1,5 @@
 """
-Thermal Engine - UI design system.
+Thermal Engine Studio - UI design system.
 
 Central dark theme (matches the approved LCDForge Figma mock):
 design tokens + one global QSS stylesheet + small styled helper widgets.
@@ -9,10 +9,13 @@ widgets that need a custom look just set an objectName the stylesheet targets
 (e.g. 'appLogo', 'statusMetric', 'propertySection').
 """
 
+import os
+import tempfile
+
+from PySide6.QtCore import QPointF, QSize, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QPolygonF
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QIcon, QPixmap, QPainter
-from PySide6.QtWidgets import QToolButton, QLabel
+from PySide6.QtWidgets import QLabel, QToolButton
 
 # ---------------------------------------------------------------------------
 # Design tokens
@@ -184,15 +187,60 @@ class SectionLabel(QLabel):
 
 
 class LogoLabel(QLabel):
-    """App title in the menu bar ('THERMAL ENGINE')."""
+    """App title in the menu bar ('THERMAL ENGINE STUDIO')."""
 
     def __init__(self, text, parent=None):
         super().__init__(text.upper(), parent)
         self.setObjectName("appLogo")
 
 
+_spinbox_arrows_cache = {}
+
+
+def _spinbox_arrow_paths():
+    """Render small PNG arrow icons for QSpinBox::up-arrow / down-arrow.
+
+    El truco CSS de triángulos con bordes ("border-left/right: transparent")
+    no se dibuja correctamente en los sub-controls de los spinbox en Qt y
+    deja cuadrados; por eso se generan iconos reales y se referencian con
+    `image: url(...)`. Se reutilizan entre llamadas (misma ruta de cache).
+    """
+    global _spinbox_arrows_cache
+    if _spinbox_arrows_cache:
+        return _spinbox_arrows_cache
+
+    tmp = tempfile.gettempdir()
+    cache_key = None
+    for name, path in (("up", "te_spin_up.png"),
+                       ("down", "te_spin_down.png")):
+        fp = os.path.join(tmp, path)
+        if os.path.exists(fp):
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+        pm = QPixmap(9, 9)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(TEXT_DIM))
+        if name == "up":
+            pts = QPolygonF(
+                [QPointF(1.0, 6.5), QPointF(8.0, 6.5), QPointF(4.5, 2.0)])
+        else:
+            pts = QPolygonF(
+                [QPointF(1.0, 2.5), QPointF(8.0, 2.5), QPointF(4.5, 7.0)])
+        p.drawPolygon(pts)
+        p.end()
+        pm.save(fp, "PNG")
+        _spinbox_arrows_cache[name] = fp
+    return _spinbox_arrows_cache
+
+
 def build_stylesheet():
     """Global QSS for the whole application."""
+    arrows = _spinbox_arrow_paths()
     return f"""
     /* ---------- global ---------- */
     QMainWindow, QDialog, QWidget#centralRoot {{
@@ -399,22 +447,31 @@ def build_stylesheet():
         width: 14px;
     }}
     QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
-        image: none;
-        border-left: 4px solid transparent;
-        border-right: 4px solid transparent;
-        border-bottom: 5px solid {TEXT_DIM};
-        width: 0; height: 0;
+        image: url("{arrows['up']}");
+        width: 9px; height: 9px;
     }}
     QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
-        border-left: 4px solid transparent;
-        border-right: 4px solid transparent;
-        border-top: 5px solid {TEXT_DIM};
-        width: 0; height: 0;
+        image: url("{arrows['down']}");
+        width: 9px; height: 9px;
+    }}
+    QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled,
+    QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {{
+        image: none;
     }}
     QComboBox::drop-down {{
         subcontrol-origin: padding;
         border: none;
         width: 20px;
+    }}
+    QComboBox::drop-down:hover {{
+        background-color: {CARD_BG};
+    }}
+    QComboBox::down-arrow {{
+        image: url("{arrows['down']}");
+        width: 10px; height: 10px;
+    }}
+    QComboBox::down-arrow:disabled {{
+        image: none;
     }}
     QComboBox QAbstractItemView {{
         background-color: {CARD_BG};

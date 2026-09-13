@@ -5,12 +5,11 @@ Displays animated GIF images with proper frame timing.
 """
 
 import os
-import time
 import sys
-from PIL import Image as PILImage
+import time
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap, QImage, QPen, QColor
+from PIL import Image as PILImage
+from PySide6.QtGui import QColor, QImage, QPen, QPixmap
 
 # Add parent directory to path for security import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

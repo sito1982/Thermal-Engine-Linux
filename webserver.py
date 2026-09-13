@@ -14,15 +14,13 @@ The server binds 0.0.0.0:4241 by default so the UI is available on the local net
 The polling interval used by the browser is configurable from the config UI (default 200ms).
 """
 
-from flask import Flask, send_file, jsonify, request, abort, render_template
-import threading
 import io
-import time
-import os
 import json
-from pathlib import Path
+import os
+import threading
 
-from PySide6.QtCore import QObject, Signal, Qt
+from flask import Flask, abort, jsonify, render_template, request
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 # Optional Pillow import for image post-processing (resize/rotate).
 # If Pillow is not installed, PIL_AVAILABLE will be False and we fall back to serving raw JPEGs.

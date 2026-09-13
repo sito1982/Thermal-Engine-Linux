@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "scripts/create_icon.py"
-source_sha256: 785a24e227051177dc40393445288126028d74d05f00886453c61707a930291f
-source_bytes: 1992
-source_lines: 71
+source_sha256: dbe14ecc935261e48081d92023392e74c0022953a29cc9bda6903b2791e33fca
+source_bytes: 2001
+source_lines: 73
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -16,7 +16,7 @@ generated_by: "scripts/generate_code_markdown.py"
 
 ```python
 """
-Generate an icon for Thermal Engine.
+Generate an icon for Thermal Engine Studio.
 Creates a simple gauge-style icon.
 """
 ```
@@ -27,8 +27,8 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 ### Imports directos
 
-- `from PIL import Image, ImageDraw`
 - `import os`
+- `from PIL import Image, ImageDraw`
 
 ### Clases directas
 
@@ -42,12 +42,14 @@ Ninguna clase declarada directamente en el módulo.
 
 ```python
 """
-Generate an icon for Thermal Engine.
+Generate an icon for Thermal Engine Studio.
 Creates a simple gauge-style icon.
 """
 
-from PIL import Image, ImageDraw
 import os
+
+from PIL import Image, ImageDraw
+
 
 def create_icon():
     # Create multiple sizes for ICO file

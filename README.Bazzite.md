@@ -1,6 +1,6 @@
-# Thermal Engine en Linux / Bazzite
+# Thermal Engine Studio en Linux / Bazzite
 
-Guía para ejecutar **Thermal Engine** (editor visual de temas para pantallas
+Guía para ejecutar **Thermal Engine Studio** (editor visual de temas para pantallas
 LCD de disipadores AIO) en **Bazzite** y otras distribuciones basadas en Fedora
 Universal Blue, además de Linux en general.
 

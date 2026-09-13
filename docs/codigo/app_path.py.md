@@ -1,7 +1,7 @@
 ---
 generated: true
 source_path: "app_path.py"
-source_sha256: c0dc58fe4645555298d1d928d867089766248ad8812fe3c82a8547a37c4f87a6
+source_sha256: c0d9eb2e89aa7a432d250c59ddc3d4e03ebbbca66280455497d8588872cade40
 source_bytes: 1279
 source_lines: 42
 generated_by: "scripts/generate_code_markdown.py"
@@ -27,8 +27,8 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 ### Imports directos
 
-- `import sys`
 - `import os`
+- `import sys`
 
 ### Clases directas
 
@@ -49,8 +49,8 @@ Application path utilities.
 Handles path resolution for both script and frozen executable.
 """
 
-import sys
 import os
+import sys
 
 
 def get_app_dir():

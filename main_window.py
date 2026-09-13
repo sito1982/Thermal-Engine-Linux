@@ -2,33 +2,56 @@
 ThemeEditorWindow - Main application window.
 """
 
-import sys
-import os
-import json
-import time
 import io
+import json
+import os
+import sys
 import threading
+import time
+
 import psutil
+
+import actions
 
 # Windows-specific imports for power event handling
 if sys.platform == 'win32':
-    import ctypes
-    import ctypes.wintypes
+    pass
 
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QLineEdit, QColorDialog, QFileDialog,
-    QComboBox, QSplitter, QMessageBox, QStatusBar, QTabWidget,
-    QDialog, QCheckBox, QDialogButtonBox, QGroupBox, QFormLayout, QSystemTrayIcon,
-    QTextEdit, QPlainTextEdit, QSlider, QToolBar, QToolButton, QSizePolicy
+    QApplication,
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSizePolicy,
+    QSlider,
+    QStatusBar,
+    QSystemTrayIcon,
+    QTabBar,
+    QTabWidget,
+    QToolBar,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, QTimer, QByteArray, Signal, QObject
-from PySide6.QtGui import QColor, QAction, QKeySequence, QIcon, QTextCursor, QFont
 
-from ui_style import LogoLabel, ACCENT, TEXT, TEXT_DIM, BORDER, APP_BG, DOT_OFF, DOT_ON, make_icon
-from canvas import CanvasPreview, CanvasScrollArea
-from lcds import find_lcd
 from benchmark import run_display_benchmark
+from canvas import CanvasPreview, CanvasScrollArea, DMDCanvas, HDMICanvas
+from lcds import find_lcd
+from ui_style import ACCENT, APP_BG, BORDER, DOT_OFF, DOT_ON, TEXT, TEXT_DIM, LogoLabel
 
 
 class ConsoleOutputStream(QObject):
@@ -157,10 +180,9 @@ PBT_APMRESUMEAUTOMATIC = 0x0012
 PBT_APMRESUMESUSPEND = 0x0007
 PBT_APMSUSPEND = 0x0004
 
-from PIL import Image, ImageDraw, ImageFont, ImageChops, ImageEnhance
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFont
 
-from security import validate_preset_schema, is_safe_path
-
+from security import is_safe_path, validate_preset_schema
 
 # Global font cache for PIL fonts (shared across instances)
 _pil_font_cache = {}
@@ -186,14 +208,13 @@ _psutil_thread_running = False
 _cpu_percent_history = []
 _last_net_io = None
 _last_net_time = 0
-_psutil_last_success = 0
 _psutil_consecutive_errors = 0
 
 
 def _psutil_polling_thread():
     """Background thread that continuously polls psutil data."""
     global _psutil_data, _psutil_thread_running, _cpu_percent_history
-    global _last_net_io, _last_net_time, _psutil_last_success, _psutil_consecutive_errors
+    global _last_net_io, _last_net_time, _psutil_consecutive_errors
 
     # Initialize CPU percent
     try:
@@ -240,7 +261,6 @@ def _psutil_polling_thread():
                 _psutil_data['net_upload'] = round(net_upload, 2)
                 _psutil_data['net_download'] = round(net_download, 2)
 
-            _psutil_last_success = time.time()
             _psutil_consecutive_errors = 0
 
         except Exception as e:
@@ -297,7 +317,7 @@ try:
 except ImportError:
     HAS_HID = False
 
-from constants import DISPLAY_WIDTH, DISPLAY_HEIGHT, SOURCE_UNITS
+from constants import DISPLAY_HEIGHT, DISPLAY_WIDTH, SOURCE_UNITS
 
 
 def get_value_with_unit(value, source, temp_hide_unit=False):
@@ -321,11 +341,11 @@ def get_value_with_unit(value, source, temp_hide_unit=False):
         return f"{value:.1f}{symbol}"
     else:  # percent
         return f"{value:.0f}{symbol}"
-from element import ThemeElement
 import sensors
-from sensors import init_sensors, get_cached_sensors, get_sensors_sync, stop_sensors
 import settings
-from app_path import get_resource_path, get_bundled_resource_path
+from app_path import get_bundled_resource_path
+from element import ThemeElement
+from sensors import get_cached_sensors, get_sensors_sync, stop_sensors
 
 
 def hex_to_rgba(hex_color, opacity=100):
@@ -337,12 +357,106 @@ def hex_to_rgba(hex_color, opacity=100):
     b = int(hex_color[4:6], 16)
     a = int(255 * opacity / 100)
     return (r, g, b, a)
-from canvas import CanvasPreview
-from properties import PropertiesPanel
 from element_list import ElementListPanel
-from presets import PresetsPanel
 from elements import get_custom_element
-from video_background import video_background, HAS_CV2
+from presets import PresetsPanel
+from properties import PropertiesPanel
+from video_background import HAS_CV2, video_background
+
+# Tipos de elemento que se animan por tiempo (historial/segundero/GIF), no solo
+# por cambio de valor. Con estos presentes hay que renderizar cada frame aunque
+# la firma de valor no cambie, o la salida se ve a trompicones.
+HDMI_ANIMATED_TYPES = {"line_chart", "bar_chart", "gif", "clock"}
+
+
+class PlusTabBar(QTabBar):
+    """QTabBar con un botón '+' anclado a la derecha de la última pestaña
+    visible (en vez de en la esquina lejana del tab widget)."""
+    PLUS_PAD = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._plus_btn = None
+        self._reserved_width = 0
+        self._in_relayout = False
+        # Sin expansión, el ancho de las pestañas no depende del ancho de la
+        # barra y `tabRect` no provoca realimentación al fijar el mínimo.
+        self.setExpanding(False)
+
+    def set_plus_button(self, btn):
+        self._plus_btn = btn
+        btn.setParent(self)
+        btn.raise_()
+        self._relayout_plus()
+        self.updateGeometry()
+
+    def relayout(self):
+        """Recoloca el botón (público, para llamar tras cambiar visibilidad)."""
+        self._relayout_plus()
+
+    def _last_visible_index(self):
+        for i in range(self.count() - 1, -1, -1):
+            if self.isTabVisible(i):
+                return i
+        return -1
+
+    def _relayout_plus(self):
+        if self._plus_btn is None or self._in_relayout:
+            return
+        self._in_relayout = True
+        try:
+            btn = self._plus_btn
+            idx = self._last_visible_index()
+            if idx < 0:
+                x = self.PLUS_PAD
+            else:
+                x = self.tabRect(idx).right() + self.PLUS_PAD
+            y = max(0, (self.height() - btn.height()) // 2)
+            btn.move(int(x), int(y))
+            btn.show()
+            # Reservar el ancho REAL necesario (borde derecho de la última
+            # pestaña visible + botón). Antes se reservaba un valor constante y,
+            # al crecer el número de pestañas, el botón quedaba recortado.
+            reserved = int(x) + btn.width()
+            if reserved != self._reserved_width:
+                self._reserved_width = reserved
+                self.setMinimumWidth(reserved)
+                self.updateGeometry()
+                parent = self.parentWidget()
+                if parent is not None:
+                    parent.updateGeometry()
+        finally:
+            self._in_relayout = False
+
+    def tabInserted(self, index):
+        super().tabInserted(index)
+        self._relayout_plus()
+
+    def tabRemoved(self, index):
+        super().tabRemoved(index)
+        self._relayout_plus()
+
+    def hideTab(self, index):
+        super().hideTab(index)
+        self._relayout_plus()
+
+    def showTab(self, index):
+        super().showTab(index)
+        self._relayout_plus()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._relayout_plus()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._relayout_plus()
+
+    def sizeHint(self):
+        sh = super().sizeHint()
+        if self._plus_btn is not None:
+            sh.setWidth(max(sh.width(), self._reserved_width))
+        return sh
 
 
 class ThemeEditorWindow(QMainWindow):
@@ -350,15 +464,27 @@ class ThemeEditorWindow(QMainWindow):
         super().__init__()
         self.theme_path = None
         self.theme_name = "Untitled Theme"
-        self.background_color = "#0f0f19"
-        self.elements = []
+
+        # Estado del editor dividido por destino (LCD / DMD / HDMI). Cada
+        # pestaña tiene su propio canvas, lista de elementos y fondo;
+        # `elements` y `background_color` delegan según `_active_target`.
+        self._active_target = "lcd"  # "lcd" | "dmd" | "hdmi"
+        self.lcd_elements = []
+        self.lcd_background_color = "#0f0f19"
+        self.lcd_video_data = {}  # dict del video_background de la pestaña LCD
+        self.dmd_elements = []
+        self.dmd_background_color = "#000000"
+        self.hdmi_elements = []
+        self.hdmi_background_color = "#000000"
+        self.lcd_canvas = None  # creados en setup_ui
+        self.dmd_canvas = None
+        self.hdmi_canvas = None
         self.device = None
         self.live_preview_timer = None
         self.target_fps = settings.get_setting("target_fps", 30)
 
-        # Destino del proyecto activo (Web / LCD). En el arranque NO se aplica
-        # nada (el webserver solo se levanta bajo demanda al crear/abrir un
-        # proyecto con target Web).
+        # Destino del proyecto activo (Web / LCD / DMD / HDMI). En el arranque
+        # NO se aplica nada (el webserver solo se levanta bajo demanda).
         self._web_port = int(port or 4241)
         self.project_targets = dict(
             settings.get_setting("project_targets", {"web": True, "lcd": True}))
@@ -368,6 +494,8 @@ class ThemeEditorWindow(QMainWindow):
         # Performance monitoring
         self.frame_times = []
         self.last_frame_time = 0
+        self.dmd_frame_times = []
+        self.dmd_last_frame_time = 0
         self.perf_update_timer = None
         self.process = psutil.Process()
 
@@ -382,7 +510,6 @@ class ThemeEditorWindow(QMainWindow):
 
         # Frame timing for smooth delivery
         self._frame_deadline = 0  # When next frame should be sent
-        self._frames_skipped = 0  # Counter for skipped frames
         self._overdrive_mode = settings.get_setting("overdrive_mode", False)
         self._vertical_mode = settings.get_setting("vertical_mode", False)  # Rotate UI + LCD output 90 degrees
         # Color correction applied to the final frame before sending it to the LCD.
@@ -412,11 +539,28 @@ class ThemeEditorWindow(QMainWindow):
         self._reconnect_timer = None
         self._reconnect_attempts = 0
         self._was_connected_before_sleep = False
-        self._last_wake_time = 0
+        self._auto_reconnect = False  # intención explícita de reconectar
         self._ly_device = None  # Referencia al driver LY bulk USB
+
+        # DMD targets: envío TCP por timer (el canvas vive en la pestaña DMD).
+        self.dmd_sender = None
+        self.project_dmd_config = None
+        self.dmd_send_timer = None
+        self._dmd_output_enabled = True  # Toggle: pausa/reanuda el stream DMD
+
+        # HDMI targets: ventana fullscreen + timer de render (canvas propio).
+        self.hdmi_output = None
+        self.hdmi_send_timer = None
+        self.project_hdmi_config = settings.get_setting("hdmi_config", None)
+        self._hdmi_last_signature = None
+        self._hdmi_output_enabled = True  # Toggle: conecta/desconecta la salida HDMI
+        self.hdmi_frame_times = []
+        self.hdmi_last_frame_time = 0
 
         # Start background threads for sensor data
         start_psutil_thread()
+
+        self._load_dmd_fonts()
 
         self.setup_ui()
         self.setup_console()
@@ -428,8 +572,8 @@ class ThemeEditorWindow(QMainWindow):
         # the canvas/spin-box ranges stay in landscape orientation until the
         # user manually toggles the "Vertical Mode" checkbox off and on again.
         if self._vertical_mode:
-            if hasattr(self, "canvas") and hasattr(self.canvas, "set_vertical_mode"):
-                self.canvas.set_vertical_mode(True)
+            if hasattr(self, "lcd_canvas") and hasattr(self.lcd_canvas, "set_vertical_mode"):
+                self.lcd_canvas.set_vertical_mode(True)
             if hasattr(self, "properties_panel") and hasattr(self.properties_panel, "set_vertical_mode"):
                 self.properties_panel.set_vertical_mode(True)
 
@@ -445,6 +589,61 @@ class ThemeEditorWindow(QMainWindow):
 
         # Auto-connect to display after window is shown
         QTimer.singleShot(500, self.auto_connect)
+
+    # --- Elementos y fondo delegados según la pestaña activa (LCD/DMD/HDMI) --
+    @property
+    def elements(self):
+        """Elementos de la pestaña activa."""
+        if self._active_target == "lcd":
+            return self.lcd_elements
+        if self._active_target == "hdmi":
+            return self.hdmi_elements
+        return self.dmd_elements
+
+    @elements.setter
+    def elements(self, value):
+        if self._active_target == "lcd":
+            self.lcd_elements = value
+        elif self._active_target == "hdmi":
+            self.hdmi_elements = value
+        else:
+            self.dmd_elements = value
+
+    @property
+    def background_color(self):
+        """Color de fondo de la pestaña activa."""
+        if self._active_target == "lcd":
+            return self.lcd_background_color
+        if self._active_target == "hdmi":
+            return self.hdmi_background_color
+        return self.dmd_background_color
+
+    @background_color.setter
+    def background_color(self, value):
+        if self._active_target == "lcd":
+            self.lcd_background_color = value
+        elif self._active_target == "hdmi":
+            self.hdmi_background_color = value
+        else:
+            self.dmd_background_color = value
+
+    @property
+    def canvas(self):
+        """Canvas de la pestaña activa (LCD, DMD o HDMI)."""
+        if self._active_target == "lcd":
+            return self.lcd_canvas
+        if self._active_target == "hdmi":
+            return self.hdmi_canvas
+        return self.dmd_canvas
+
+    @property
+    def canvas_scroll(self):
+        """ScrollArea de la pestaña activa (LCD, DMD o HDMI)."""
+        if self._active_target == "lcd":
+            return self.lcd_scroll
+        if self._active_target == "hdmi":
+            return self.hdmi_scroll
+        return self.dmd_scroll
 
     def auto_connect(self):
         """Attempt to connect to display automatically on startup."""
@@ -483,7 +682,6 @@ class ThemeEditorWindow(QMainWindow):
     def _handle_system_wake(self):
         """Handle system waking from sleep."""
         print("[Power] System waking up")
-        self._last_wake_time = time.time()
 
         # Reset video background timing to prevent frame jumps
         video_background.reset_timing()
@@ -511,8 +709,17 @@ class ThemeEditorWindow(QMainWindow):
 
             # Start reconnection attempts after a short delay
             self._reconnect_attempts = 0
+            self._auto_reconnect = True
             self._start_reconnect_timer()
             self.status_bar.showMessage("Waking up - reconnecting to display...")
+
+    def _stop_reconnect(self):
+        """Detiene el bucle de reconexión y limpia su intención/contador."""
+        if self._reconnect_timer:
+            self._reconnect_timer.stop()
+            self._reconnect_timer = None
+        self._auto_reconnect = False
+        self._reconnect_attempts = 0
 
     def _start_reconnect_timer(self):
         """Start the auto-reconnect timer with exponential backoff."""
@@ -526,56 +733,74 @@ class ThemeEditorWindow(QMainWindow):
 
     def _attempt_reconnect(self):
         """Attempt to reconnect to the display."""
+        # Solo reconectar si existe intención explícita y el target LCD sigue
+        # activo; si no, parar (evita bucles en proyectos HDMI/DMD o tras
+        # desconexión manual).
+        if not self._auto_reconnect or not self.project_targets.get("lcd"):
+            self._stop_reconnect()
+            return
+
         self._reconnect_attempts += 1
 
         print(f"[Power] Reconnect attempt {self._reconnect_attempts}")
 
         if self.connect_display(show_error=False):
             # Success!
-            if self._reconnect_timer:
-                self._reconnect_timer.stop()
-                self._reconnect_timer = None
+            self._stop_reconnect()
             self._was_connected_before_sleep = False
             self.status_bar.showMessage("Reconnected to display after wake")
             self._set_device_status(True)
             print("[Power] Reconnected successfully")
         else:
-            # Keep trying with backoff (no max limit - will retry indefinitely)
+            # Seguir reintentando indefinidamente mientras el target LCD siga
+            # activo (mejor esfuerzo tras dormir).
             self._start_reconnect_timer()
             self.status_bar.showMessage(f"Reconnecting... attempt {self._reconnect_attempts}")
 
     def load_default_preset_on_startup(self):
-        """Load the default preset if one is configured."""
+        """Carga el último proyecto si el usuario activó 'Cargar al inicio',
+        o el preset por defecto si no lo hizo."""
+        if settings.get_setting("load_at_startup", False):
+            path = settings.get_setting("startup_theme_path")
+            if path and os.path.exists(path):
+                try:
+                    self._load_theme_file(path)
+                    print(f"[Startup] Loaded last project: {path}")
+                    return
+                except Exception as e:
+                    print(f"[Startup] Failed to load {path}: {e}")
+
         default_preset_data = self.presets_panel.get_default_preset_data()
         if default_preset_data:
-            # Load without saving undo state (it's startup)
-            # Match preview/LCD orientation to the default preset's dimensions
             self._apply_theme_orientation(default_preset_data)
 
             self.theme_name = default_preset_data.get("name", "Untitled")
             self.theme_name_edit.setText(self.theme_name)
-            self.background_color = default_preset_data.get("background_color", "#0f0f19")
-            self.bg_color_btn.setStyleSheet(f"background-color: {self.background_color};")
-            self.canvas.set_background_color(self.background_color)
+            self.lcd_background_color = default_preset_data.get("background_color", "#0f0f19")
+            self.bg_color_btn.setStyleSheet(
+                f"background-color: {self.lcd_background_color};"
+                f" border: 1px solid {BORDER}; border-radius: 5px;")
+            self.canvas.set_background_color(self.lcd_background_color)
 
-            self.elements = [
-                ThemeElement.from_dict(e) for e in default_preset_data.get("elements", [])
+            self.lcd_elements = [
+                ThemeElement.from_dict(e)
+                for e in default_preset_data.get("elements", [])
             ]
-            self.element_list.set_elements(self.elements)
-            self.canvas.set_elements(self.elements)
+            self.canvas.set_elements(self.lcd_elements)
+            self.element_list.set_elements(self.lcd_elements)
 
-            # Load video background settings if present
             video_data = default_preset_data.get("video_background", {})
             if video_data:
                 video_background.from_dict(video_data)
             else:
                 video_background.clear_video()
+            self.lcd_video_data = video_background.to_dict()
             self._update_video_ui()
 
             print(f"[Startup] Loaded default preset: {self.theme_name}")
 
     def setup_ui(self):
-        self.setWindowTitle("Thermal Engine")
+        self.setWindowTitle("Thermal Engine Studio")
         self.setMinimumSize(1280, 740)
 
         # Set window icon (en Linux se prefiere el PNG; el .ico como alternativa)
@@ -591,7 +816,7 @@ class ThemeEditorWindow(QMainWindow):
                 break
 
         # ----- Menu bar (32px) with app logo at the left corner -----
-        logo = LogoLabel("Thermal Engine")
+        logo = LogoLabel("Thermal Engine Studio")
         self.menuBar().setCornerWidget(logo, Qt.Corner.TopLeftCorner)
 
         # ----- Toolbar (44px) -----
@@ -608,15 +833,18 @@ class ThemeEditorWindow(QMainWindow):
         self.theme_name_edit.textChanged.connect(self.on_theme_name_changed)
         toolbar.addWidget(self.theme_name_edit)
 
+        self.load_at_startup_check = QCheckBox("Cargar al inicio")
+        self.load_at_startup_check.setChecked(
+            bool(settings.get_setting("load_at_startup", False)))
+        self.load_at_startup_check.toggled.connect(self._on_load_at_startup_toggled)
+        self.load_at_startup_check.setToolTip(
+            "Reabrir el último proyecto al iniciar la app")
+        toolbar.addWidget(self.load_at_startup_check)
+
         self.quick_save_btn = QPushButton("Save")
         self.quick_save_btn.clicked.connect(self.quick_save)
-        self.quick_save_btn.setToolTip("Save to presets folder (Ctrl+S)")
+        self.quick_save_btn.setToolTip("Save theme file (Ctrl+S)")
         toolbar.addWidget(self.quick_save_btn)
-
-        export_btn = QPushButton("Export")
-        export_btn.clicked.connect(self.export_image)
-        export_btn.setToolTip("Export the theme as an image")
-        toolbar.addWidget(export_btn)
 
         toolbar.addSeparator()
 
@@ -656,18 +884,23 @@ class ThemeEditorWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Left panel (234px) with Elements / Presets tabs
-        left_panel = QTabWidget()
-        left_panel.setObjectName("sidePanel")
-        left_panel.setFixedWidth(234)
+        # Left panel (234px) - element list
+        self.left_panel = QWidget()
+        self.left_panel.setObjectName("sidePanel")
+        self.left_panel.setFixedWidth(234)
+        left_lay = QVBoxLayout(self.left_panel)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(0)
 
         self.element_list = ElementListPanel()
-        left_panel.addTab(self.element_list, "Elements")
+        left_lay.addWidget(self.element_list, 1)
 
+        # PresetsPanel sigue existiendo (save/load preset por defecto) pero ya
+        # no es una pestaña: se usa internamente y se oculta.
         self.presets_panel = PresetsPanel()
-        left_panel.addTab(self.presets_panel, "Template")
+        self.presets_panel.setVisible(False)
 
-        main_layout.addWidget(left_panel)
+        main_layout.addWidget(self.left_panel)
 
         # ----- Center column: canvas sub-toolbar (36px) + scrollable canvas -----
         center_col = QWidget()
@@ -719,20 +952,151 @@ class ThemeEditorWindow(QMainWindow):
         self.device_status_label.setStyleSheet("color: %s;" % TEXT_DIM)
         bar_layout.addWidget(self.device_status_label)
 
+        bar_layout.addSpacing(12)
+
+        # Toggles de salida (siempre visibles cuando el target está activo):
+        # DMD pausa/reanuda el envío TCP; HDMI conecta/desconecta la ventana.
+        self.dmd_toggle_btn = QToolButton()
+        self.dmd_toggle_btn.setObjectName("zoomButton")
+        self.dmd_toggle_btn.setText("DMD")
+        self.dmd_toggle_btn.setCheckable(True)
+        self.dmd_toggle_btn.setChecked(True)
+        self.dmd_toggle_btn.setToolTip(
+            "Pausar/reanudar el envío de stream al DMD")
+        self.dmd_toggle_btn.toggled.connect(self._on_dmd_output_toggled)
+        self.dmd_toggle_btn.setVisible(False)
+        bar_layout.addWidget(self.dmd_toggle_btn)
+
+        self.hdmi_toggle_btn = QToolButton()
+        self.hdmi_toggle_btn.setObjectName("zoomButton")
+        self.hdmi_toggle_btn.setText("HDMI")
+        self.hdmi_toggle_btn.setCheckable(True)
+        self.hdmi_toggle_btn.setChecked(True)
+        self.hdmi_toggle_btn.setToolTip(
+            "Conectar/desconectar la salida HDMI")
+        self.hdmi_toggle_btn.toggled.connect(self._on_hdmi_output_toggled)
+        self.hdmi_toggle_btn.setVisible(False)
+        bar_layout.addWidget(self.hdmi_toggle_btn)
+
         bar_layout.addStretch(1)
 
         center_layout.addWidget(canvas_bar)
 
-        self.canvas_scroll = CanvasScrollArea()
-        self.canvas_scroll.setObjectName("canvasScroll")
-        self.canvas_scroll.setWidgetResizable(False)
-        self.canvas_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.canvas_scroll.viewport_resized.connect(self._on_canvas_viewport_resized)
+        self.target_tabs = QTabWidget()
+        self.target_tabs.setObjectName("canvasTabs")
+        self.target_tabs.setDocumentMode(True)
+        self.target_tabs.setTabBar(PlusTabBar())
+        # QTabWidget.setTabBar reactiva la expansión de pestañas; sin desactivarla
+        # el ancho de las pestañas depende del ancho de la barra y el cálculo del
+        # botón "+" entra en realimentación.
+        self.target_tabs.tabBar().setExpanding(False)
 
-        self.canvas = CanvasPreview()
-        self.canvas_scroll.setWidget(self.canvas)
+        self.lcd_scroll = CanvasScrollArea()
+        self.lcd_scroll.setObjectName("canvasScroll")
+        self.lcd_scroll.setWidgetResizable(False)
+        self.lcd_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lcd_scroll.viewport_resized.connect(self._on_canvas_viewport_resized)
 
-        center_layout.addWidget(self.canvas_scroll, 1)
+        self.lcd_canvas = CanvasPreview()
+        self.lcd_scroll.setWidget(self.lcd_canvas)
+        self._lcd_tab_index = self.target_tabs.addTab(self.lcd_scroll, "LCD")
+
+        self.dmd_scroll = CanvasScrollArea()
+        self.dmd_scroll.setObjectName("canvasScroll")
+        self.dmd_scroll.setWidgetResizable(False)
+        self.dmd_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.dmd_scroll.viewport_resized.connect(self._on_canvas_viewport_resized)
+
+        self.dmd_canvas = DMDCanvas(128, 32)
+        self.dmd_scroll.setWidget(self.dmd_canvas)
+        self._dmd_tab_index = self.target_tabs.addTab(self.dmd_scroll, "DMD")
+
+        # ----- Pestaña HDMI: canvas de edición a resolución del monitor -----
+        self.hdmi_tab = QWidget()
+        hdmi_layout = QVBoxLayout(self.hdmi_tab)
+        hdmi_layout.setContentsMargins(8, 6, 8, 0)
+        hdmi_layout.setSpacing(6)
+
+        hdmi_head = QHBoxLayout()
+        hdmi_head.setSpacing(8)
+        hdmi_lbl = QLabel("Monitor:")
+        hdmi_lbl.setStyleSheet(f"color: {TEXT_DIM};")
+        hdmi_head.addWidget(hdmi_lbl)
+
+        self.hdmi_monitor_combo = QComboBox()
+        self.hdmi_monitor_combo.setMinimumWidth(320)
+        self.hdmi_monitor_combo.currentIndexChanged.connect(
+            self._on_hdmi_monitor_combo_changed)
+        hdmi_head.addWidget(self.hdmi_monitor_combo)
+
+        self.hdmi_refresh_button = QToolButton()
+        self.hdmi_refresh_button.setText("Actualizar")
+        self.hdmi_refresh_button.setToolTip("Volver a detectar monitores")
+        self.hdmi_refresh_button.clicked.connect(self._refresh_hdmi_monitor_combo)
+        hdmi_head.addWidget(self.hdmi_refresh_button)
+
+        self.hdmi_resolution_label = QLabel("")
+        self.hdmi_resolution_label.setStyleSheet(f"color: {TEXT_DIM};")
+        hdmi_head.addWidget(self.hdmi_resolution_label)
+        hdmi_head.addStretch(1)
+        hdmi_layout.addLayout(hdmi_head)
+
+        self.hdmi_scroll = CanvasScrollArea()
+        self.hdmi_scroll.setObjectName("canvasScroll")
+        self.hdmi_scroll.setWidgetResizable(False)
+        self.hdmi_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hdmi_scroll.viewport_resized.connect(self._on_canvas_viewport_resized)
+
+        self.hdmi_canvas = HDMICanvas(1920, 1080)
+        self.hdmi_scroll.setWidget(self.hdmi_canvas)
+        hdmi_layout.addWidget(self.hdmi_scroll, 1)
+        self._hdmi_tab_index = self.target_tabs.addTab(self.hdmi_tab, "HDMI")
+        self.target_tabs.setTabVisible(self._hdmi_tab_index, False)
+
+        # Hotplug: mantener el combo y la ventana de salida sincronizados.
+        app = QApplication.instance()
+        if app is not None:
+            app.screenAdded.connect(self._on_screen_added)
+            app.screenRemoved.connect(self._on_screen_removed)
+            self._connect_screen_signals(app.screens())
+
+        # ----- Pestaña WEB: preview en vivo de la imagen que sirve el
+        # webserver (/image.jpg). Reutiliza el caché JPEG ya generado por el
+        # timer del webserver (_last_jpeg_data), sin renders extra.
+        self.web_scroll = CanvasScrollArea()
+        self.web_scroll.setObjectName("canvasScroll")
+        self.web_scroll.setWidgetResizable(True)
+        self.web_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.web_scroll.viewport_resized.connect(self._on_canvas_viewport_resized)
+
+        self.web_preview = QLabel("WEB preview\n(webserver inactive)")
+        self.web_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.web_preview.setStyleSheet("color: %s;" % TEXT_DIM)
+        self.web_preview.setMinimumSize(100, 100)
+        self.web_scroll.setWidget(self.web_preview)
+        self._web_tab_index = self.target_tabs.addTab(self.web_scroll, "WEB")
+        self.target_tabs.setTabVisible(self._web_tab_index, False)
+
+        # Timer para refrescar el preview WEB desde el caché JPEG
+        self._web_preview_timer = QTimer(self)
+        self._web_preview_timer.timeout.connect(self._update_web_preview)
+
+        self.target_tabs.setTabVisible(self._dmd_tab_index, False)
+        self.target_tabs.currentChanged.connect(self._on_target_tab_changed)
+
+        # ----- Botón "+" (a la derecha de la última pestaña): añade un
+        # dispositivo al proyecto abriendo el wizard de New Project con los
+        # ya usados deshabilitados; no crea un proyecto nuevo, solo añade el
+        # target.
+        self.add_target_btn = QToolButton()
+        self.add_target_btn.setText("+")
+        self.add_target_btn.setToolTip(
+            "Añadir dispositivo a este proyecto (Web / LCD / HDMI / DMD)")
+        self.add_target_btn.setFixedSize(24, 24)
+        self.add_target_btn.clicked.connect(self.add_project_target)
+        self.target_tabs.tabBar().set_plus_button(self.add_target_btn)
+
+        center_layout.addWidget(self.target_tabs, 1)
 
         main_layout.addWidget(center_col, 1)
 
@@ -753,8 +1117,9 @@ class ThemeEditorWindow(QMainWindow):
         self.perf_indicator.setFixedWidth(20)
         self.perf_indicator.setStyleSheet("background-color: #444;")
 
-        self.perf_label = QLabel("FPS: -- | CPU: --%")
+        self.perf_label = QLabel("LCD: -- fps | DMD: -- fps | CPU: --%")
         self.perf_label.setObjectName("statusMetric")
+        self.perf_label.setTextFormat(Qt.TextFormat.RichText)
         mono = QFont("DejaVu Sans Mono", 9)
         mono.setStyleHint(QFont.StyleHint.Monospace)
         self.perf_label.setFont(mono)
@@ -809,12 +1174,6 @@ class ThemeEditorWindow(QMainWindow):
         save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         save_as_action.triggered.connect(self.save_theme_as)
         file_menu.addAction(save_as_action)
-
-        file_menu.addSeparator()
-
-        export_action = QAction("Export as Image...", self)
-        export_action.triggered.connect(self.export_image)
-        file_menu.addAction(export_action)
 
         file_menu.addSeparator()
 
@@ -910,17 +1269,30 @@ class ThemeEditorWindow(QMainWindow):
         self.element_list.elements_will_change.connect(self.save_undo_state)
         self.element_list.elements_changed.connect(self.refresh_canvas)
 
-        self.canvas.element_selected.connect(self.on_canvas_element_selected)
-        self.canvas.elements_selected.connect(self.on_canvas_elements_selected)
-        self.canvas.element_moved.connect(self.on_element_moved)
-        self.canvas.element_resized.connect(self.on_element_resized)
-        self.canvas.drag_started.connect(self.save_undo_state)
+        self.lcd_canvas.element_selected.connect(self.on_canvas_element_selected)
+        self.lcd_canvas.elements_selected.connect(self.on_canvas_elements_selected)
+        self.lcd_canvas.element_moved.connect(self.on_element_moved)
+        self.lcd_canvas.element_resized.connect(self.on_element_resized)
+        self.lcd_canvas.drag_started.connect(self.save_undo_state)
+
+        self.dmd_canvas.element_selected.connect(self.on_canvas_element_selected)
+        self.dmd_canvas.elements_selected.connect(self.on_canvas_elements_selected)
+        self.dmd_canvas.element_moved.connect(self.on_element_moved)
+        self.dmd_canvas.element_resized.connect(self.on_element_resized)
+        self.dmd_canvas.drag_started.connect(self.save_undo_state)
+
+        self.hdmi_canvas.element_selected.connect(self.on_canvas_element_selected)
+        self.hdmi_canvas.elements_selected.connect(self.on_canvas_elements_selected)
+        self.hdmi_canvas.element_moved.connect(self.on_element_moved)
+        self.hdmi_canvas.element_resized.connect(self.on_element_resized)
+        self.hdmi_canvas.drag_started.connect(self.save_undo_state)
 
         self.properties_panel.property_will_change.connect(self.save_undo_state)
         self.properties_panel.property_changed.connect(self.refresh_canvas)
         self.properties_panel.property_changed.connect(self.update_element_list_name)
         self.properties_panel.alignment_will_change.connect(self.save_undo_state)
         self.properties_panel.alignment_changed.connect(self.refresh_canvas)
+        self.properties_panel.test_action_requested.connect(self.test_element_action)
 
         self.presets_panel.preset_selected.connect(self.load_preset)
         self.presets_panel.preset_saved.connect(self.on_preset_saved)
@@ -954,12 +1326,685 @@ class ThemeEditorWindow(QMainWindow):
         if not getattr(self, "_zoom_manual", False):
             self.fit_canvas()
 
+    # ------------------------------------------------------------------
+    # DMD target: canvas dedicado + envío TCP
+    # ------------------------------------------------------------------
+    def _on_target_tab_changed(self, index):
+        if index == self._web_tab_index:
+            # WEB es solo preview (read-only): oculta los paneles laterales de
+            # edición (Elements y Properties) y no cambia el target de edición.
+            self.left_panel.setVisible(False)
+            self.properties_panel.setVisible(False)
+            return
+        self.left_panel.setVisible(True)
+        self.properties_panel.setVisible(True)
+        if index == self._dmd_tab_index:
+            target = "dmd"
+        elif index == self._hdmi_tab_index:
+            target = "hdmi"
+        else:
+            target = "lcd"
+        self._switch_target(target)
+
+    def _target_tab_index(self, target):
+        """Índice de pestaña del target de edición (o None)."""
+        if target == "lcd":
+            return self._lcd_tab_index
+        if target == "dmd":
+            return self._dmd_tab_index
+        if target == "hdmi":
+            return self._hdmi_tab_index
+        return None
+
+    def _select_initial_target_tab(self, added=None):
+        """Selecciona una pestaña de edición coherente con los targets activos.
+
+        Prioridad: target recién añadido -> target activo si sigue activo ->
+        primer target activo (LCD, DMD, HDMI). Evita quedarse en el canvas LCD
+        (siempre visible) cuando el proyecto es solo HDMI/DMD.
+        """
+        if isinstance(added, dict):
+            added = [k for k, v in added.items() if v]
+        candidates = list(added or [])
+        if self._active_target not in candidates:
+            candidates.append(self._active_target)
+        for target in ("lcd", "dmd", "hdmi"):
+            if target not in candidates:
+                candidates.append(target)
+
+        for target in candidates:
+            if target not in ("lcd", "dmd", "hdmi"):
+                continue
+            if not self.project_targets.get(target):
+                continue
+            index = self._target_tab_index(target)
+            if index is None or not self.target_tabs.isTabVisible(index):
+                continue
+            self.target_tabs.setCurrentIndex(index)
+            return target
+        return None
+
+    def _update_web_preview(self):
+        """Actualiza el preview WEB con el último JPEG servido (/image.jpg).
+
+        Reutiliza el caché JPEG ya generado por el webserver, así no hay
+        renders extra del tema.
+        """
+        data = getattr(self, "_last_jpeg_data", None)
+        if not isinstance(data, bytes) or len(data) < 10:
+            self.web_preview.clear()
+            self.web_preview.setText("WEB preview\n(serving image)")
+            return
+        pixmap = QPixmap()
+        if pixmap.loadFromData(data, "JPEG"):
+            self.web_preview.setPixmap(
+                pixmap.scaled(
+                    self.web_preview.size() or pixmap.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            self.web_preview.setText("")
+
+    def _switch_target(self, target):
+        """Activa la pestaña de edición LCD, DMD o HDMI (canvas, elementos,
+        fondo, lista de elementos shared y properties shared)."""
+        if target == self._active_target:
+            return
+        self._active_target = target
+
+        # Video background solo existe para LCD: al salir de LCD se conserva su
+        # estado serializado y al volver se restaura; DMD/HDMI nunca usan video.
+        if target in ("dmd", "hdmi"):
+            self.lcd_video_data = video_background.to_dict()
+            video_background.clear_video()
+            self.video_btn.setEnabled(False)
+            self.video_fit_combo.setEnabled(False)
+        else:
+            video_background.clear_video()
+            if self.lcd_video_data:
+                video_background.from_dict(self.lcd_video_data)
+            self.video_btn.setEnabled(True)
+            self.video_fit_combo.setEnabled(bool(self.lcd_video_data))
+
+        # El indicador del dispositivo solo refleja el target activo.
+        if target == "lcd":
+            self._set_device_status(bool(self.device))
+        elif target == "hdmi":
+            if hasattr(self, "device_status_dot"):
+                active = self.hdmi_output is not None
+                self.device_status_dot.setStyleSheet(
+                    f"background-color: {DOT_ON if active else DOT_OFF}; "
+                    "border-radius: 5px;")
+                monitor = self._selected_hdmi_monitor() or {}
+                self.device_status_label.setText(
+                    f"HDMI {monitor.get('name', '')}" if active
+                    else "HDMI sin monitor")
+        else:
+            if self.dmd_sender is not None and hasattr(self, "device_status_dot"):
+                if self.dmd_sender.is_connected:
+                    self.device_status_dot.setStyleSheet(
+                        f"background-color: {DOT_ON}; border-radius: 5px;")
+                    self.device_status_label.setText(
+                        f"DMD {self.dmd_sender.ip}:{self.dmd_sender.port}")
+                else:
+                    self.device_status_dot.setStyleSheet(
+                        f"background-color: {DOT_OFF}; border-radius: 5px;")
+                    self.device_status_label.setText("DMD sin conexión")
+
+        # El canvas activo pasa a ser el de la pestaña seleccionada.
+        self.canvas.set_elements(self.elements)
+        self.canvas.set_background_color(self.background_color)
+        self.element_list.set_elements(self.elements)
+        self.element_list.set_dmd_mode(target == "dmd")
+        if target == "dmd":
+            dmd_w = self.dmd_canvas.dmd_width if self.dmd_canvas else 128
+            dmd_h = self.dmd_canvas.dmd_height if self.dmd_canvas else 32
+            self.properties_panel.set_dmd_mode(True, dmd_w, dmd_h)
+        elif target == "hdmi":
+            hdmi_w = self.hdmi_canvas.hdmi_width if self.hdmi_canvas else 1920
+            hdmi_h = self.hdmi_canvas.hdmi_height if self.hdmi_canvas else 1080
+            self.properties_panel.set_hdmi_mode(hdmi_w, hdmi_h)
+        else:
+            self.properties_panel.set_dmd_mode(False)
+        self.element_list.refresh_list()
+        self.properties_panel.set_element(None)
+        self.canvas.set_selected_indices([])
+
+        self.bg_color_btn.setStyleSheet(
+            f"background-color: {self.background_color};"
+            f" border: 1px solid {BORDER}; border-radius: 5px;"
+        )
+        self._update_video_ui()
+        if target == "hdmi" and self.project_targets.get("hdmi"):
+            if self._selected_hdmi_monitor() is not None:
+                self._start_hdmi_output()
+        QTimer.singleShot(10, self.fit_canvas)
+
+    def _configure_dmd_sender(self, config, restart=False):
+        """(Re)crea el hilo worker DMD con la config del proyecto."""
+        from device_dmd import DMDSenderThread
+        ip = config.get("ip", "192.168.1.100")
+        port = int(config.get("port", 8889))
+        w = int(config.get("width", 128))
+        h = int(config.get("height", 32))
+        fps = int(config.get("fps", 12))
+        if self.dmd_sender is not None:
+            self.dmd_sender.stop()
+        self.dmd_sender = DMDSenderThread(
+            ip, port, width=w, height=h, fps=fps, parent=self)
+        self.dmd_sender.start()
+
+    def _shutdown_dmd_sender(self):
+        self._stop_dmd_loop()
+        if self.dmd_sender is not None:
+            self.dmd_sender.stop()
+            self.dmd_sender = None
+
+    def _start_dmd_loop(self):
+        if self.dmd_send_timer is None:
+            fps = self.dmd_sender.fps if self.dmd_sender else 12
+            interval = max(16, 1000 // fps)
+            self.dmd_send_timer = QTimer(self)
+            self.dmd_send_timer.timeout.connect(self._tick_dmd_send)
+            self.dmd_send_timer.start(interval)
+            print(f"[DMD] Envío TCP iniciado ({fps} FPS, {interval} ms)")
+
+    def _stop_dmd_loop(self):
+        if self.dmd_send_timer is not None:
+            self.dmd_send_timer.stop()
+            self.dmd_send_timer = None
+            print("[DMD] Envío TCP detenido")
+
+    def _on_dmd_output_toggled(self, enabled):
+        """Toggle de salida DMD: pausa/reanuda el envío de stream TCP."""
+        self._dmd_output_enabled = bool(enabled)
+        if enabled:
+            if self.project_targets.get("dmd"):
+                self._start_dmd_loop()
+        else:
+            self._stop_dmd_loop()
+
+    def _tick_dmd_send(self):
+        """Tick del timer DMD: renderiza el frame RGB565 y lo envía por TCP."""
+        if self.dmd_canvas is None or self.dmd_sender is None:
+            return
+        canvas = self.dmd_canvas
+        # Actualizar valores dinámicos desde sensores como en el loop LCD
+        sensor_data = self.get_sensor_data()
+        for element in self.dmd_elements:
+            if element.source != "static" and element.source in sensor_data:
+                element.value = sensor_data[element.source]
+
+        try:
+            if canvas.dmd_width != self.dmd_sender.width \
+                    or canvas.dmd_height != self.dmd_sender.height:
+                return  # Config dispar: se reconfigurará al entrar en modo DMD
+            payload = canvas.get_frame_rgb565()
+            self.dmd_sender.push(payload)
+            self.record_dmd_frame_time()
+            self._canvas_update_counter += 1
+            if self._canvas_update_counter >= self._canvas_update_interval:
+                self._canvas_update_counter = 0
+                canvas.set_elements(self.dmd_elements)
+                canvas.update()
+            # Estado del indicador (el worker informa de la conexión real).
+            # Solo se muestra estando en el target DMD; si estamos en LCD el
+            # status refleja unicamente el dispositivo LCD.
+            if self._active_target != "dmd":
+                return
+            if self.dmd_sender.is_connected and hasattr(self, "device_status_dot"):
+                self.device_status_dot.setStyleSheet(
+                    f"background-color: {DOT_ON}; border-radius: 5px;")
+                self.device_status_label.setText(
+                    f"DMD {self.dmd_sender.ip}:{self.dmd_sender.port}")
+            elif hasattr(self, "device_status_dot"):
+                self.device_status_dot.setStyleSheet(
+                    f"background-color: {DOT_OFF}; border-radius: 5px;")
+                self.device_status_label.setText("DMD sin conexión")
+        except Exception as e:
+            print(f"[DMD] Error en envío: {e}")
+
     def _set_device_status(self, connected):
         if not hasattr(self, "device_status_dot") or self.device_status_dot is None:
             return
         color = DOT_ON if connected else DOT_OFF
         self.device_status_dot.setStyleSheet(f"background-color: {color}; border-radius: 5px;")
         self.device_status_label.setText("Connected" if connected else "Disconnected")
+
+    # ------------------------------------------------------------------
+    # HDMI target: canvas propio + ventana fullscreen en el monitor elegido
+    # ------------------------------------------------------------------
+    def _refresh_hdmi_monitor_combo(self, prompt=False):
+        """Repuebla el combo de monitores desde ``monitors.list_monitors()``."""
+        from monitors import display_label, list_monitors, resolve_monitor
+
+        combo = getattr(self, "hdmi_monitor_combo", None)
+        if combo is None:
+            return
+        stored = (self.project_hdmi_config or {}).get("screen_id")
+        monitors = list_monitors()
+
+        combo.blockSignals(True)
+        combo.clear()
+        for monitor in monitors:
+            combo.addItem(display_label(monitor), monitor)
+        if not monitors:
+            combo.addItem("No hay monitores conectados", None)
+        combo.blockSignals(False)
+
+        target = resolve_monitor(stored, monitors) if monitors else None
+        if target is None:
+            for monitor in monitors:
+                if monitor.get("is_hdmi"):
+                    target = monitor
+                    break
+        if target is None and monitors:
+            target = monitors[0]
+        if target is not None:
+            for i in range(combo.count()):
+                data = combo.itemData(i)
+                if isinstance(data, dict) and data.get("id") == target.get("id"):
+                    combo.setCurrentIndex(i)
+                    break
+        self._apply_hdmi_monitor(self._selected_hdmi_monitor(), prompt=prompt)
+
+    def _selected_hdmi_monitor(self):
+        combo = getattr(self, "hdmi_monitor_combo", None)
+        if combo is None:
+            return None
+        data = combo.currentData()
+        return data if isinstance(data, dict) else None
+
+    def _on_hdmi_monitor_combo_changed(self, index=None):
+        self._apply_hdmi_monitor(self._selected_hdmi_monitor(), prompt=True)
+
+    def _apply_hdmi_monitor(self, monitor, prompt=True):
+        """Aplica el monitor seleccionado al canvas y a la ventana de salida."""
+        if not isinstance(monitor, dict):
+            if hasattr(self, "hdmi_resolution_label"):
+                self.hdmi_resolution_label.setText("Sin monitor")
+            self._shutdown_hdmi_output()
+            return
+
+        width = int(monitor.get("width") or 1920)
+        height = int(monitor.get("height") or 1080)
+        if hasattr(self, "hdmi_resolution_label"):
+            hz = monitor.get("refresh") or 0
+            self.hdmi_resolution_label.setText(
+                f"{width}×{height} · {hz:.0f} Hz · {monitor.get('connector', '')}")
+
+        old_w = self.hdmi_canvas.hdmi_width if self.hdmi_canvas else width
+        old_h = self.hdmi_canvas.hdmi_height if self.hdmi_canvas else height
+        if (width, height) != (old_w, old_h):
+            scale = self._resolve_hdmi_resize(old_w, old_h, width, height, prompt)
+            if scale is None:
+                self._revert_hdmi_combo()
+                self.status_bar.showMessage(
+                    "Cambio de monitor cancelado", 3000)
+                return
+            if scale:
+                self._scale_hdmi_elements(old_w, old_h, width, height)
+            if self.hdmi_canvas is not None:
+                self.hdmi_canvas.set_hdmi_size(width, height)
+            if self._active_target == "hdmi":
+                self.properties_panel.set_hdmi_mode(width, height)
+                QTimer.singleShot(10, self.fit_canvas)
+
+        self.project_hdmi_config = dict(self.project_hdmi_config or {})
+        self.project_hdmi_config.update({
+            "screen_id": monitor.get("id"),
+            "screen_name": monitor.get("name"),
+            "width": width,
+            "height": height,
+            "refresh": monitor.get("refresh"),
+            "connector": monitor.get("connector"),
+            "scale_mode": "letterbox",
+        })
+        settings.set_setting("hdmi_config", self.project_hdmi_config)
+
+        if self._active_target == "hdmi" and self.project_targets.get("hdmi"):
+            self._start_hdmi_output()
+
+    def _resolve_hdmi_resize(self, old_w, old_h, new_w, new_h, prompt):
+        """Pregunta qué hacer si cambia la resolución y hay elementos.
+
+        Returns:
+            True (escalar), False (mantener posiciones) o None (cancelar).
+        """
+        if not self.hdmi_elements or (old_w, old_h) == (new_w, new_h):
+            return False
+        if not prompt:
+            return False
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Cambiar resolución HDMI")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(
+            f"El monitor seleccionado es {new_w}×{new_h} "
+            f"(el canvas actual es {old_w}×{old_h}).\n\n"
+            "¿Qué hago con los elementos existentes?")
+        keep_btn = box.addButton("Mantener posiciones",
+                                 QMessageBox.ButtonRole.AcceptRole)
+        scale_btn = box.addButton("Escalar proporcionalmente",
+                                  QMessageBox.ButtonRole.ActionRole)
+        cancel_btn = box.addButton("Cancelar",
+                                   QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(keep_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel_btn:
+            return None
+        if clicked is scale_btn:
+            return True
+        return False
+
+    @staticmethod
+    def _scale_elements(elements, old_w, old_h, new_w, new_h):
+        """Escala proporcionalmente x/y/ancho/alto/radio de una lista."""
+        if not old_w or not old_h:
+            return
+        fx = new_w / old_w
+        fy = new_h / old_h
+        for element in elements:
+            for attr in ("x", "y", "width", "height", "radius"):
+                value = getattr(element, attr, None)
+                if isinstance(value, (int, float)):
+                    factor = fx if attr in ("x", "width") else fy
+                    setattr(element, attr, int(round(value * factor)))
+            if hasattr(element, "x"):
+                element.x = max(0, min(int(getattr(element, "x", 0)), new_w))
+            if hasattr(element, "y"):
+                element.y = max(0, min(int(getattr(element, "y", 0)), new_h))
+
+    def _scale_hdmi_elements(self, old_w, old_h, new_w, new_h):
+        """Escala los elementos HDMI y refresca el canvas."""
+        self._scale_elements(self.hdmi_elements, old_w, old_h, new_w, new_h)
+        if self.hdmi_canvas is not None:
+            self.hdmi_canvas.set_elements(self.hdmi_elements)
+            self.hdmi_canvas.update()
+        self._hdmi_last_signature = None
+
+    def _revert_hdmi_combo(self):
+        """Restaura el combo al monitor persistido (tras cancelar un cambio)."""
+        combo = getattr(self, "hdmi_monitor_combo", None)
+        if combo is None:
+            return
+        stored = (self.project_hdmi_config or {}).get("screen_id")
+        combo.blockSignals(True)
+        for i in range(combo.count()):
+            data = combo.itemData(i)
+            if isinstance(data, dict) and data.get("id") == stored:
+                combo.setCurrentIndex(i)
+                break
+        combo.blockSignals(False)
+
+    def _start_hdmi_output(self):
+        """Crea/muestra la ventana fullscreen en el monitor seleccionado."""
+        monitor = self._selected_hdmi_monitor()
+        if not isinstance(monitor, dict):
+            return False
+        from device_hdmi import HDMIOutputWindow
+
+        if self.hdmi_output is None:
+            self.hdmi_output = HDMIOutputWindow()
+            self.hdmi_output.tapped.connect(self._on_hdmi_tap)
+        current = self.hdmi_output.monitor
+        if self.hdmi_output.is_active and isinstance(current, dict) \
+                and current.get("id") != monitor.get("id"):
+            self.hdmi_output.set_monitor(monitor)
+        else:
+            self.hdmi_output.show_on_monitor(monitor)
+        self._start_hdmi_loop()
+        self._hdmi_last_signature = None
+        self._tick_hdmi_send()
+        return True
+
+    def _shutdown_hdmi_output(self):
+        self._stop_hdmi_loop()
+        if self.hdmi_output is not None:
+            try:
+                self.hdmi_output.close_output()
+            except Exception:
+                pass
+            self.hdmi_output = None
+        self._hdmi_last_signature = None
+
+    # -------------------------------------------------------
+    # Interacción táctil (HDMI): hit-test + acción por elemento
+    # -------------------------------------------------------
+    def _on_hdmi_tap(self, cx, cy):
+        """Toque en la salida HDMI: resuelve el elemento y ejecuta su acción."""
+        if self.hdmi_canvas is None:
+            return
+        index = self.hdmi_canvas.hit_test_elements(
+            self.hdmi_elements, cx, cy, visible_only=True)
+        if index < 0:
+            return
+        element = self.hdmi_elements[index]
+        action = actions.parse_action(element)
+        if action is None:
+            return
+
+        # Feedback visual: flash breve sobre el elemento tocado.
+        if self.hdmi_output is not None:
+            left, top, right, bottom = self.hdmi_canvas.get_element_logical_bounds(element)
+            self.hdmi_output.flash_element(left, top, right - left, bottom - top)
+
+        if not settings.get_setting("allow_element_actions", False):
+            self.status_bar.showMessage(
+                "Acciones táctiles deshabilitadas (Settings → Preferences)", 4000)
+            return
+        self._execute_element_action(action)
+
+    def _execute_element_action(self, action, always_confirm=False):
+        """Valida, pide aprobación (si hace falta) y lanza la acción."""
+        errors = actions.validate_action(
+            action.get("command", ""), action.get("args", []), action.get("workdir", ""))
+        if errors:
+            self.status_bar.showMessage("Acción inválida: " + "; ".join(errors), 5000)
+            return False
+
+        fingerprint = actions.action_fingerprint(
+            action.get("command", ""), action.get("args", []))
+        approved = dict(settings.get_setting("approved_actions", {}) or {})
+        if always_confirm or fingerprint not in approved:
+            if not self._confirm_action(action, fingerprint, approved, always_confirm):
+                return False
+
+        ok, message = actions.run_action(action)
+        self.status_bar.showMessage(message, 4000)
+        return ok
+
+    def _confirm_action(self, action, fingerprint, approved, always_confirm):
+        """Diálogo de aprobación. Devuelve True si se puede ejecutar."""
+        command = action.get("command", "")
+        args = " ".join(action.get("args", []))
+        box = QMessageBox(self)
+        box.setWindowTitle("Test action" if always_confirm else "Approve action")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText("Se va a ejecutar el siguiente comando:")
+        box.setInformativeText(f"{command} {args}".strip())
+        once_btn = box.addButton("Allow once", QMessageBox.ButtonRole.AcceptRole)
+        always_btn = box.addButton("Always allow", QMessageBox.ButtonRole.YesRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(once_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is always_btn:
+            approved[fingerprint] = {
+                "command": command,
+                "args": action.get("args", []),
+                "date": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            settings.set_setting("approved_actions", approved)
+            return True
+        return clicked is once_btn
+
+    def test_element_action(self):
+        """Botón Test del panel: valida y lanza la acción del elemento actual."""
+        element = self.properties_panel.current_element
+        if element is None:
+            return
+        action = actions.parse_action(element)
+        if action is None:
+            QMessageBox.information(
+                self, "Test action", "Este elemento no tiene una acción configurada.")
+            return
+        self._execute_element_action(action, always_confirm=True)
+
+    def _start_hdmi_loop(self):
+        if self.hdmi_send_timer is None:
+            fps = int((self.project_hdmi_config or {}).get("fps")
+                      or self.target_fps or 30)
+            interval = max(16, 1000 // fps)
+            self.hdmi_send_timer = QTimer(self)
+            # PreciseTimer evita el jitter del CoarseTimer y da un pacing más
+            # uniforme (clave para animaciones como el line chart).
+            self.hdmi_send_timer.setTimerType(Qt.TimerType.PreciseTimer)
+            self.hdmi_send_timer.timeout.connect(self._tick_hdmi_send)
+            self.hdmi_send_timer.start(interval)
+            print(f"[HDMI] Salida iniciada ({fps} FPS, {interval} ms)")
+
+    def _stop_hdmi_loop(self):
+        if self.hdmi_send_timer is not None:
+            self.hdmi_send_timer.stop()
+            self.hdmi_send_timer = None
+
+    def _on_hdmi_output_toggled(self, enabled):
+        """Toggle de salida HDMI: conecta/desconecta la ventana fullscreen."""
+        self._hdmi_output_enabled = bool(enabled)
+        if enabled:
+            if self.project_targets.get("hdmi"):
+                self._start_hdmi_output()
+        else:
+            self._shutdown_hdmi_output()
+
+    def _hdmi_frame_signature(self):
+        parts = [self.hdmi_background_color]
+        for element in self.hdmi_elements:
+            value = element.value
+            if isinstance(value, float):
+                value = round(value, 1)
+            parts.append((element.source, value,
+                          getattr(element, "x", None),
+                          getattr(element, "y", None),
+                          getattr(element, "visible", True)))
+        return tuple(parts)
+
+    def _hdmi_has_animated_elements(self):
+        """True si hay elementos que dependen del tiempo (historial, reloj, GIF)."""
+        return any(getattr(element, "type", None) in HDMI_ANIMATED_TYPES
+                   for element in self.hdmi_elements)
+
+    def _tick_hdmi_send(self):
+        """Renderiza el canvas HDMI y lo pinta en la ventana de salida."""
+        if self.hdmi_canvas is None or self.hdmi_output is None:
+            return
+        # Invariante: el canvas debe medir exactamente la resolución del
+        # monitor conectado. Si cambió (modo, hotplug, etc.) se reajusta aquí.
+        monitor = self._selected_hdmi_monitor()
+        if isinstance(monitor, dict):
+            mw = int(monitor.get("width") or 0)
+            mh = int(monitor.get("height") or 0)
+            if mw > 0 and mh > 0 and \
+                    (self.hdmi_canvas.hdmi_width, self.hdmi_canvas.hdmi_height) != (mw, mh):
+                old_w = self.hdmi_canvas.hdmi_width
+                old_h = self.hdmi_canvas.hdmi_height
+                self._scale_elements(self.hdmi_elements, old_w, old_h, mw, mh)
+                self.hdmi_canvas.set_hdmi_size(mw, mh)
+                if self._active_target == "hdmi":
+                    self.properties_panel.set_hdmi_mode(mw, mh)
+                self._hdmi_last_signature = None
+                self.project_hdmi_config = dict(self.project_hdmi_config or {})
+                self.project_hdmi_config.update(
+                    {"width": mw, "height": mh, "screen_id": monitor.get("id")})
+                settings.set_setting("hdmi_config", self.project_hdmi_config)
+
+        sensor_data = self.get_sensor_data()
+        for element in self.hdmi_elements:
+            if element.source != "static" and element.source in sensor_data:
+                element.value = sensor_data[element.source]
+
+        try:
+            signature = self._hdmi_frame_signature()
+            # Los elementos animados por tiempo (line_chart, reloj, GIF...) deben
+            # repintarse en cada tick: su historial avanza al dibujarse, no al
+            # cambiar el valor del sensor.
+            if self._hdmi_has_animated_elements() \
+                    or signature != self._hdmi_last_signature:
+                image = self.hdmi_canvas.get_frame_rgb888()
+                self.hdmi_output.render_frame(image)
+                self._hdmi_last_signature = signature
+                self.record_hdmi_frame_time()
+
+            # Refrescar el preview del editor de forma espaciada
+            self._canvas_update_counter += 1
+            if self._canvas_update_counter >= self._canvas_update_interval:
+                self._canvas_update_counter = 0
+                self.hdmi_canvas.set_elements(self.hdmi_elements)
+                self.hdmi_canvas.update()
+
+            if self._active_target != "hdmi":
+                return
+            if hasattr(self, "device_status_dot"):
+                self.device_status_dot.setStyleSheet(
+                    f"background-color: {DOT_ON}; border-radius: 5px;")
+                monitor = self._selected_hdmi_monitor() or {}
+                self.device_status_label.setText(
+                    f"HDMI {monitor.get('name', '')}")
+        except Exception as e:
+            print(f"[HDMI] Error en envío: {e}")
+
+    def record_hdmi_frame_time(self):
+        """Registra el tiempo entre frames HDMI para el contador de FPS."""
+        current_time = time.perf_counter()
+        if self.hdmi_last_frame_time > 0:
+            frame_time = current_time - self.hdmi_last_frame_time
+            if frame_time < 1.0:
+                self.hdmi_frame_times.append(frame_time)
+                if len(self.hdmi_frame_times) > 60:
+                    self.hdmi_frame_times.pop(0)
+        self.hdmi_last_frame_time = current_time
+
+    def _connect_screen_signals(self, screens):
+        """Conecta los cambios de resolución/geometría de cada pantalla.
+
+        Así el canvas HDMI sigue midiendo exactamente la resolución del monitor
+        aunque el usuario la cambie en los ajustes del sistema.
+        """
+        connected = self.__dict__.setdefault("_connected_screen_ids", set())
+        for screen in screens or []:
+            key = id(screen)
+            if key in connected:
+                continue
+            try:
+                screen.geometryChanged.connect(self._on_screen_geometry_changed)
+                connected.add(key)
+            except (AttributeError, TypeError):
+                pass
+
+    def _on_screen_geometry_changed(self, geometry):
+        if not self.project_targets.get("hdmi"):
+            return
+        # Releer la lista de monitores para obtener la nueva resolución y
+        # re-aplicarla al canvas/salida.
+        self._refresh_hdmi_monitor_combo(prompt=True)
+
+    def _on_screen_added(self, screen):
+        self._connect_screen_signals([screen])
+        self._refresh_hdmi_monitor_combo(prompt=True)
+
+    def _on_screen_removed(self, screen):
+        connected = self.__dict__.get("_connected_screen_ids")
+        if connected is not None:
+            connected.discard(id(screen))
+        monitor = self.hdmi_output.monitor if self.hdmi_output is not None else None
+        if isinstance(monitor, dict) and monitor.get("name") == (screen.name() or ""):
+            self._shutdown_hdmi_output()
+            self.status_bar.showMessage(
+                "El monitor HDMI seleccionado se ha desconectado", 5000)
+        self._refresh_hdmi_monitor_combo(prompt=False)
 
     def setup_performance_monitor(self):
         """Setup timer to update performance stats."""
@@ -1018,16 +2063,76 @@ class ThemeEditorWindow(QMainWindow):
             gpu_str = ""
 
         if self.device:
-            mode_str = " [OD]" if self._overdrive_mode else ""
-            skip_str = f" Skip:{self._frames_skipped}" if self._overdrive_mode and self._frames_skipped > 0 else ""
-            self.perf_label.setText(
-                f"FPS: {actual_fps:.1f}/{self.target_fps}{mode_str} | CPU: {cpu_percent:.1f}%{mem_str}{gpu_str} | {status}{skip_str}"
-            )
-            # Reset skip counter periodically
-            if self._overdrive_mode:
-                self._frames_skipped = 0
+            lcd_fps_txt = f"{actual_fps:.0f}/{self.target_fps}"
         else:
-            self.perf_label.setText(f"FPS: -- | CPU: --%{mem_str}{gpu_str}")
+            lcd_fps_txt = "--"
+        lcd_color = color if self.device else "#444"
+
+        # ---- DMD performance (independent counter; mismo formato que LCD) ----
+        dmd_in_project = bool(self.project_targets.get("dmd", False))
+        dmd_active = self.dmd_sender is not None and self.dmd_send_timer is not None
+        if dmd_in_project and dmd_active and len(self.dmd_frame_times) >= 2:
+            dmd_avg = sum(self.dmd_frame_times) / len(self.dmd_frame_times)
+            dmd_fps = 1.0 / dmd_avg if dmd_avg > 0 else 0
+        else:
+            dmd_fps = 0
+        if dmd_in_project and dmd_active:
+            dmd_target = self.dmd_sender.fps if self.dmd_sender else 12
+            dmd_fps_txt = f"{dmd_fps:.0f}/{dmd_target}"
+            if dmd_fps >= dmd_target * 0.8:
+                dmd_color = "#4CAF50"
+            elif dmd_fps >= dmd_target * 0.5:
+                dmd_color = "#FFC107"
+            else:
+                dmd_color = "#F44336"
+        elif dmd_in_project:
+            dmd_fps_txt = "--"
+            dmd_color = "#444"
+        else:
+            dmd_fps_txt = None
+
+        # ---- HDMI performance (independent counter) ----
+        hdmi_in_project = bool(self.project_targets.get("hdmi", False))
+        hdmi_active = self.hdmi_output is not None and self.hdmi_send_timer is not None
+        if hdmi_in_project and hdmi_active and len(self.hdmi_frame_times) >= 2:
+            hdmi_avg = sum(self.hdmi_frame_times) / len(self.hdmi_frame_times)
+            hdmi_fps = 1.0 / hdmi_avg if hdmi_avg > 0 else 0
+            hdmi_target = int((self.project_hdmi_config or {}).get("fps")
+                             or self.target_fps or 30)
+            hdmi_fps_txt = f"{hdmi_fps:.0f}/{hdmi_target}"
+            if hdmi_fps >= hdmi_target * 0.8:
+                hdmi_color = "#4CAF50"
+            elif hdmi_fps >= hdmi_target * 0.5:
+                hdmi_color = "#FFC107"
+            else:
+                hdmi_color = "#F44336"
+        elif hdmi_in_project:
+            hdmi_fps_txt = "--"
+            hdmi_color = "#444"
+        else:
+            hdmi_fps_txt = None
+
+        # Footer único: LCD fps (color), DMD fps (color), luego CPU/RAM/GPU.
+        # Si el proyecto no incluye target DMD se omite el segmento DMD.
+        if self.device:
+            cpu_txt = f"{cpu_percent:.0f}%"
+        else:
+            cpu_txt = "--%"
+        dmd_segment = ""
+        if dmd_fps_txt is not None:
+            dmd_segment = f' | DMD: <span style="color:{dmd_color}">{dmd_fps_txt}</span> fps'
+        hdmi_segment = ""
+        if hdmi_fps_txt is not None:
+            hdmi_segment = (
+                f' | HDMI: <span style="color:{hdmi_color}">{hdmi_fps_txt}</span> fps')
+        self.perf_label.setText(
+            f'LCD: <span style="color:{lcd_color}">{lcd_fps_txt}</span> fps'
+            f'{dmd_segment}{hdmi_segment}'
+            f' | CPU: {cpu_txt}{mem_str}{gpu_str}'
+        )
+        self.perf_indicator.setStyleSheet(
+            f"background-color: {lcd_color}; border-radius: 4px; min-height: 16px;"
+        )
 
         if self.device and actual_fps < self.target_fps * 0.7 and actual_fps > 0:
             self.status_bar.showMessage(
@@ -1046,6 +2151,18 @@ class ThemeEditorWindow(QMainWindow):
                 if len(self.frame_times) > 60:  # Larger sample for stability
                     self.frame_times.pop(0)
         self.last_frame_time = current_time
+
+    def record_dmd_frame_time(self):
+        """Record the time between DMD frames sent to the device."""
+        current_time = time.perf_counter()  # High-precision timer
+        if self.dmd_last_frame_time > 0:
+            frame_time = current_time - self.dmd_last_frame_time
+            # Only record reasonable frame times (filter out outliers from pauses)
+            if frame_time < 1.0:  # Ignore gaps > 1 second
+                self.dmd_frame_times.append(frame_time)
+                if len(self.dmd_frame_times) > 60:
+                    self.dmd_frame_times.pop(0)
+        self.dmd_last_frame_time = current_time
 
     def add_default_elements(self):
         defaults = [
@@ -1084,22 +2201,26 @@ class ThemeEditorWindow(QMainWindow):
         # Check if a group was selected (vs individual elements)
         is_group = self.element_list.is_group_selected()
         self.canvas.set_selected_indices(indices, group_selection=is_group)
-        if len(indices) == 1:
-            self.properties_panel.set_element(self.elements[indices[0]])
-        elif len(indices) > 1:
+        valid = [i for i in indices if 0 <= i < len(self.elements)]
+        if len(valid) == 1:
+            self.properties_panel.set_element(self.elements[valid[0]])
+        elif len(valid) > 1:
             # Show alignment panel for multiple selection
-            self.properties_panel.set_multi_selection([self.elements[i] for i in indices], indices)
+            self.properties_panel.set_multi_selection(
+                [self.elements[i] for i in valid], valid)
         else:
             self.properties_panel.set_element(None)
 
     def on_canvas_elements_selected(self, indices):
         """Handle multi-selection from canvas."""
         self.element_list.select_elements(indices, emit_signals=False)
-        if len(indices) == 1:
-            self.properties_panel.set_element(self.elements[indices[0]])
-        elif len(indices) > 1:
+        valid = [i for i in indices if 0 <= i < len(self.elements)]
+        if len(valid) == 1:
+            self.properties_panel.set_element(self.elements[valid[0]])
+        elif len(valid) > 1:
             # Show alignment panel for multiple selection
-            self.properties_panel.set_multi_selection([self.elements[i] for i in indices], indices)
+            self.properties_panel.set_multi_selection(
+                [self.elements[i] for i in valid], valid)
         else:
             self.properties_panel.set_element(None)
 
@@ -1123,9 +2244,10 @@ class ThemeEditorWindow(QMainWindow):
         self._refresh_timer.start(16)  # ~60fps max update rate
 
     def _do_refresh_canvas(self):
-        """Actually perform the canvas refresh."""
+        """Actualmente pasa por el canvas activo y fuerza re-render HDMI."""
         self.canvas.set_elements(self.elements)
         self.canvas.update()
+        self._hdmi_last_signature = None
 
     def save_undo_state(self):
         """Save current state to undo stack."""
@@ -1237,44 +2359,25 @@ class ThemeEditorWindow(QMainWindow):
         """Called when a preset is saved."""
         self.status_bar.showMessage(f"Preset saved: {preset_name}")
 
-    def save_as_preset(self):
-        """Save current theme as a preset with thumbnail snapshot."""
-        bound_w, bound_h = self._effective_canvas_dims()
-        theme_data = {
-            "name": self.theme_name,
-            "background_color": self.background_color,
-            "display_width": bound_w,
-            "display_height": bound_h,
-            "elements": [e.to_dict() for e in self.elements],
-            "video_background": video_background.to_dict()
-        }
-
-        # Capture current frame as thumbnail
-        thumbnail_image = None
-        try:
-            thumbnail_image = self.render_theme_image()
-            # Convert to RGB if necessary (remove alpha channel for PNG efficiency)
-            if thumbnail_image and thumbnail_image.mode == 'RGBA':
-                thumbnail_image = thumbnail_image.convert('RGB')
-        except Exception as e:
-            print(f"[Preset] Failed to capture thumbnail: {e}")
-
-        self.presets_panel.save_preset(self.theme_name, theme_data, thumbnail_image)
-
     def quick_save(self):
-        """Quick save to presets folder using current theme name."""
+        """Quick save the theme file using the current path (Ctrl+S)."""
         if not self.theme_name or self.theme_name.strip() == "":
             self.status_bar.showMessage("Please enter a theme name first")
             return
-        self.save_as_preset()
-        self.status_bar.showMessage(f"Saved: {self.theme_name}")
+        self.save_theme()
+        self.status_bar.showMessage(f"Saved: {self.theme_path or self.theme_name}")
+
+    def _on_load_at_startup_toggled(self, checked):
+        settings.set_setting("load_at_startup", bool(checked))
+        if checked and self.theme_path:
+            settings.set_setting("startup_theme_path", self.theme_path)
 
     def update_element_list_name(self):
         self.element_list.refresh_list()
 
     def on_theme_name_changed(self, name):
         self.theme_name = name
-        self.setWindowTitle(f"Thermal Engine - {name}")
+        self.setWindowTitle(f"Thermal Engine Studio - {name}")
 
     def choose_background_color(self):
         color = QColorDialog.getColor(QColor(self.background_color), self)
@@ -1388,42 +2491,133 @@ class ThemeEditorWindow(QMainWindow):
             self.video_fit_combo.setEnabled(False)
 
     # --------------------------------------------------- target Web / LCD ---
-    def apply_targets(self, targets, lcd_model=None):
-        """Aplica el destino del proyecto activo (Web / LCD) y el modelo LCD.
+    def apply_targets(self, targets, lcd_model=None, dmd_config=None,
+                      hdmi_config=None):
+        """Aplica el destino del proyecto activo (Web / LCD / DMD / HDMI).
 
         - Web  -> levanta el webserver + el caché JPEG que lo alimenta.
         - !Web -> lo detiene (ahorro de recursos con proyectos solo LCD).
         - LCD  -> recuerda el modelo; el perfil de entrega (tasas del menú
           Frame Rate) se resuelve con la capacidad del panel y el estado del
           benchmark persistido.
+        - DMD  -> conmuta el editor al canvas 128×32 y arranca el envío TCP.
+        - HDMI -> conmuta al canvas a la resolución del monitor y abre la
+          ventana fullscreen en el monitor seleccionado.
         """
         targets = {
             "web": bool(targets.get("web", True)),
             "lcd": bool(targets.get("lcd", True)),
+            "dmd": bool(targets.get("dmd", False)),
+            "hdmi": bool(targets.get("hdmi", False)),
         }
+        prev = dict(self.project_targets)
         self.project_targets = targets
         if lcd_model:
             self.project_lcd_id = lcd_model
             settings.set_setting("lcd_model", lcd_model)
+        if dmd_config:
+            self.project_dmd_config = dict(dmd_config)
+            settings.set_setting("dmd_config", dmd_config)
+        if hdmi_config:
+            self.project_hdmi_config = dict(hdmi_config)
+            settings.set_setting("hdmi_config", hdmi_config)
 
         self._set_webserver_state(targets["web"])
+        # Pestaña WEB: preview en vivo de la imagen servida por el webserver
+        self.target_tabs.setTabVisible(self._web_tab_index, bool(targets["web"]))
+        # Pestaña LCD: solo si el proyecto tiene target LCD. El wizard obliga a
+        # elegir al menos un dispositivo, así que nunca queda un editor vacío.
+        self.target_tabs.setTabVisible(self._lcd_tab_index, bool(targets["lcd"]))
+        if targets["web"]:
+            if not self._web_preview_timer.isActive():
+                self._web_preview_timer.start(200)
+        else:
+            self._web_preview_timer.stop()
+            self.web_preview.setText("WEB preview\n(webserver inactive)")
+            self.web_preview.setPixmap(QPixmap())
         self._resolve_device_frame_options()
         self._apply_delivery_profile()
-        if targets["web"]:
-            if targets["lcd"]:
-                self.status_bar.showMessage(
-                    "Proyecto Web + LCD (webserver activo)")
-            else:
-                self.status_bar.showMessage("Proyecto Web (webserver activo)")
+
+        if targets["dmd"]:
+            config = dmd_config or self.project_dmd_config or {}
+            w = int(config.get("width", 128))
+            h = int(config.get("height", 32))
+            self.dmd_canvas.set_dmd_size(w, h)
+            if self._active_target == "dmd":
+                self.properties_panel.set_dmd_mode(True, w, h)
+            self.target_tabs.setTabVisible(self._dmd_tab_index, True)
+            self._configure_dmd_sender(config, restart=True)
+            if not prev.get("dmd"):
+                self._dmd_output_enabled = True
+            self.dmd_toggle_btn.blockSignals(True)
+            self.dmd_toggle_btn.setChecked(self._dmd_output_enabled)
+            self.dmd_toggle_btn.blockSignals(False)
+            self.dmd_toggle_btn.setVisible(True)
+            if self._dmd_output_enabled:
+                self._start_dmd_loop()
+        else:
+            self.target_tabs.setTabVisible(self._dmd_tab_index, False)
+            self.dmd_toggle_btn.setVisible(False)
+            self._dmd_output_enabled = False
+            self._shutdown_dmd_sender()
+
+        if targets["hdmi"]:
+            self.target_tabs.setTabVisible(self._hdmi_tab_index, True)
+            self._refresh_hdmi_monitor_combo(prompt=False)
+            if not prev.get("hdmi"):
+                self._hdmi_output_enabled = True
+            self.hdmi_toggle_btn.blockSignals(True)
+            self.hdmi_toggle_btn.setChecked(self._hdmi_output_enabled)
+            self.hdmi_toggle_btn.blockSignals(False)
+            self.hdmi_toggle_btn.setVisible(True)
+            if self._hdmi_output_enabled and self._selected_hdmi_monitor() is not None:
+                self._start_hdmi_output()
+            if self._active_target == "hdmi":
+                self.properties_panel.set_hdmi_mode(
+                    self.hdmi_canvas.hdmi_width,
+                    self.hdmi_canvas.hdmi_height)
+        else:
+            self.target_tabs.setTabVisible(self._hdmi_tab_index, False)
+            self.hdmi_toggle_btn.setVisible(False)
+            self._hdmi_output_enabled = False
+            self._shutdown_hdmi_output()
+
+        # Reserva: si ningún target queda visible, mostrar LCD para no dejar el
+        # editor vacío (el wizard lo impide, pero un tema externo podría).
+        if not any(self.target_tabs.isTabVisible(i)
+                   for i in range(self.target_tabs.count())):
+            self.target_tabs.setTabVisible(self._lcd_tab_index, True)
+
+        # Mensaje de estado
+        active = [name for name in ("web", "lcd", "dmd", "hdmi")
+                  if targets.get(name)]
+        if not active:
+            self.status_bar.showMessage("Proyecto sin targets activos")
         else:
             self.status_bar.showMessage(
-                "Proyecto LCD (webserver apagado)")
+                "Proyecto " + " + ".join(x.upper() for x in active)
+                + (" (webserver activo)" if targets["web"] else ""))
+
+        # Si el proyecto deja de tener target LCD, no tiene sentido seguir
+        # reintentando reconectar el panel USB.
+        if not targets["lcd"]:
+            self._stop_reconnect()
+
+        # Sincronizar paneles laterales según una pestaña inicial coherente
+        # (evita quedarse en LCD cuando el proyecto es solo HDMI/DMD).
+        self._select_initial_target_tab()
+        # Recolocar el botón "+" tras cambiar la visibilidad de pestañas.
+        tab_bar = self.target_tabs.tabBar()
+        if hasattr(tab_bar, "relayout"):
+            tab_bar.relayout()
+            QTimer.singleShot(0, tab_bar.relayout)
+        self._on_target_tab_changed(self.target_tabs.currentIndex())
         return targets
 
     def _set_webserver_state(self, web_active):
         """Levanta o detiene el webserver y su caché JPEG según el target Web."""
         try:
-            from webserver import start_server, stop_server, is_running
+            from webserver import is_running, start_server, stop_server
         except Exception as e:
             print(f"[Web] webserver import failed: {e}")
             return
@@ -1485,13 +2679,13 @@ class ThemeEditorWindow(QMainWindow):
         self.status_bar.showMessage(msg)
 
     def new_project(self):
-        """File → New Project: asistente de 2 pasos (Web / LCD + tipo de LCD)."""
+        """File → New Project: asistente (Web / LCD / HDMI / DMD)."""
         from new_project import NewProjectDialog
-        from presets import get_preset_data
         dlg = NewProjectDialog(
             self,
             web_checked=self.project_targets.get("web", True),
             lcd_checked=self.project_targets.get("lcd", True),
+            hdmi_checked=self.project_targets.get("hdmi", False),
             lcd_model=self.project_lcd_id,
             benchmark_runner=self._run_lcd_benchmark,
             refresh_hook=self._refresh_profile_after_benchmark,
@@ -1499,13 +2693,12 @@ class ThemeEditorWindow(QMainWindow):
         if dlg.exec():
             data = dlg.data()
             self.new_theme()
-            self.apply_targets(data, lcd_model=data.get("lcd_model"))
-
-            template = data.get("template")
-            if template and template != "En blanco":
-                preset_data = get_preset_data(template)
-                if preset_data:
-                    self.load_preset(preset_data)
+            self.apply_targets(
+                data.get("targets", data),
+                lcd_model=data.get("lcd_model"),
+                dmd_config=data.get("dmd_config"),
+                hdmi_config=data.get("hdmi_config"),
+            )
 
             name = data.get("name") or "Untitled Project"
             self.theme_name = name
@@ -1513,18 +2706,87 @@ class ThemeEditorWindow(QMainWindow):
             self.status_bar.showMessage(
                 f"New project created: {name}", 3000)
 
+    def add_project_target(self):
+        """Botón "+" (esquina del tab bar): abre el wizard de New Project con
+        los dispositivos ya usados en este proyecto deshabilitados. Al aceptar
+        se AÑADE el nuevo dispositivo al proyecto actual (no se crea un
+        proyecto nuevo). El tab correspondiente aparece/comienza a funcionar.
+        """
+        from new_project import NewProjectDialog
+        dlg = NewProjectDialog(
+            self,
+            web_checked=False,
+            lcd_checked=False,
+            lcd_model=self.project_lcd_id,
+            benchmark_runner=self._run_lcd_benchmark,
+            refresh_hook=self._refresh_profile_after_benchmark,
+            disabled_targets=self.project_targets,
+            add_mode=True,
+        )
+        if dlg.exec():
+            data = dlg.data()
+            new_targets = data.get("targets", data)
+            merged = {
+                "web": bool(self.project_targets.get("web"))
+                       or bool(new_targets.get("web")),
+                "lcd": bool(self.project_targets.get("lcd"))
+                       or bool(new_targets.get("lcd")),
+                "dmd": bool(self.project_targets.get("dmd"))
+                       or bool(new_targets.get("dmd")),
+                "hdmi": bool(self.project_targets.get("hdmi"))
+                        or bool(new_targets.get("hdmi")),
+            }
+            self.project_targets = merged
+            # Solo se actualiza el modelo/config del target recién añadido si
+            # fue seleccionado aquí; en caso contrario se conserva el actual.
+            lcd_model = data.get("lcd_model") or (self.project_lcd_id
+                                                  if merged["lcd"] else None)
+            dmd_config = data.get("dmd_config") or self.project_dmd_config
+            hdmi_config = data.get("hdmi_config") or self.project_hdmi_config
+            added = [k for k, v in new_targets.items() if v]
+            self.apply_targets(merged, lcd_model=lcd_model,
+                               dmd_config=dmd_config, hdmi_config=hdmi_config)
+            # Saltar a la pestaña del dispositivo recién añadido.
+            self._select_initial_target_tab(added=added)
+            self.status_bar.showMessage(
+                f"Dispositivo añadido al proyecto: {', '.join(added)}", 3000)
+
     def new_theme(self):
         self.theme_path = None
         self.theme_name = "Untitled Theme"
         self.theme_name_edit.setText(self.theme_name)
-        self.background_color = "#0f0f19"
-        self.bg_color_btn.setStyleSheet(f"background-color: {self.background_color};")
-        self.canvas.set_background_color(self.background_color)
-        self.elements = []
-        self.element_list.set_elements(self.elements)
+        self.lcd_background_color = "#0f0f19"
+        self.dmd_background_color = "#000000"
+        self.hdmi_background_color = "#000000"
+        self.lcd_elements = []
+        self.dmd_elements = []
+        self.hdmi_elements = []
+        self.lcd_video_data = {}
+        self.bg_color_btn.setStyleSheet(
+            f"background-color: #0f0f19;"
+            f" border: 1px solid {BORDER}; border-radius: 5px;"
+        )
+        self.canvas.set_background_color(self.lcd_background_color)
+        # Enlazar widgets con las MISMAS listas por target (no literales []),
+        # para que element_list y el canvas compartan referencia con self.elements
+        # y las selecciones/índices no queden obsoletos.
         self.canvas.set_elements(self.elements)
+        self.element_list.set_elements(self.elements)
         self.properties_panel.set_element(None)
-        # Clear video background
+        if self.dmd_canvas is not None:
+            self.dmd_canvas.set_background_color("#000000")
+            self.dmd_canvas.set_elements(self.dmd_elements)
+        if self.hdmi_canvas is not None:
+            self.hdmi_canvas.set_background_color("#000000")
+            self.hdmi_canvas.set_elements(self.hdmi_elements)
+        # Mantener el canvas HDMI a la resolución del monitor conectado.
+        if self.hdmi_canvas is not None:
+            monitor = self._selected_hdmi_monitor()
+            if isinstance(monitor, dict):
+                self.hdmi_canvas.set_hdmi_size(monitor.get("width", 1920),
+                                               monitor.get("height", 1080))
+        self._hdmi_last_signature = None
+        self._shutdown_hdmi_output()
         video_background.clear_video()
         self._update_video_ui()
         self.status_bar.showMessage("New theme created")
@@ -1536,65 +2798,131 @@ class ThemeEditorWindow(QMainWindow):
         )
         if path:
             try:
-                with open(path, 'r') as f:
-                    data = json.load(f)
-
-                # Validate theme schema before loading
-                is_valid, errors = validate_preset_schema(data)
-                if not is_valid:
-                    QMessageBox.warning(self, "Invalid Theme",
-                        f"Theme file has invalid format:\n{', '.join(errors[:5])}")
-                    return
-
-                # Match preview/LCD orientation to the theme's stored dimensions
-                self._apply_theme_orientation(data)
-
-                self.theme_name = data.get("name", "Untitled")
-                self.theme_name_edit.setText(self.theme_name)
-                self.background_color = data.get("background_color", "#0f0f19")
-                self.bg_color_btn.setStyleSheet(f"background-color: {self.background_color};")
-                self.canvas.set_background_color(self.background_color)
-
-                self.elements = [
-                    ThemeElement.from_dict(e) for e in data.get("elements", [])
-                ]
-                self.element_list.set_elements(self.elements)
-                self.canvas.set_elements(self.elements)
-
-                # Load video background settings
-                video_data = data.get("video_background", {})
-                if video_data:
-                    video_background.from_dict(video_data)
-                    self._update_video_ui()
-                else:
-                    video_background.clear_video()
-                    self._update_video_ui()
-
-                self.theme_path = path
-                self.fit_canvas()
-
-                # Aplicar el destino del proyecto (Web/LCD) guardado en el
-                # theme. Los themes legados sin "targets" se tratan como
-                # Web+LCD (comportamiento original).
-                targets = data.get("targets")
-                if isinstance(targets, dict):
-                    target_data = {
-                        "web": bool(targets.get("web", True)),
-                        "lcd": bool(targets.get("lcd", True)),
-                    }
-                elif isinstance(targets, list):
-                    target_data = {
-                        "web": "web" in targets,
-                        "lcd": "lcd" in targets,
-                    }
-                else:
-                    target_data = {"web": True, "lcd": True}
-                self.apply_targets(target_data, data.get("lcd_model"))
-
+                self._load_theme_file(path)
                 self.status_bar.showMessage(f"Opened: {path}")
-
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to open theme:\n{e}")
+
+    def _load_theme_file(self, path):
+        """Carga un theme file (formato dual lcd/dmd o legacy → solo LCD)."""
+        with open(path, 'r') as f:
+            data = json.load(f)
+
+        is_valid, errors = validate_preset_schema(data)
+        if not is_valid:
+            raise ValueError(f"Schema: {', '.join(errors[:5])}")
+
+        # --- Formato dual vs legacy ---
+        if "lcd" in data or "dmd" in data:
+            lcd_dat = data.get("lcd", {})
+            dmd_dat = data.get("dmd", {})
+        else:
+            # Legacy: top-level elements → LCD, DMD vacío
+            lcd_dat = data
+            dmd_dat = {}
+
+        # La pestaña inicial la decide apply_targets() al final, según los
+        # targets del tema (evita quedarse en una pestaña oculta).
+
+        self.theme_name = data.get("name", "Untitled")
+        self.theme_name_edit.setText(self.theme_name)
+
+        # --- LCD ---
+        self.lcd_background_color = lcd_dat.get("background_color", "#0f0f19")
+        self.lcd_elements = [ThemeElement.from_dict(e)
+                             for e in lcd_dat.get("elements", [])]
+        self.lcd_video_data = dict(lcd_dat.get("video_background") or {})
+        if self.lcd_video_data and self.lcd_video_data.get("enabled"):
+            video_background.from_dict(self.lcd_video_data)
+        else:
+            video_background.clear_video()
+        self.canvas.set_background_color(self.lcd_background_color)
+        self.canvas.set_elements(self.lcd_elements)
+        self.bg_color_btn.setStyleSheet(
+            f"background-color: {self.lcd_background_color};"
+            f" border: 1px solid {BORDER}; border-radius: 5px;"
+        )
+        self.element_list.set_elements(self.lcd_elements)
+        self.element_list.refresh_list()
+        self.properties_panel.set_element(None)
+        self._update_video_ui()
+
+        # --- DMD ---
+        self.dmd_background_color = dmd_dat.get("background_color", "#000000")
+        self.dmd_elements = [ThemeElement.from_dict(e)
+                             for e in dmd_dat.get("elements", [])]
+        w = int(dmd_dat.get("width", 128))
+        h = int(dmd_dat.get("height", 32))
+        if self.dmd_canvas is not None:
+            self.dmd_canvas.set_dmd_size(w, h)
+            self.dmd_canvas.set_background_color(self.dmd_background_color)
+            self.dmd_canvas.set_elements(self.dmd_elements)
+            if self._active_target == "dmd":
+                self.properties_panel.set_dmd_mode(True, w, h)
+
+        # --- HDMI ---
+        hdmi_dat = data.get("hdmi", {}) or {}
+        self.hdmi_background_color = hdmi_dat.get("background_color", "#000000")
+        self.hdmi_elements = [ThemeElement.from_dict(e)
+                              for e in hdmi_dat.get("elements", [])]
+        hw = int(hdmi_dat.get("width", 0) or 0)
+        hh = int(hdmi_dat.get("height", 0) or 0)
+        # El canvas HDMI debe medir la resolución del monitor conectado. Si el
+        # tema se diseñó a otra resolución, se escalan los elementos de forma
+        # proporcional para conservar el diseño.
+        monitor = self._selected_hdmi_monitor()
+        screen_id = (data.get("hdmi_config") or {}).get("screen_id")
+        if not isinstance(monitor, dict) and screen_id:
+            from monitors import resolve_monitor
+            monitor = resolve_monitor(screen_id)
+        if isinstance(monitor, dict):
+            mw = int(monitor.get("width") or 0)
+            mh = int(monitor.get("height") or 0)
+            if mw > 0 and mh > 0:
+                if hw > 0 and hh > 0 and (hw, hh) != (mw, mh):
+                    self._scale_elements(self.hdmi_elements, hw, hh, mw, mh)
+                hw, hh = mw, mh
+        if self.hdmi_canvas is not None:
+            if hw > 0 and hh > 0:
+                self.hdmi_canvas.set_hdmi_size(hw, hh)
+            self.hdmi_canvas.set_background_color(self.hdmi_background_color)
+            self.hdmi_canvas.set_elements(self.hdmi_elements)
+        self._hdmi_last_signature = None
+
+        self.theme_path = path
+
+        # --- Orientación LCD ---
+        dw = lcd_dat.get("display_width")
+        dh = lcd_dat.get("display_height")
+        if isinstance(dw, int) and isinstance(dh, int) and dw > 0 and dh > 0:
+            self._apply_vertical_mode(dh > dw)
+
+        # --- Targets ---
+        targets = data.get("targets")
+        if isinstance(targets, dict):
+            target_data = {
+                "web": bool(targets.get("web", True)),
+                "lcd": bool(targets.get("lcd", True)),
+                "dmd": bool(targets.get("dmd", False)),
+                "hdmi": bool(targets.get("hdmi", False)),
+            }
+        elif isinstance(targets, list):
+            target_data = {
+                "web": "web" in targets,
+                "lcd": "lcd" in targets,
+                "dmd": "dmd" in targets,
+                "hdmi": "hdmi" in targets,
+            }
+        else:
+            target_data = {"web": True, "lcd": True, "dmd": False,
+                           "hdmi": False}
+        self.apply_targets(target_data, data.get("lcd_model"),
+                           data.get("dmd_config"), data.get("hdmi_config"))
+
+        if settings.get_setting("load_at_startup", False):
+            settings.set_setting("startup_theme_path", path)
+
+        self.fit_canvas()
 
     def save_theme(self):
         if self.theme_path:
@@ -1612,39 +2940,52 @@ class ThemeEditorWindow(QMainWindow):
 
     def _save_to_path(self, path):
         try:
-            bound_w, bound_h = self._effective_canvas_dims()
+            lcd_w = DISPLAY_HEIGHT if self._vertical_mode else DISPLAY_WIDTH
+            lcd_h = DISPLAY_WIDTH if self._vertical_mode else DISPLAY_HEIGHT
+            dmd_w = self.dmd_canvas.dmd_width if self.dmd_canvas else 128
+            dmd_h = self.dmd_canvas.dmd_height if self.dmd_canvas else 32
+            hdmi_w = self.hdmi_canvas.hdmi_width if self.hdmi_canvas else 1920
+            hdmi_h = self.hdmi_canvas.hdmi_height if self.hdmi_canvas else 1080
+
             data = {
                 "name": self.theme_name,
-                "background_color": self.background_color,
-                "display_width": bound_w,
-                "display_height": bound_h,
-                "elements": [e.to_dict() for e in self.elements],
-                "video_background": video_background.to_dict(),
                 "targets": dict(self.project_targets),
                 "lcd_model": self.project_lcd_id,
+                "dmd_config": (self.project_dmd_config
+                               if self.project_targets.get("dmd") else None),
+                "hdmi_config": (self.project_hdmi_config
+                                if self.project_targets.get("hdmi") else None),
+                "lcd": {
+                    "background_color": self.lcd_background_color,
+                    "display_width": lcd_w,
+                    "display_height": lcd_h,
+                    "elements": [e.to_dict() for e in self.lcd_elements],
+                    "video_background": video_background.to_dict(),
+                },
+                "dmd": {
+                    "background_color": self.dmd_background_color,
+                    "width": dmd_w,
+                    "height": dmd_h,
+                    "elements": [e.to_dict() for e in self.dmd_elements],
+                },
+                "hdmi": {
+                    "background_color": self.hdmi_background_color,
+                    "width": hdmi_w,
+                    "height": hdmi_h,
+                    "elements": [e.to_dict() for e in self.hdmi_elements],
+                },
             }
 
             with open(path, 'w') as f:
                 json.dump(data, f, indent=2)
 
             self.theme_path = path
+            if settings.get_setting("load_at_startup", False):
+                settings.set_setting("startup_theme_path", path)
             self.status_bar.showMessage(f"Saved: {path}")
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save theme:\n{e}")
-
-    def export_image(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Image", f"{self.theme_name}.png",
-            "PNG Image (*.png);;JPEG Image (*.jpg)"
-        )
-        if path:
-            try:
-                img = self.render_theme_image()
-                img.save(path)
-                self.status_bar.showMessage(f"Exported: {path}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to export image:\n{e}")
 
     def get_sensor_data(self):
         """Get sensor data from background threads (non-blocking)."""
@@ -1741,7 +3082,7 @@ class ThemeEditorWindow(QMainWindow):
             info.append("  3. Go to Settings (gear icon)")
             info.append("  4. Enable 'Shared Memory Support'")
             info.append("  5. Click OK and run sensors")
-            info.append("  6. Restart ThermalEngine")
+            info.append("  6. Restart Thermal Engine Studio")
             info.append("")
             info.append("HWiNFO provides reliable sensor data without")
             info.append("driver blocklist issues from Windows Defender.")
@@ -1865,6 +3206,9 @@ class ThemeEditorWindow(QMainWindow):
             return False
 
     def disconnect_display(self):
+        # Una desconexión explícita (manual o de sistema) no debe relanzar el
+        # bucle de reconexión; _handle_disconnect_on_error lo reactiva después.
+        self._stop_reconnect()
         self.stop_continuous_send()
 
         # Cerrar dispositivo LY si está activo
@@ -1923,7 +3267,7 @@ class ThemeEditorWindow(QMainWindow):
 
     def _show_60fps_warning(self):
         """Show warning dialog for 60 FPS mode. Returns True if user accepts."""
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QCheckBox, QDialogButtonBox
+        from PySide6.QtWidgets import QCheckBox, QDialog, QDialogButtonBox, QLabel, QVBoxLayout
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Performance Warning")
@@ -2107,12 +3451,13 @@ class ThemeEditorWindow(QMainWindow):
             self.status_bar.showMessage("Overdrive mode disabled")
 
     def _apply_vertical_mode(self, enabled):
-        """Apply a vertical/portrait orientation across preview, properties, LCD output and settings."""
+        """Apply a vertical/portrait orientation across preview, properties, LCD output and settings.
+        Solo afecta al canvas LCD (el DMD siempre es fijo en horizontal)."""
         self._vertical_mode = enabled
         settings.set_setting("vertical_mode", enabled)
 
-        if hasattr(self, "canvas") and hasattr(self.canvas, "set_vertical_mode"):
-            self.canvas.set_vertical_mode(enabled)
+        if hasattr(self, "lcd_canvas") and hasattr(self.lcd_canvas, "set_vertical_mode"):
+            self.lcd_canvas.set_vertical_mode(enabled)
 
         if hasattr(self, "vertical_mode_action"):
             self.vertical_mode_action.setChecked(enabled)
@@ -2141,7 +3486,15 @@ class ThemeEditorWindow(QMainWindow):
             self.status_bar.showMessage("Vertical mode disabled")
 
     def _effective_canvas_dims(self):
-        """Return the effective logical canvas dimensions for the current orientation."""
+        """Return the effective logical canvas dimensions for the current device.
+
+        DMD: resolución nativa de la matriz. HDMI: resolución del monitor.
+        LCD/Web: 1920×480 o rotado si el modo vertical está activo.
+        """
+        if getattr(self, "_active_target", "lcd") == "dmd" and self.dmd_canvas is not None:
+            return self.dmd_canvas.dmd_width, self.dmd_canvas.dmd_height
+        if getattr(self, "_active_target", "lcd") == "hdmi" and self.hdmi_canvas is not None:
+            return self.hdmi_canvas.hdmi_width, self.hdmi_canvas.hdmi_height
         if getattr(self, "_vertical_mode", False):
             return DISPLAY_HEIGHT, DISPLAY_WIDTH
         return DISPLAY_WIDTH, DISPLAY_HEIGHT
@@ -2188,7 +3541,7 @@ class ThemeEditorWindow(QMainWindow):
                 try:
                     # Update sensor-driven values first
                     sensor_data = self.get_sensor_data()
-                    for element in self.elements:
+                    for element in self.lcd_elements:
                         if element.source != 'static' and element.source in sensor_data:
                             element.value = sensor_data[element.source]
 
@@ -2228,7 +3581,7 @@ class ThemeEditorWindow(QMainWindow):
                 if self.device and (self._overdrive_mode or self._fast_delivery):
                     # Update sensor values
                     sensor_data = self.get_sensor_data()
-                    for element in self.elements:
+                    for element in self.lcd_elements:
                         if element.source != "static" and element.source in sensor_data:
                             element.value = sensor_data[element.source]
 
@@ -2258,7 +3611,6 @@ class ThemeEditorWindow(QMainWindow):
 
         # Initialize frame deadline for smooth timing
         self._frame_deadline = time.perf_counter()
-        self._frames_skipped = 0
 
         # Start render thread if overdrive mode (or fast delivery: productor)
         if self._overdrive_mode or self._fast_delivery:
@@ -2299,8 +3651,14 @@ class ThemeEditorWindow(QMainWindow):
         self.disconnect_display()
         self._was_connected_before_sleep = True
         self._reconnect_attempts = 0
-        self._start_reconnect_timer()
-        self.status_bar.showMessage("Display disconnected - attempting to reconnect...")
+        # Solo reconectar si el proyecto sigue usando el panel LCD.
+        if self.project_targets.get("lcd"):
+            self._auto_reconnect = True
+            self._start_reconnect_timer()
+            self.status_bar.showMessage(
+                "Display disconnected - attempting to reconnect...")
+        else:
+            self._auto_reconnect = False
 
     def send_frame_with_sensors(self):
         if not self.device:
@@ -2318,8 +3676,8 @@ class ThemeEditorWindow(QMainWindow):
             self._canvas_update_counter += 1
             if self._canvas_update_counter >= self._canvas_update_interval:
                 self._canvas_update_counter = 0
-                self.canvas.set_elements(self.elements)
-                self.canvas.update()
+                self.lcd_canvas.set_elements(self.lcd_elements)
+                self.lcd_canvas.update()
             return
 
         try:
@@ -2334,8 +3692,6 @@ class ThemeEditorWindow(QMainWindow):
                     pass
                 elif current_time > self._frame_deadline + frame_interval:
                     # We're more than one frame behind - skip frames to catch up
-                    frames_behind = int((current_time - self._frame_deadline) / frame_interval)
-                    self._frames_skipped += frames_behind
                     self._frame_deadline = current_time  # Reset deadline
 
                 # Use pre-rendered frame from buffer if available
@@ -2349,7 +3705,7 @@ class ThemeEditorWindow(QMainWindow):
                 else:
                     # Fallback to direct render if buffer empty
                     sensor_data = self.get_sensor_data()
-                    for element in self.elements:
+                    for element in self.lcd_elements:
                         if element.source != "static" and element.source in sensor_data:
                             element.value = sensor_data[element.source]
                     img = self.render_theme_image()
@@ -2362,7 +3718,7 @@ class ThemeEditorWindow(QMainWindow):
                 # Standard mode - direct render and send
                 sensor_data = self.get_sensor_data()
 
-                for element in self.elements:
+                for element in self.lcd_elements:
                     if element.source != "static" and element.source in sensor_data:
                         element.value = sensor_data[element.source]
 
@@ -2382,8 +3738,8 @@ class ThemeEditorWindow(QMainWindow):
             self._canvas_update_counter += 1
             if self._canvas_update_counter >= self._canvas_update_interval:
                 self._canvas_update_counter = 0
-                self.canvas.set_elements(self.elements)
-                self.canvas.update()
+                self.lcd_canvas.set_elements(self.lcd_elements)
+                self.lcd_canvas.update()
 
             self.record_frame_time()
 
@@ -2394,6 +3750,49 @@ class ThemeEditorWindow(QMainWindow):
             else:
                 print(f"Send error: {e}")
                 self.status_bar.showMessage(f"Error: {e}")
+
+    # ── Fuentes DMD ─────────────────────────────────────────────────────
+    DMD_FONT_PATHS = [
+        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
+                      "MatrixSansPrint-Regular.ttf"),
+        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
+                      "MatrixSansScreen-Regular.ttf"),
+        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
+                      "MatrixSans-Regular.ttf"),
+        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
+                      "PixelOperator.ttf"),
+        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
+                      "Tiny5-Regular.ttf"),
+        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
+                      "Silkscreen-Regular.ttf"),
+        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
+                      "PressStart2P-Regular.ttf"),
+        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
+                      "Micro5-Regular.ttf"),
+        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
+                      "VT323-Regular.ttf"),
+    ]
+
+    def _load_dmd_fonts(self):
+        from PySide6.QtGui import QFontDatabase
+        loaded = []
+        for path in self.DMD_FONT_PATHS:
+            if not os.path.exists(path):
+                print(f"[DMD] Fuente no encontrada: {path}")
+                continue
+            fid = QFontDatabase.addApplicationFont(path)
+            if fid >= 0:
+                families = QFontDatabase.applicationFontFamilies(fid)
+                loaded.extend(families)
+            else:
+                print(f"[DMD] Error al cargar fuente: {path}")
+        if loaded:
+            from properties import DMD_FONT_NAMES
+            missing = [n for n in DMD_FONT_NAMES if n not in loaded]
+            if missing:
+                print(f"[DMD] Fuentes no registradas: {missing}")
+        else:
+            print("[DMD] Ninguna fuente DMD cargada")
 
     _font_cache = None
 
@@ -2601,7 +4000,7 @@ class ThemeEditorWindow(QMainWindow):
         source of avoidable CPU usage when sensor values are not actively changing."""
         parts = [self._vertical_mode, video_background.enabled,
                  self._lcd_brightness, self._lcd_contrast, self._lcd_saturation]
-        for element in self.elements:
+        for element in self.lcd_elements:
             value = element.value
             # Round floats to 1 decimal so tiny sensor jitter doesn't force re-renders
             if isinstance(value, float):
@@ -2629,12 +4028,12 @@ class ThemeEditorWindow(QMainWindow):
             if video_frame:
                 img = video_frame.copy()
             else:
-                img = Image.new('RGBA', (canvas_w, canvas_h), color=self.background_color)
+                img = Image.new('RGBA', (canvas_w, canvas_h), color=self.lcd_background_color)
         else:
-            img = Image.new('RGBA', (canvas_w, canvas_h), color=self.background_color)
+            img = Image.new('RGBA', (canvas_w, canvas_h), color=self.lcd_background_color)
 
         # Render in reverse order so elements at top of list appear in front
-        for element in reversed(self.elements):
+        for element in reversed(self.lcd_elements):
             self.render_element_with_opacity(img, element)
 
         # Convert back to RGB for output
@@ -2687,8 +4086,12 @@ class ThemeEditorWindow(QMainWindow):
                 width=element.width, height=element.height, clip=element.clip
             )
             self.render_text_rgba(img, temp_element, font, color_opacity)
-        elif element.type == "analog_clock":
-            self.render_analog_clock_rgba(img, element, color_opacity, bg_opacity)
+        elif element.type == "gauge_circle_dmd":
+            self.render_gauge_circle_dmd_rgba(img, element, font, color_opacity, bg_opacity)
+        elif element.type == "segmented_bar":
+            self.render_segmented_bar_rgba(img, element, color_opacity, bg_opacity)
+        elif element.type == "bar_chart":
+            self.render_bar_chart_rgba(img, element, color_opacity, bg_opacity)
         elif element.type == "image":
             if element.image_path:
                 # Validate image path is safe
@@ -2845,129 +4248,6 @@ class ThemeEditorWindow(QMainWindow):
 
             img.alpha_composite(overlay)
 
-    def render_text(self, draw, img, element, font):
-        # Determine text to display based on source
-        source = getattr(element, 'source', 'static')
-        if source and source != 'static':
-            # Display sensor value, optionally with label
-            value_text = get_value_with_unit(element.value, source, getattr(element, 'temp_hide_unit', False))
-            if element.text:
-                text = f"{element.text}: {value_text}"
-            else:
-                text = value_text
-        else:
-            text = element.text
-
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-
-        if element.text_align == "left":
-            x = element.x
-        elif element.text_align == "right":
-            x = element.x + element.width - text_width
-        else:
-            x = element.x + (element.width - text_width) // 2
-
-        y = element.y + (element.height - text_height) // 2
-
-        if element.clip:
-            mask = Image.new('L', img.size, 0)
-            mask_draw = ImageDraw.Draw(mask)
-            mask_draw.rectangle([element.x, element.y, element.x + element.width, element.y + element.height], fill=255)
-
-            temp = Image.new('RGBA', img.size, (0, 0, 0, 0))
-            temp_draw = ImageDraw.Draw(temp)
-            temp_draw.text((x, y), text, fill=element.color, font=font)
-
-            r, g, b = img.split()
-            tr, tg, tb, ta = temp.split()
-
-            r = Image.composite(tr, r, mask)
-            g = Image.composite(tg, g, mask)
-            b = Image.composite(tb, b, mask)
-
-            img_temp = Image.merge('RGB', (r, g, b))
-            img.paste(img_temp)
-        else:
-            draw.text((x, y), text, fill=element.color, font=font)
-
-    def interpolate_gradient_color(self, gradient_stops, position):
-        """Interpolate color from gradient stops at a given position (0-1)."""
-        if not gradient_stops:
-            return "#00ff96"
-
-        sorted_stops = sorted(gradient_stops)
-        position = max(0.0, min(1.0, position))
-
-        if position <= sorted_stops[0][0]:
-            return sorted_stops[0][1]
-        if position >= sorted_stops[-1][0]:
-            return sorted_stops[-1][1]
-
-        for i in range(len(sorted_stops) - 1):
-            p1, c1 = sorted_stops[i]
-            p2, c2 = sorted_stops[i + 1]
-            if p1 <= position <= p2:
-                t = (position - p1) / (p2 - p1) if p2 != p1 else 0
-                # Parse hex colors
-                r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
-                r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
-                r = int(r1 + t * (r2 - r1))
-                g = int(g1 + t * (g2 - g1))
-                b = int(b1 + t * (b2 - b1))
-                return f"#{r:02x}{g:02x}{b:02x}"
-
-        return sorted_stops[-1][1]
-
-    def create_horizontal_gradient(self, width, height, gradient_stops, opacity=100):
-        """Create a horizontal gradient image from gradient stops using NumPy for performance."""
-        width = int(width)
-        height = int(height)
-        if width <= 0 or height <= 0:
-            return Image.new('RGBA', (max(1, width), max(1, height)), (0, 0, 0, 0))
-
-        # Check cache first - use tuple of stops for hashable key
-        cache_key = (width, height, tuple(gradient_stops) if gradient_stops else (), opacity)
-        if cache_key in _gradient_cache:
-            return _gradient_cache[cache_key].copy()
-
-        try:
-            import numpy as np
-            # Create 1D array of colors for the gradient
-            colors = np.zeros((width, 4), dtype=np.uint8)
-            a = int(255 * opacity / 100)
-
-            for px in range(width):
-                position = px / (width - 1) if width > 1 else 0
-                color = self.interpolate_gradient_color(gradient_stops, position)
-                r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
-                colors[px] = [r, g, b, a]
-
-            # Tile the 1D gradient to create 2D image (much faster than putpixel)
-            gradient_array = np.tile(colors, (height, 1, 1))
-            gradient = Image.fromarray(gradient_array, 'RGBA')
-        except ImportError:
-            # Fallback without numpy - use line drawing instead of putpixel
-            gradient = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(gradient)
-            a = int(255 * opacity / 100)
-
-            for px in range(width):
-                position = px / (width - 1) if width > 1 else 0
-                color = self.interpolate_gradient_color(gradient_stops, position)
-                r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
-                draw.line([(px, 0), (px, height - 1)], fill=(r, g, b, a))
-
-        # Cache the result (limit cache size)
-        if len(_gradient_cache) >= _gradient_cache_max_size:
-            # Remove oldest entry
-            oldest_key = next(iter(_gradient_cache))
-            del _gradient_cache[oldest_key]
-        _gradient_cache[cache_key] = gradient
-
-        return gradient.copy()
-
     def render_circle_gauge_rgba(self, img, element, font, font_small, color_opacity, bg_opacity):
         """Render circle gauge with opacity support."""
         x, y = element.x, element.y
@@ -3011,7 +4291,7 @@ class ThemeEditorWindow(QMainWindow):
         import math
 
         # Draw background arc on separate layer for proper opacity handling
-        arc_width = 15  # Match canvas pen width
+        arc_width = max(1, int(getattr(element, 'line_width', 15)))  # Match canvas pen width
         arc_radius = radius - arc_width // 2
         bg_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
         bg_draw = ImageDraw.Draw(bg_layer)
@@ -3028,7 +4308,7 @@ class ThemeEditorWindow(QMainWindow):
         if rounded_ends:
             cap_radius = arc_width // 2
             # Radial offset to push caps inward along the radius direction
-            radial_offset = -7
+            radial_offset = -(arc_width // 2)
             # Start cap at 135° (bottom-left)
             start_angle = 135
             start_x = x + (arc_radius + radial_offset) * math.cos(math.radians(start_angle))
@@ -3087,7 +4367,7 @@ class ThemeEditorWindow(QMainWindow):
                 # Draw rounded end caps for gradient arc
                 if rounded_ends:
                     cap_radius = arc_width // 2
-                    radial_offset = -7
+                    radial_offset = -(arc_width // 2)
                     # Start cap (use start color)
                     start_color = self.interpolate_gradient_color(gradient_stops, 0)
                     start_rgb = hex_to_rgba(start_color, 100)
@@ -3120,7 +4400,7 @@ class ThemeEditorWindow(QMainWindow):
                 # Draw rounded end caps for solid color arc
                 if rounded_ends:
                     cap_radius = arc_width // 2
-                    radial_offset = -7
+                    radial_offset = -(arc_width // 2)
                     # Start cap
                     start_x = x + (arc_radius + radial_offset) * math.cos(math.radians(135))
                     start_y = y + (arc_radius + radial_offset) * math.sin(math.radians(135))
@@ -3534,468 +4814,115 @@ class ThemeEditorWindow(QMainWindow):
         # Composite onto main image
         img.alpha_composite(overlay)
 
-    def render_analog_clock_rgba(self, img, element, color_opacity, bg_opacity):
-        """Render analog clock with opacity support."""
-        import math
-        import datetime
-
+    def render_gauge_circle_dmd_rgba(self, img, element, font, color_opacity, bg_opacity):
+        """Segmented ring gauge (DMD) rendered with PIL, mirroring draw_gauge_circle_dmd."""
         x, y = element.x, element.y
-        radius = element.radius
+        radius = max(1, int(getattr(element, 'radius', 7)))
+        line_width = max(1, int(getattr(element, 'line_width', 2)))
+        max_value = max(float(getattr(element, 'max_value', 100) or 100), 0.0001)
+        ratio = max(0.0, min(1.0, float(getattr(element, 'value', 50)) / max_value))
+        segments = max(3, int(getattr(element, 'segments', 24) or 24))
 
-        # Get options
-        show_seconds = getattr(element, 'show_seconds_hand', True)
-        show_border = getattr(element, 'show_clock_border', True)
-        face_style = getattr(element, 'clock_face_style', 'numbers')
-        smooth = getattr(element, 'smooth_animation', True)
-
-        # Get current time
-        now = datetime.datetime.now()
-        hours = now.hour % 12
-        minutes = now.minute
-        seconds = now.second
-        microseconds = now.microsecond
-
-        if smooth:
-            second_angle = (seconds + microseconds / 1000000) * 6
-            minute_angle = (minutes + seconds / 60) * 6
-            hour_angle = (hours + minutes / 60) * 30
-        else:
-            second_angle = seconds * 6
-            minute_angle = minutes * 6
-            hour_angle = hours * 30 + minutes * 0.5
-
-        # Create overlay for drawing with transparency
         overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
 
-        # Get colors
-        color_rgba = hex_to_rgba(element.color, color_opacity)
-        bg_rgba = hex_to_rgba(element.background_color, bg_opacity)
+        color = hex_to_rgba(element.color, color_opacity)
+        empty = hex_to_rgba(element.background_color, bg_opacity)
 
-        # Draw clock face background
-        if show_border:
-            draw.ellipse(
-                [x - radius, y - radius, x + radius, y + radius],
-                fill=bg_rgba, outline=color_rgba, width=2
-            )
-        else:
-            draw.ellipse(
-                [x - radius, y - radius, x + radius, y + radius],
-                fill=bg_rgba
-            )
+        seg_span = 270.0 / segments
+        dash = 0.62
+        filled = ratio * segments
+        box = [x - radius, y - radius, x + radius, y + radius]
+        for i in range(segments):
+            a0 = -45.0 + i * seg_span
+            a1 = a0 + seg_span * dash
+            fill = color if (i + 0.5) <= filled else empty
+            draw.arc(box, start=a0, end=a1, fill=fill, width=line_width)
 
-        # Get font for numbers
-        font = self.get_pil_font(element, int(getattr(element, 'font_size', 14) * 0.8))
+        text = element.text or ""
+        if text:
+            text_color = hex_to_rgba(getattr(element, 'text_color', element.color),
+                                     getattr(element, 'text_color_opacity', 100))
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text((x - tw / 2 - bbox[0], y - th / 2 - bbox[1]),
+                      text, font=font, fill=text_color)
 
-        # Draw tick marks or numbers
-        for i in range(12):
-            angle_rad = math.radians(i * 30 - 90)
-
-            if face_style == 'numbers':
-                num = i if i > 0 else 12
-                text = str(num)
-                bbox = draw.textbbox((0, 0), text, font=font)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
-
-                text_radius = radius * 0.78
-                tx = x + text_radius * math.cos(angle_rad) - text_width / 2
-                ty = y + text_radius * math.sin(angle_rad) - text_height / 2
-
-                draw.text((tx, ty), text, fill=color_rgba, font=font)
-
-            elif face_style == 'ticks':
-                inner_radius = radius * 0.85
-                outer_radius = radius * 0.95
-
-                if i % 3 == 0:
-                    inner_radius = radius * 0.75
-                    tick_width = 3
-                else:
-                    tick_width = 1
-
-                x1 = x + inner_radius * math.cos(angle_rad)
-                y1 = y + inner_radius * math.sin(angle_rad)
-                x2 = x + outer_radius * math.cos(angle_rad)
-                y2 = y + outer_radius * math.sin(angle_rad)
-
-                draw.line([(x1, y1), (x2, y2)], fill=color_rgba, width=tick_width)
-
-        # Draw hour hand
-        hour_length = radius * 0.5
-        hour_rad = math.radians(hour_angle - 90)
-        hx = x + hour_length * math.cos(hour_rad)
-        hy = y + hour_length * math.sin(hour_rad)
-        draw.line([(x, y), (hx, hy)], fill=color_rgba, width=4)
-
-        # Draw minute hand
-        minute_length = radius * 0.7
-        minute_rad = math.radians(minute_angle - 90)
-        mx = x + minute_length * math.cos(minute_rad)
-        my = y + minute_length * math.sin(minute_rad)
-        draw.line([(x, y), (mx, my)], fill=color_rgba, width=3)
-
-        # Draw second hand (optional)
-        if show_seconds:
-            second_length = radius * 0.85
-            second_rad = math.radians(second_angle - 90)
-            sx = x + second_length * math.cos(second_rad)
-            sy = y + second_length * math.sin(second_rad)
-            # Red second hand
-            second_rgba = (255, 80, 80, int(255 * color_opacity / 100))
-            draw.line([(x, y), (sx, sy)], fill=second_rgba, width=2)
-
-        # Draw center dot
-        center_radius = 4
-        draw.ellipse(
-            [x - center_radius, y - center_radius, x + center_radius, y + center_radius],
-            fill=color_rgba
-        )
-
-        # Composite onto main image
         img.alpha_composite(overlay)
 
-    def render_circle_gauge(self, draw, element, font, font_small):
+    def render_segmented_bar_rgba(self, img, element, color_opacity, bg_opacity):
+        """Horizontal segmented bar (DMD) rendered with PIL."""
         x, y = element.x, element.y
-        radius = element.radius
-        value = element.value
+        width = int(element.width)
+        height = int(element.height)
+        segments = max(1, int(getattr(element, 'segments', 8) or 8))
+        gap = max(0, int(getattr(element, 'gap', 1)))
+        max_value = max(float(getattr(element, 'max_value', 100) or 100), 0.0001)
+        ratio = max(0.0, min(1.0, float(getattr(element, 'value', 0)) / max_value))
 
-        # Check for gradient fill
-        use_gradient = getattr(element, 'gradient_fill', False)
-        if use_gradient:
-            gradient_stops = getattr(element, 'gradient_stops', [(0.0, "#00ff96"), (1.0, "#ff4444")])
-            color = self.interpolate_gradient_color(gradient_stops, value / 100.0)
-        else:
-            auto_color = getattr(element, 'auto_color_change', True)
-            if auto_color:
-                if "temp" in element.source:
-                    if value < 60:
-                        color = element.color
-                    elif value < 80:
-                        color = "#ffcc00"
-                    else:
-                        color = "#ff3232"
-                else:
-                    if value < 70:
-                        color = element.color
-                    elif value < 90:
-                        color = "#ffcc00"
-                    else:
-                        color = "#ff3232"
-            else:
-                color = element.color
+        overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
 
-        arc_width = 18
-        for i in range(arc_width):
-            r = radius - i
-            draw.arc(
-                [x - r, y - r, x + r, y + r],
-                start=135, end=405,
-                fill=element.background_color, width=2
-            )
+        color = hex_to_rgba(element.color, color_opacity)
+        empty = hex_to_rgba(element.color_empty, getattr(element, 'color_empty_opacity', 100))
+        outline = hex_to_rgba(element.color, max(0, color_opacity * 45 // 100))
 
-        sweep = 270 * min(value, 100) / 100
-        end_angle = 135 + sweep
+        total_gap = gap * (segments - 1)
+        seg_w = max(1.0, (width - total_gap) / segments)
+        filled = ratio * segments
+        for i in range(segments):
+            sx = x + i * (seg_w + gap)
+            fill = color if (i + 0.5) <= filled else empty
+            draw.rectangle([sx, y, sx + seg_w, y + height], fill=fill, outline=outline)
+        draw.rectangle([x, y, x + width, y + height], outline=outline)
 
-        for i in range(arc_width):
-            r = radius - i
-            draw.arc(
-                [x - r, y - r, x + r, y + r],
-                start=135, end=end_angle,
-                fill=color, width=2
-            )
+        img.alpha_composite(overlay)
 
-        value_text = get_value_with_unit(value, element.source, getattr(element, 'temp_hide_unit', False))
-        bbox = draw.textbbox((0, 0), value_text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        # Get value text color
-        value_text_color = getattr(element, 'text_color', element.color)
-        draw.text(
-            (x - text_width // 2, y - text_height // 2 - 10),
-            value_text, fill=value_text_color, font=font
-        )
+    def render_bar_chart_rgba(self, img, element, color_opacity, bg_opacity):
+        """History bar chart with scanline stripes (DMD) rendered with PIL."""
+        from canvas import add_bar_chart_value, get_bar_chart_history
 
-        # Get label text color
-        label_text_color = getattr(element, 'label_text_color', element.color)
-        bbox = draw.textbbox((0, 0), element.text, font=font_small)
-        text_width = bbox[2] - bbox[0]
-        draw.text(
-            (x - text_width // 2, y + radius // 3),
-            element.text, fill=label_text_color, font=font_small
-        )
-
-    def render_bar_gauge(self, draw, element, font):
         x, y = element.x, element.y
-        value = element.value
-        width, height = element.width, element.height
+        width = int(element.width)
+        height = int(element.height)
+        max_value = max(float(getattr(element, 'max_value', 100) or 100), 0.0001)
+        color = hex_to_rgba(element.color, color_opacity)
+        bg = hex_to_rgba(element.background_color, bg_opacity)
+        frame = hex_to_rgba(element.color, max(0, color_opacity * 60 // 100))
 
-        use_gradient = getattr(element, 'gradient_fill', False)
+        overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
 
-        if not use_gradient:
-            auto_color = getattr(element, 'auto_color_change', True)
-            if auto_color:
-                if value < 70:
-                    color = element.color
-                elif value < 90:
-                    color = "#ffcc00"
-                else:
-                    color = "#ff3232"
-            else:
-                color = element.color
+        if getattr(element, 'show_background', True):
+            draw.rectangle([x, y, x + width, y + height], fill=bg)
 
-        rounded = getattr(element, 'rounded_corners', False)
-        corner_radius = height // 2 if rounded else 0
+        add_bar_chart_value(element, element.value)
+        history = get_bar_chart_history(element)
 
-        # Draw background
-        if rounded:
-            draw.rounded_rectangle(
-                [x, y, x + width, y + height],
-                radius=corner_radius,
-                fill=element.background_color
-            )
-        else:
-            draw.rectangle(
-                [x, y, x + width, y + height],
-                fill=element.background_color
-            )
+        bars = int(getattr(element, 'segments', 0) or 0)
+        if bars <= 0:
+            bars = max(1, width // 5)
+        gap = max(0, int(getattr(element, 'gap', 1)))
+        bar_w = max(1.0, (width - gap * (bars - 1)) / bars)
+        samples = history[-bars:]
+        if len(samples) < bars:
+            samples = [0.0] * (bars - len(samples)) + samples
 
-        # Draw fill
-        fill_width = int(width * min(value, 100) / 100)
-        if fill_width > 0:
-            if use_gradient:
-                # Use horizontal gradient from gradient stops - optimized with NumPy
-                gradient_stops = getattr(element, 'gradient_stops', [(0.0, "#00ff96"), (1.0, "#ff4444")])
+        stripe = (int(color[0] * 0.3), int(color[1] * 0.3), int(color[2] * 0.3), color[3])
+        for i, sample in enumerate(samples):
+            r = max(0.0, min(1.0, float(sample) / max_value))
+            bh = max(1.0, r * max(1, height - 2))
+            bx = x + i * (bar_w + gap)
+            by = y + height - bh
+            draw.rectangle([bx, by, bx + bar_w, y + height], fill=color)
+            stripe_y = by + 2
+            while stripe_y < y + height:
+                draw.line([bx, stripe_y, bx + bar_w, stripe_y], fill=stripe, width=1)
+                stripe_y += 3
 
-                # Create full-width gradient once and crop to fill_width
-                gradient_img = self.create_horizontal_gradient(width, height, gradient_stops, 100)
-                # Crop to fill_width and paste
-                if fill_width < width:
-                    gradient_img = gradient_img.crop((0, 0, int(fill_width), int(height)))
-                # Access underlying image from draw object
-                draw._image.paste(gradient_img, (int(x), int(y)), gradient_img)
+        draw.rectangle([x, y, x + width, y + height], outline=frame)
 
-            else:
-                if rounded:
-                    draw.rounded_rectangle(
-                        [x, y, x + fill_width, y + height],
-                        radius=corner_radius,
-                        fill=color
-                    )
-                else:
-                    draw.rectangle(
-                        [x, y, x + fill_width, y + height],
-                        fill=color
-                    )
-
-        # Draw border if enabled
-        bar_border = getattr(element, 'bar_border', False)
-        if bar_border:
-            border_width = getattr(element, 'bar_border_width', 2)
-            border_color = getattr(element, 'bar_border_color', '#ffffff')
-            border_position = getattr(element, 'bar_border_position', 'center')
-
-            half_border = border_width / 2
-
-            # Calculate offset based on border position
-            # PIL draws stroke INSIDE the bounding box (not centered like Qt)
-            if border_position == "inside":
-                # Stroke entirely inside element - box at element boundary
-                bx1, by1 = int(x), int(y)
-                bx2, by2 = int(x + width), int(y + height)
-                bradius = corner_radius
-            elif border_position == "center":
-                # Stroke centered on element boundary - expand box by half_border
-                bx1, by1 = int(x - half_border), int(y - half_border)
-                bx2, by2 = int(x + width + half_border), int(y + height + half_border)
-                bradius = int(corner_radius + half_border)
-            else:  # outside
-                # Stroke entirely outside element - expand box by full border_width
-                bx1, by1 = int(x - border_width), int(y - border_width)
-                bx2, by2 = int(x + width + border_width), int(y + height + border_width)
-                bradius = int(corner_radius + border_width)
-
-            if rounded:
-                draw.rounded_rectangle(
-                    [bx1, by1, bx2, by2],
-                    radius=bradius,
-                    outline=border_color,
-                    width=border_width
-                )
-            else:
-                draw.rectangle(
-                    [bx1, by1, bx2, by2],
-                    outline=border_color,
-                    width=border_width
-                )
-
-        # Draw text based on bar_text_mode and bar_text_position
-        bar_text_mode = getattr(element, 'bar_text_mode', 'full')
-        bar_text_position = getattr(element, 'bar_text_position', 'inside')
-
-        if bar_text_mode != 'none':
-            value_text = get_value_with_unit(value, element.source, getattr(element, 'temp_hide_unit', False))
-
-            # Value font
-            value_font = self.get_pil_font(element, element.font_size)
-            # Label font (separate styling)
-            label_font = self.get_pil_font_custom(
-                getattr(element, 'label_font_family', element.font_family),
-                getattr(element, 'label_font_bold', element.font_bold),
-                getattr(element, 'label_font_italic', element.font_italic),
-                getattr(element, 'label_font_size', element.font_size)
-            )
-
-            # Text colors
-            value_text_color = getattr(element, 'text_color', element.color)
-            label_text_color = getattr(element, 'label_text_color', element.color)
-
-            if bar_text_position == 'inside':
-                if bar_text_mode == 'full':
-                    # Draw label and value separately, centered with bar
-                    label_text = f"{element.text} "
-                    bbox_label = draw.textbbox((0, 0), label_text, font=label_font)
-                    label_width = bbox_label[2] - bbox_label[0]
-
-                    bbox_value = draw.textbbox((0, 0), value_text, font=value_font)
-                    value_width = bbox_value[2] - bbox_value[0]
-
-                    total_width = label_width + value_width
-                    start_x = x + (width - total_width) // 2
-                    center_y = y + height // 2
-
-                    draw.text((start_x, center_y), label_text, fill=label_text_color, font=label_font, anchor="lm")
-                    draw.text((start_x + label_width, center_y), value_text, fill=value_text_color, font=value_font, anchor="lm")
-                elif bar_text_mode == 'value_only':
-                    bbox = draw.textbbox((0, 0), value_text, font=value_font)
-                    text_width = bbox[2] - bbox[0]
-                    text_x = x + (width - text_width) // 2
-                    center_y = y + height // 2
-                    draw.text((text_x, center_y), value_text, fill=value_text_color, font=value_font, anchor="lm")
-                elif bar_text_mode == 'label_only':
-                    bbox = draw.textbbox((0, 0), element.text, font=label_font)
-                    text_width = bbox[2] - bbox[0]
-                    text_x = x + (width - text_width) // 2
-                    center_y = y + height // 2
-                    draw.text((text_x, center_y), element.text, fill=label_text_color, font=label_font, anchor="lm")
-
-            elif bar_text_position == 'left':
-                if bar_text_mode == 'full':
-                    # Draw label and value separately, centered with bar
-                    label_text = f"{element.text} "
-                    bbox_label = draw.textbbox((0, 0), label_text, font=label_font)
-                    label_width = bbox_label[2] - bbox_label[0]
-
-                    bbox_value = draw.textbbox((0, 0), value_text, font=value_font)
-                    value_width = bbox_value[2] - bbox_value[0]
-
-                    total_width = label_width + value_width
-                    start_x = x - total_width - 10
-                    center_y = y + height // 2
-
-                    draw.text((start_x, center_y), label_text, fill=label_text_color, font=label_font, anchor="lm")
-                    draw.text((start_x + label_width, center_y), value_text, fill=value_text_color, font=value_font, anchor="lm")
-                elif bar_text_mode == 'value_only':
-                    bbox = draw.textbbox((0, 0), value_text, font=value_font)
-                    text_width = bbox[2] - bbox[0]
-                    text_x = x - text_width - 10
-                    center_y = y + height // 2
-                    draw.text((text_x, center_y), value_text, fill=value_text_color, font=value_font, anchor="lm")
-                elif bar_text_mode == 'label_only':
-                    bbox = draw.textbbox((0, 0), element.text, font=label_font)
-                    text_width = bbox[2] - bbox[0]
-                    text_x = x - text_width - 10
-                    center_y = y + height // 2
-                    draw.text((text_x, center_y), element.text, fill=label_text_color, font=label_font, anchor="lm")
-
-            elif bar_text_position == 'right':
-                if bar_text_mode == 'full':
-                    # Draw label and value separately, centered with bar
-                    label_text = f"{element.text} "
-                    bbox_label = draw.textbbox((0, 0), label_text, font=label_font)
-                    label_width = bbox_label[2] - bbox_label[0]
-
-                    start_x = x + width + 10
-                    center_y = y + height // 2
-
-                    draw.text((start_x, center_y), label_text, fill=label_text_color, font=label_font, anchor="lm")
-                    draw.text((start_x + label_width, center_y), value_text, fill=value_text_color, font=value_font, anchor="lm")
-                elif bar_text_mode == 'value_only':
-                    text_x = x + width + 10
-                    center_y = y + height // 2
-                    draw.text((text_x, center_y), value_text, fill=value_text_color, font=value_font, anchor="lm")
-                elif bar_text_mode == 'label_only':
-                    text_x = x + width + 10
-                    center_y = y + height // 2
-                    draw.text((text_x, center_y), element.text, fill=label_text_color, font=label_font, anchor="lm")
-
-            elif bar_text_position == 'top':
-                if bar_text_mode == 'full':
-                    # Label and value inline above bar with 16px padding
-                    label_text = f"{element.text} "
-                    bbox_label = draw.textbbox((0, 0), label_text, font=label_font)
-                    label_width = bbox_label[2] - bbox_label[0]
-                    label_height = bbox_label[3] - bbox_label[1]
-
-                    bbox_value = draw.textbbox((0, 0), value_text, font=value_font)
-                    value_width = bbox_value[2] - bbox_value[0]
-                    value_height = bbox_value[3] - bbox_value[1]
-
-                    total_width = label_width + value_width
-                    max_height = max(label_height, value_height)
-                    start_x = x + (width - total_width) // 2
-                    center_y = y - 16 - max_height // 2
-
-                    draw.text((start_x, center_y), label_text, fill=label_text_color, font=label_font, anchor="lm")
-                    draw.text((start_x + label_width, center_y), value_text, fill=value_text_color, font=value_font, anchor="lm")
-                elif bar_text_mode == 'value_only':
-                    bbox = draw.textbbox((0, 0), value_text, font=value_font)
-                    text_width = bbox[2] - bbox[0]
-                    text_height = bbox[3] - bbox[1]
-                    text_x = x + (width - text_width) // 2
-                    center_y = y - 16 - text_height // 2
-                    draw.text((text_x, center_y), value_text, fill=value_text_color, font=value_font, anchor="lm")
-                elif bar_text_mode == 'label_only':
-                    bbox = draw.textbbox((0, 0), element.text, font=label_font)
-                    text_width = bbox[2] - bbox[0]
-                    text_height = bbox[3] - bbox[1]
-                    text_x = x + (width - text_width) // 2
-                    center_y = y - 16 - text_height // 2
-                    draw.text((text_x, center_y), element.text, fill=label_text_color, font=label_font, anchor="lm")
-
-            elif bar_text_position == 'bottom':
-                if bar_text_mode == 'full':
-                    # Label and value inline below bar with 16px padding
-                    label_text = f"{element.text} "
-                    bbox_label = draw.textbbox((0, 0), label_text, font=label_font)
-                    label_width = bbox_label[2] - bbox_label[0]
-                    label_height = bbox_label[3] - bbox_label[1]
-
-                    bbox_value = draw.textbbox((0, 0), value_text, font=value_font)
-                    value_width = bbox_value[2] - bbox_value[0]
-                    value_height = bbox_value[3] - bbox_value[1]
-
-                    total_width = label_width + value_width
-                    max_height = max(label_height, value_height)
-                    start_x = x + (width - total_width) // 2
-                    center_y = y + height + 16 + max_height // 2
-
-                    draw.text((start_x, center_y), label_text, fill=label_text_color, font=label_font, anchor="lm")
-                    draw.text((start_x + label_width, center_y), value_text, fill=value_text_color, font=value_font, anchor="lm")
-                elif bar_text_mode == 'value_only':
-                    bbox = draw.textbbox((0, 0), value_text, font=value_font)
-                    text_width = bbox[2] - bbox[0]
-                    text_height = bbox[3] - bbox[1]
-                    text_x = x + (width - text_width) // 2
-                    center_y = y + height + 16 + text_height // 2
-                    draw.text((text_x, center_y), value_text, fill=value_text_color, font=value_font, anchor="lm")
-                elif bar_text_mode == 'label_only':
-                    bbox = draw.textbbox((0, 0), element.text, font=label_font)
-                    text_width = bbox[2] - bbox[0]
-                    text_height = bbox[3] - bbox[1]
-                    text_x = x + (width - text_width) // 2
-                    center_y = y + height + 16 + text_height // 2
-                    draw.text((text_x, center_y), element.text, fill=label_text_color, font=label_font, anchor="lm")
+        img.alpha_composite(overlay)
 
     def image_to_jpeg(self, img, quality=80, subsampling=None):
         """Convert image to JPEG bytes with optimized settings."""
@@ -4078,6 +5005,13 @@ class ThemeEditorWindow(QMainWindow):
         except Exception as e:
             raise IOError(f"HID write failed: {e}")
 
+    def _clear_approved_actions(self):
+        """Borra la lista de comandos aprobados para el toque HDMI."""
+        settings.set_setting("approved_actions", {})
+        if hasattr(self, "approved_actions_label") and self.approved_actions_label:
+            self.approved_actions_label.setText("Approved commands: 0")
+        self.status_bar.showMessage("Approved commands cleared", 3000)
+
     def show_settings(self):
         """Show the settings dialog."""
         dialog = QDialog(self)
@@ -4153,6 +5087,26 @@ class ThemeEditorWindow(QMainWindow):
 
         layout.addWidget(color_group)
 
+        # HDMI touch interaction group
+        touch_group = QGroupBox("HDMI Touch")
+        touch_layout = QVBoxLayout(touch_group)
+
+        self.allow_actions_cb = QCheckBox(
+            "Enable element actions (touch on the HDMI monitor)")
+        self.allow_actions_cb.setChecked(
+            settings.get_setting("allow_element_actions", False))
+        touch_layout.addWidget(self.allow_actions_cb)
+
+        approved_count = len(settings.get_setting("approved_actions", {}) or {})
+        self.approved_actions_label = QLabel(f"Approved commands: {approved_count}")
+        touch_layout.addWidget(self.approved_actions_label)
+
+        clear_actions_btn = QPushButton("Clear approved commands")
+        clear_actions_btn.clicked.connect(self._clear_approved_actions)
+        touch_layout.addWidget(clear_actions_btn)
+
+        layout.addWidget(touch_group)
+
         # Buttons
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -4167,6 +5121,8 @@ class ThemeEditorWindow(QMainWindow):
             settings.set_setting("launch_minimized", self.launch_minimized_cb.isChecked())
             settings.set_setting("minimize_to_tray", self.minimize_to_tray_cb.isChecked())
             settings.set_setting("close_to_tray", self.close_to_tray_cb.isChecked())
+            settings.set_setting("allow_element_actions",
+                                 self.allow_actions_cb.isChecked())
 
             # LCD color correction
             self._lcd_brightness = self.lcd_brightness_slider.value() / 100.0
@@ -4210,6 +5166,9 @@ class ThemeEditorWindow(QMainWindow):
         # Apagar el webserver y su caché JPEG si están activos
         self._set_webserver_state(False)
 
+        # Cerrar la salida HDMI si estaba activa
+        self._shutdown_hdmi_output()
+
         self.disconnect_display()
 
         if self.perf_update_timer:
@@ -4236,7 +5195,7 @@ class ThemeEditorWindow(QMainWindow):
             event.ignore()
             self.hide()
             self.tray_icon.showMessage(
-                "Thermal Engine",
+                "Thermal Engine Studio",
                 "Application minimized to system tray. Right-click tray icon to quit.",
                 QSystemTrayIcon.MessageIcon.Information,
                 2000

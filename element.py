@@ -33,6 +33,14 @@ class ThemeElement:
         self.clip = kwargs.get("clip", False)
         self.source = kwargs.get("source", "static")
         self.value = kwargs.get("value", 50)
+        self.max_value = max(float(kwargs.get("max_value", 100)), 0.0001)
+        # Default arc thickness: 15 keeps the classic circle gauge look for themes
+        # saved before line_width existed; the DMD components pass their own value.
+        default_line_width = 15 if element_type == "circle_gauge" else 2
+        self.line_width = kwargs.get("line_width", default_line_width)
+        self.segments = kwargs.get("segments", 8)
+        self.gap = kwargs.get("gap", 1)
+        self.color_empty = kwargs.get("color_empty", "#1a1a2e")
         self.image_path = kwargs.get("image_path", "")
         self.scale_proportionally = kwargs.get("scale_proportionally", True)
         self.aspect_ratio = kwargs.get("aspect_ratio", 1.0)
@@ -90,12 +98,6 @@ class ThemeElement:
         self.show_seconds = kwargs.get("show_seconds", True)  # Show seconds
         self.show_leading_zero = kwargs.get("show_leading_zero", True)  # Show leading zero (09 vs 9)
 
-        # Analog clock options
-        self.show_seconds_hand = kwargs.get("show_seconds_hand", True)
-        self.show_clock_border = kwargs.get("show_clock_border", True)
-        self.clock_face_style = kwargs.get("clock_face_style", "numbers")  # "numbers", "ticks", "none"
-        self.smooth_animation = kwargs.get("smooth_animation", True)
-
         # Grouping
         self.group = kwargs.get("group", None)  # Group name, None if ungrouped
 
@@ -104,6 +106,14 @@ class ThemeElement:
 
         # Temperature display option
         self.temp_hide_unit = kwargs.get("temp_hide_unit", False)  # Show only ° instead of °C
+
+        # Interaction (HDMI touch): action executed when this element is tapped
+        # on the HDMI output window. Off by default and validated/approved by the
+        # app before running anything (see actions.py / security.py).
+        self.tap_action = kwargs.get("tap_action", "none")  # "none" | "command"
+        self.tap_command = kwargs.get("tap_command", "")
+        self.tap_args = list(kwargs.get("tap_args", []) or [])
+        self.tap_workdir = kwargs.get("tap_workdir", "")
 
     def to_dict(self):
         return {
@@ -134,6 +144,11 @@ class ThemeElement:
             "clip": self.clip,
             "source": self.source,
             "value": self.value,
+            "max_value": self.max_value,
+            "line_width": self.line_width,
+            "segments": self.segments,
+            "gap": self.gap,
+            "color_empty": self.color_empty,
             "image_path": self.image_path,
             "scale_proportionally": self.scale_proportionally,
             "aspect_ratio": self.aspect_ratio,
@@ -167,14 +182,14 @@ class ThemeElement:
             "show_am_pm": self.show_am_pm,
             "show_seconds": self.show_seconds,
             "show_leading_zero": self.show_leading_zero,
-            "show_seconds_hand": self.show_seconds_hand,
-            "show_clock_border": self.show_clock_border,
-            "clock_face_style": self.clock_face_style,
-            "smooth_animation": self.smooth_animation,
             "group": self.group,
             "locked": self.locked,
             "visible": self.visible,
-            "temp_hide_unit": self.temp_hide_unit
+            "temp_hide_unit": self.temp_hide_unit,
+            "tap_action": self.tap_action,
+            "tap_command": self.tap_command,
+            "tap_args": self.tap_args,
+            "tap_workdir": self.tap_workdir,
         }
 
     @classmethod

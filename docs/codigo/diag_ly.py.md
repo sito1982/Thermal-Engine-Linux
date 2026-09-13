@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "diag_ly.py"
-source_sha256: a0373d555671a4de7d450791638eff89b384ff23aeb4994a9875e7c8dde0362d
-source_bytes: 597
-source_lines: 20
+source_sha256: 0edfbd39fdf09d44a5fe042aad9547d115a0426f551e018c3828e483ab26f3ad
+source_bytes: 576
+source_lines: 18
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -18,8 +18,7 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 ### Imports directos
 
-- `import sys`
-- `import os`
+Ninguna declaración de importación directa de primer nivel.
 
 ### Clases directas
 
@@ -32,8 +31,6 @@ Ninguna función declarada directamente en el módulo.
 ## Código fuente íntegro
 
 ```python
-import sys
-import os
 try:
     from device_ly import LYDevice
     print("[DIAG] Importación de device_ly: OK")

@@ -19,6 +19,14 @@ Thermal Engine Studio es una aplicación de escritorio (Python + Qt/PySide6) par
 | **HDMI** | Monitor externo a pantalla completa, a su resolución nativa. |
 | **Web** | Servidor local bajo demanda con la imagen renderizada y panel de control. |
 
+### Capturas
+
+![Editor de Thermal Engine Studio con un tema LCD](assets/screenshots/editor-lcd.png)
+
+| Asistente *New Project* | Combo de elementos (Simple / Complex) |
+|---|---|
+| ![Asistente New Project](assets/screenshots/new-project.png) | ![Combo de elementos](assets/screenshots/element-combo.png) |
+
 ### Características principales
 
 - **Proyectos multi-destino** con asistente **New Project…** (dispositivo → configuración) y opción de **añadir dispositivos** a un proyecto existente. Los destinos DMD y HDMI tienen **toggle** para pausar/reanudar su salida sin salir del editor.
@@ -48,6 +56,8 @@ Thermal Engine Studio es una aplicación de escritorio (Python + Qt/PySide6) par
 - Lienzo a resolución DMD nativa: **128×32**, 128×64, 192×64, 256×64 y 320×132.
 - Elementos y tipografías pensados para pixel-art (fuentes tipo *Matrix Sans*).
 - Envío de frames **RGB565 little-endian** por **TCP** (puerto **8889**), cabecera `AA 55 <ancho> <alto>`, sin ACK (*fire & forget*), desde un hilo dedicado con *backoff*.
+
+![Editor DMD con los componentes DMD](assets/screenshots/editor-dmd.png)
 
 El receptor es el firmware del proyecto **[sito1982/RetroPixelLED-ThermalEngine](https://github.com/sito1982/RetroPixelLED-ThermalEngine)**, que implementa el protocolo de **imagen externa** del panel: mientras recibe el *stream* interrumpe los GIFs y pinta los frames al instante; al cesar el envío vuelve solo a la playlist (timeout `IMAGE_TIMEOUT`, por defecto 1000 ms). El toggle **DMD** del editor pausa y reanuda ese *stream*.
 
@@ -179,6 +189,14 @@ Thermal Engine Studio is a desktop application (Python + Qt/PySide6) to build an
 | **HDMI** | External monitor, full screen at native resolution. |
 | **Web** | On-demand local server with the rendered image and a control panel. |
 
+### Screenshots
+
+![Thermal Engine Studio editor with an LCD theme](assets/screenshots/editor-lcd.png)
+
+| *New Project* wizard | Element combo (Simple / Complex) |
+|---|---|
+| ![New Project wizard](assets/screenshots/new-project.png) | ![Element combo](assets/screenshots/element-combo.png) |
+
 ### Main features
 
 - **Multi-target projects** with a **New Project…** wizard (device → config) and the ability to **add devices** to an existing project. DMD and HDMI have a **toggle** to pause/resume their output without leaving the editor.
@@ -208,6 +226,8 @@ Thermal Engine Studio is a desktop application (Python + Qt/PySide6) to build an
 - Canvas at native DMD resolution: **128×32**, 128×64, 192×64, 256×64 and 320×132.
 - Pixel-art oriented elements and fonts (*Matrix Sans*-style).
 - Frames are sent as **little-endian RGB565** over **TCP** (port **8889**), header `AA 55 <width> <height>`, no ACK (*fire & forget*), from a dedicated thread with *backoff*.
+
+![DMD editor with the DMD components](assets/screenshots/editor-dmd.png)
 
 The receiver is the firmware from **[sito1982/RetroPixelLED-ThermalEngine](https://github.com/sito1982/RetroPixelLED-ThermalEngine)**, which implements the panel's **external image** protocol: while it receives the stream it interrupts the GIFs and paints frames instantly; when the stream stops it returns to the playlist on its own (`IMAGE_TIMEOUT`, 1000 ms by default). The editor's **DMD** toggle pauses and resumes that stream.
 

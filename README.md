@@ -2,6 +2,8 @@
 
 **🇪🇸 Español** · [🇬🇧 English](#english)
 
+[![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=sito1982&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/sito1982)
+
 Editor visual de temas para pantallas de monitorización: LCD USB (refrigeración AIO), paneles LED **DMD** (ESP32), monitores **HDMI** y **preview web**. Diseñas el tema con un lienzo visual y Thermal Engine Studio lo renderiza en tiempo real con datos de sensores del sistema.
 
 ---
@@ -243,7 +245,13 @@ Todas las opciones también se ajustan desde la interfaz; los cambios se guardan
 - **`Failed to connect: open failed`** — reglas udev no instaladas o el usuario no está en `plugdev`; reconecta el LCD y cierra cualquier software TRCC.
 - **`[LY] Handshake error: ... Operation timed out`** — suele resolverse tras el primer *handshake* correcto; si persiste, reconecta el cable USB.
 - **DMD sin imagen** — verifica IP/puerto (`:8889`) y que el panel ejecuta el firmware RetroPixelLED-ThermalEngine; el toggle DMD debe estar activo.
-- **HDMI no aparece** — usa **Actualizar** en la pestaña HDMI para redetectar monitores.
+- **HDMI no aparece** — revisa el monitor seleccionado en la pestaña HDMI (se redetectan al conectar/desconectar).
+
+### Apoya el proyecto
+
+Si **Thermal Engine Studio** te resulta útil, puedes invitarme a un café ❤️
+
+[![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=sito1982&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/sito1982)
 
 ### Créditos
 
@@ -494,7 +502,13 @@ All options are also adjustable from the UI; changes are saved automatically.
 - **`Failed to connect: open failed`** — udev rules not installed or user not in `plugdev`; reconnect the LCD and close any TRCC software.
 - **`[LY] Handshake error: ... Operation timed out`** — usually resolves after the first successful handshake; if it persists, reconnect the USB cable.
 - **No DMD image** — check IP/port (`:8889`) and that the panel runs the RetroPixelLED-ThermalEngine firmware; the DMD toggle must be enabled.
-- **HDMI not showing** — use **Refresh** in the HDMI tab to re-detect monitors.
+- **HDMI not showing** — check the monitor selected in the HDMI tab (they are re-detected on connect/disconnect).
+
+### Support
+
+If **Thermal Engine Studio** is useful to you, you can buy me a coffee ❤️
+
+[![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=sito1982&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/sito1982)
 
 ### Credits
 

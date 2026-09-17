@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "icons_panel.py"
-source_sha256: 4471235a70add89d4762aad060ba72b663c7e710c8669cf3ffc42a3fb3e1a1f5
-source_bytes: 4056
-source_lines: 120
+source_sha256: e75e8fd36a930da60fa7cc220dac76e8bda6a1f342b98fc1f292d06b156b7060
+source_bytes: 4447
+source_lines: 131
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -157,16 +157,27 @@ class IconsPanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        container = QWidget()
-        grid = QGridLayout(container)
-        grid.setContentsMargins(0, 4, 0, 4)
-        grid.setSpacing(6)
+        self._container = QWidget()
+        self._grid = QGridLayout(self._container)
+        self._grid.setContentsMargins(0, 4, 0, 4)
+        self._grid.setSpacing(6)
+        scroll.setWidget(self._container)
+        layout.addWidget(scroll, 1)
+        self.refresh()
+
+    def refresh(self):
+        """Re-escanea la carpeta icons/ y reconstruye la rejilla."""
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
         for index, name in enumerate(available_icons()):
             pixmap = QPixmap(os.path.join(ICONS_DIR, name))
             thumb = IconThumbnail(name, pixmap)
             thumb.clicked.connect(self.icon_selected)
-            grid.addWidget(thumb, index // 2, index % 2)
-        grid.setRowStretch(grid.rowCount(), 1)
-        scroll.setWidget(container)
-        layout.addWidget(scroll, 1)
+            self._grid.addWidget(thumb, index // 2, index % 2)
+        self._grid.setRowStretch(self._grid.rowCount(), 1)
+
 ```

@@ -62,6 +62,9 @@ presets/*
 !presets/Default.png
 !presets/Theme Horizontal.json
 
+# Tema local con datos de despliegue (IP del Lite); no se versiona
+Nas Server.json
+
 # Old/backup files
 *_old.py
 *.disabled
@@ -78,5 +81,3 @@ fotos/
 # Obsidian vault
 .obsidian/
 
-# Iconos de usuario (el elemento `icon` los carga en runtime; no se redistribuyen)
-icons/

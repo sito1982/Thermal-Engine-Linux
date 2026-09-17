@@ -1371,11 +1371,11 @@ class CanvasPreview(QWidget):
         height = max(1, int(element.height * self.scale))
         path = resolve_icon_path(getattr(element, "icon_name", ""))
         if not path:
-            painter.fillRect(x, y, width, height, QColor(40, 40, 60))
+            self._draw_missing_icon(painter, x, y, width, height)
             return
         image = QImage(path)
         if image.isNull():
-            painter.fillRect(x, y, width, height, QColor(40, 40, 60))
+            self._draw_missing_icon(painter, x, y, width, height)
             return
         if getattr(element, "tint", False):
             tinted = QImage(image.size(), QImage.Format.Format_ARGB32)
@@ -1393,6 +1393,18 @@ class CanvasPreview(QWidget):
         pixmap = pixmap.scaled(width, height, ratio,
                                Qt.TransformationMode.SmoothTransformation)
         painter.drawPixmap(x, y, pixmap)
+
+    def _draw_missing_icon(self, painter, x, y, width, height):
+        """Marcador visible cuando falta el fichero del icono."""
+        painter.fillRect(x, y, width, height, QColor(42, 42, 58))
+        painter.save()
+        pen = QPen(QColor(150, 150, 170), 2, Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(x, y, width - 1, height - 1)
+        painter.drawText(QRectF(x, y, width, height),
+                         Qt.AlignmentFlag.AlignCenter, "?")
+        painter.restore()
 
     def get_element_bounds(self, element):
         """Get the bounding rectangle for an element."""

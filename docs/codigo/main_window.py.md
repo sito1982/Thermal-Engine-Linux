@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "main_window.py"
-source_sha256: 2eac20bdbd119fb71da2d46cb68066c3ff22d92eb733eb6d533ddd68fa616ff3
-source_bytes: 332384
-source_lines: 7516
+source_sha256: 9e6f63e64a231baf6b03833e4d533500842c9a9a01e7a3666b06c445a7a74775
+source_bytes: 335176
+source_lines: 7579
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -1378,6 +1378,7 @@ class ThemeEditorWindow(QMainWindow):
         self.left_tabs.addTab(self.element_list, "Elements")
         self.left_tabs.addTab(self.icons_panel, "Icons")
         self.left_tabs.addTab(self.widgets_panel, "Widgets")
+        self.left_tabs.currentChanged.connect(self._on_left_tab_changed)
         left_lay.addWidget(self.left_tabs, 1)
 
         # PresetsPanel sigue existiendo (save/load preset por defecto) pero ya
@@ -3946,6 +3947,11 @@ class ThemeEditorWindow(QMainWindow):
             shortcut.activated.connect(slot)
             self._canvas_shortcuts.append(shortcut)
 
+    def _on_left_tab_changed(self, index):
+        """Al abrir la pestaña Icons, re-escanea la carpeta icons/."""
+        if self.left_tabs.widget(index) is getattr(self, "icons_panel", None):
+            self.icons_panel.refresh()
+
     def refresh_canvas(self):
         """Refresh canvas - debounced to prevent rapid successive updates."""
         # Use a short timer to batch multiple rapid changes into one update
@@ -4900,6 +4906,35 @@ class ThemeEditorWindow(QMainWindow):
             settings.set_setting("startup_theme_path", path)
 
         self.fit_canvas()
+
+        missing = self._missing_icon_count()
+        if missing:
+            self.status_bar.showMessage(
+                f"{missing} icon(s) not found (check the icons/ folder)", 6000)
+
+    def _missing_icon_count(self):
+        """Cuenta iconos referenciados cuyo fichero no existe en icons/."""
+        missing = 0
+        seen = set()
+
+        def scan(elements):
+            nonlocal missing
+            for element in elements or []:
+                if getattr(element, "type", "") != "icon":
+                    continue
+                name = getattr(element, "icon_name", "")
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                if resolve_icon_path(name) is None:
+                    missing += 1
+
+        scan(self.lcd_elements)
+        scan(self.hdmi_elements)
+        scan(self.custom_elements)
+        for screen in list(self.hdmi_screens) + list(self.custom_screens):
+            scan(screen.elements)
+        return missing
 
     def save_theme(self):
         if self.theme_path:
@@ -7279,10 +7314,37 @@ class ThemeEditorWindow(QMainWindow):
             overlay.putalpha(alpha)
         img.alpha_composite(overlay, (int(element.x), int(element.y)))
 
+    def _render_missing_icon(self, img, element, color_opacity=100):
+        """Marcador (PIL) cuando falta el fichero del icono."""
+        from PIL import ImageDraw
+
+        from lcd_widgets import get_font
+
+        x, y = int(element.x), int(element.y)
+        w = max(1, int(element.width))
+        h = max(1, int(element.height))
+        draw = ImageDraw.Draw(img)
+        fill = (42, 42, 58, int(255 * color_opacity / 100))
+        draw.rectangle([x, y, x + w - 1, y + h - 1], fill=fill)
+        outline = (150, 150, 170, int(230 * color_opacity / 100))
+        for i in range(0, max(w, h), 6):
+            draw.line([(x + i, y), (min(x + i + 3, x + w - 1), y)], fill=outline)
+            draw.line([(x + i, y + h - 1), (min(x + i + 3, x + w - 1), y + h - 1)],
+                      fill=outline)
+        for i in range(0, max(w, h), 6):
+            draw.line([(x, y + i), (x, min(y + i + 3, y + h - 1))], fill=outline)
+            draw.line([(x + w - 1, y + i), (x + w - 1, min(y + i + 3, y + h - 1))],
+                      fill=outline)
+        font = get_font(getattr(element, "font_family", "Liberation Mono") or "Liberation Mono",
+                        max(10, int(min(w, h) * 0.5)))
+        draw.text((x + w / 2, y + h / 2), "?", font=font,
+                  fill=(200, 200, 220, int(255 * color_opacity / 100)), anchor="mm")
+
     def render_icon_rgba(self, img, element, color_opacity):
         """Render an Icon element (PIL path) loaded from the icons/ folder."""
         path = resolve_icon_path(getattr(element, "icon_name", ""))
         if not path:
+            self._render_missing_icon(img, element, color_opacity)
             return
         try:
             with open(path, "rb") as handle:
@@ -7305,6 +7367,7 @@ class ThemeEditorWindow(QMainWindow):
             img.alpha_composite(overlay, (int(element.x), int(element.y)))
         except Exception as e:  # noqa: BLE001
             print(f"Icon load error: {e}")
+            self._render_missing_icon(img, element, color_opacity)
 
     def render_video_rgba(self, img, element):
         """Render a ``video`` element frame fitted to its rectangle."""

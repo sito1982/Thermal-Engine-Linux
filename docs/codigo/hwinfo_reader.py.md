@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "hwinfo_reader.py"
-source_sha256: cc305c5267807babad7a93bf6f3364f6c4ea35508093e9531353e832575a59d6
-source_bytes: 16656
-source_lines: 485
+source_sha256: 5a723a013a27b83ed0f544c8a7461543f21bd98aca6681e47a55a86e4d3d52c2
+source_bytes: 19492
+source_lines: 556
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -457,6 +457,68 @@ class HWiNFOReader:
         reading = self.find_reading(patterns, SENSOR_TYPE_POWER)
         return reading['value'] if reading else 0.0
 
+    # --- Ventiladores, FPS y temperaturas auxiliares ----------------------
+    def _fan_rpm(self, patterns):
+        reading = self.find_reading(patterns, SENSOR_TYPE_FAN)
+        return reading['value'] if reading else 0.0
+
+    def get_cpu_fan(self):
+        return self._fan_rpm(['CPU Fan', 'CPU_FAN', 'CPU Fan Speed', 'CPU'])
+
+    def get_gpu_fan(self):
+        return self._fan_rpm(['GPU Fan', 'GPU_FAN', 'GPU Fan Speed'])
+
+    def get_gpu_fan_percent(self):
+        reading = self.find_reading(['GPU Fan', 'GPU Fan Speed'], SENSOR_TYPE_USAGE)
+        return reading['value'] if reading else 0.0
+
+    def get_sys_fan(self):
+        return self._fan_rpm(['System Fan', 'Sys Fan', 'Chassis Fan', 'Case Fan',
+                              'System', 'Chassis'])
+
+    def get_pump(self):
+        return self._fan_rpm(['Pump', 'AIO Pump', 'Water Pump'])
+
+    def get_game_fps(self):
+        """FPS de juego expuesto por RTSS a través de HWiNFO."""
+        for reading in self.get_all_readings():
+            label = (reading['label'] or '').lower()
+            sensor = (reading['sensor'] or '').lower()
+            if any(token in label or token in sensor
+                   for token in ('fps', 'framerate', 'frame rate')):
+                try:
+                    return float(reading['value'])
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
+
+    def get_gpu_memory_used(self):
+        reading = self.find_reading(
+            ['GPU Memory Usage', 'GPU Memory Allocated',
+             'GPU Dedicated Memory Usage'], SENSOR_TYPE_USAGE)
+        if not reading:
+            return 0.0
+        try:
+            value = float(reading['value'])
+        except (TypeError, ValueError):
+            return 0.0
+        unit = (reading.get('unit') or '').lower()
+        if 'mb' in unit:
+            return value / 1024.0
+        if 'kb' in unit:
+            return value / (1024.0 * 1024.0)
+        return value
+
+    def get_nvme_temp(self):
+        reading = self.find_reading(['NVMe', 'SSD', 'Drive Temperature'],
+                                    SENSOR_TYPE_TEMP)
+        return reading['value'] if reading else 0.0
+
+    def get_mainboard_temp(self):
+        reading = self.find_reading(['Motherboard', 'Mainboard', 'Chipset',
+                                     'System', 'VRM'], SENSOR_TYPE_TEMP)
+        return reading['value'] if reading else 0.0
+
     def get_thermal_sensors(self):
         """
         Get all thermal-related sensors in the format expected by Thermal Engine Studio.
@@ -473,7 +535,16 @@ class HWiNFOReader:
             'gpu_clock': int(self.get_gpu_clock()),
             'gpu_memory_clock': int(self.get_gpu_memory_clock()),
             'gpu_memory_percent': self.get_gpu_memory_usage(),
+            'gpu_memory_used': self.get_gpu_memory_used(),
             'gpu_power': self.get_gpu_power(),
+            'cpu_fan': self.get_cpu_fan(),
+            'gpu_fan': self.get_gpu_fan(),
+            'gpu_fan_percent': self.get_gpu_fan_percent(),
+            'sys_fan': self.get_sys_fan(),
+            'pump': self.get_pump(),
+            'game_fps': self.get_game_fps(),
+            'nvme_temp': self.get_nvme_temp(),
+            'mainboard_temp': self.get_mainboard_temp(),
         }
 
 

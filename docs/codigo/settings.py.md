@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "settings.py"
-source_sha256: bb3a780f0a0e283d3cc5d183cd37f7fbead81b8d6bafbb7753380ea399c2d5f2
-source_bytes: 8198
-source_lines: 242
+source_sha256: 22c3e687467894561b812511f339a50557583d5ceaafffa161317d4221c5fd0a
+source_bytes: 8810
+source_lines: 255
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -89,11 +89,14 @@ DEFAULT_SETTINGS = {
     "lcd_brightness": 1.0,   # 0.5 - 1.5, multiplier applied to the final frame before sending to the LCD
     "lcd_contrast": 1.15,    # 0.5 - 1.5, multiplier applied to the final frame before sending to the LCD
     "lcd_saturation": 1.25,  # 0.5 - 2.0, multiplier applied to the final frame before sending to the LCD
-    # Objetivos del proyecto actual (Web / LCD / DMD / HDMI) y panel seleccionado.
-    "project_targets": {"web": True, "lcd": True, "dmd": False, "hdmi": False},
+    # Objetivos del proyecto actual (Web / LCD / DMD / HDMI / Custom) y panel seleccionado.
+    "project_targets": {"web": True, "lcd": True, "dmd": False, "hdmi": False,
+                        "custom": False},
     # Configuración persistida del target HDMI: {screen_id, width, height,
     # refresh, connector, scale_mode}.
     "hdmi_config": None,
+    # Configuración persistida del canvas Custom: {width, height, name}.
+    "custom_config": None,
     "lcd_model": "trofeo_9_16",  # Default: Thermalright Trofeo Vision 9.16
     # Resultados del benchmark del panel: key "vid:pid" -> {passed, fps_*,
     # requirement, date}. Si passed, el panel desbloquea las tasas extendidas.
@@ -108,6 +111,16 @@ DEFAULT_SETTINGS = {
     # comando (approved_actions guarda los hashes ya aceptados).
     "allow_element_actions": False,
     "approved_actions": {},
+    # Publicacion de temas a un ThermalEngineLite remoto (POST /theme).
+    "lite_publish_url": "",
+    "lite_publish_token": "",
+    # Fuente de sensores remota (proyectos Lite): ultima URL usada y tokens por
+    # equipo (la URL viaja en el tema; el token nunca se incrusta en el JSON).
+    "lite_last_url": "",
+    "lite_tokens": {},
+    # Plugins de fuentes de datos: ids habilitados y su configuracion.
+    "plugins_enabled": [],
+    "plugins_config": {},
 }
 
 _settings = None

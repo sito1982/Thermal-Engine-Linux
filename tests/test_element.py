@@ -29,3 +29,27 @@ def test_defaults_for_new_dmd_types():
 
     chart = ThemeElement("bar_chart")
     assert chart.show_background is True
+
+
+def test_default_font_is_liberation_mono():
+    element = ThemeElement("text")
+    assert element.font_family == "Liberation Mono"
+    assert element.label_font_family == "Liberation Mono"
+
+
+def test_dmd_default_props_use_tiny5():
+    from constants import DMD_DEFAULT_ELEMENT_PROPS
+
+    for props in DMD_DEFAULT_ELEMENT_PROPS.values():
+        assert props["font_family"] == "Tiny5"
+        assert props["label_font_family"] == "Tiny5"
+
+
+def test_tap_screen_accepts_next_prev_and_index():
+    next_copy = ThemeElement.from_dict(
+        {"type": "rectangle", "tap_screen": "next"})
+    assert next_copy.tap_screen == "next"
+    prev_copy = ThemeElement.from_dict(
+        {"type": "rectangle", "tap_screen": "prev"})
+    assert prev_copy.tap_screen == "prev"
+    assert ThemeElement("rectangle", tap_screen=2).tap_screen == 2

@@ -109,7 +109,9 @@ def validate_preset_schema(data):
     allowed_keys = {
         'name', 'background_color', 'display_width', 'display_height',
         'elements', 'video_background', 'targets', 'lcd_model', 'dmd_config',
-        'lcd', 'dmd', 'hdmi', 'hdmi_config'
+        'lcd', 'dmd', 'hdmi', 'hdmi_config', 'lite',
+        # Feature: fuente del webserver y canvas Custom (solo-Web/Lite).
+        'web', 'custom', 'custom_config',
     }
     for key in data.keys():
         if key not in allowed_keys:
@@ -208,7 +210,7 @@ def validate_element_schema(element, index):
     # only guarantees the stored action is well-formed before the app gates and
     # confirms it at runtime.
     if 'tap_action' in element:
-        if element['tap_action'] not in ('none', 'command'):
+        if element['tap_action'] not in ('none', 'command', 'transition'):
             errors.append(f"{prefix}: invalid 'tap_action'")
     for field in ('tap_command', 'tap_workdir'):
         if field in element and element[field]:

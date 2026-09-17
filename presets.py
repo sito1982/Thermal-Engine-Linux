@@ -564,11 +564,6 @@ class PresetsPanel(QWidget):
             "display_width": DISPLAY_HEIGHT if orientation_vertical else DISPLAY_WIDTH,
             "display_height": DISPLAY_WIDTH if orientation_vertical else DISPLAY_HEIGHT,
             "elements": [],
-            "video_background": {
-                "video_path": "",
-                "fit_mode": "fit_height",
-                "enabled": False
-            }
         }
 
         # Save the preset (without thumbnail since it's empty/black)

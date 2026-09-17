@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "video_background.py"
-source_sha256: a633705f6f85810d161741113aab8d72e1a95ff0848a2f32acff7374c4df50f7
-source_bytes: 15962
-source_lines: 485
+source_sha256: 9c76ee14acc4dc71c7fdf03f05d6acb61841349fe608d5b41d5134d7e6b858b9
+source_bytes: 20248
+source_lines: 589
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -42,7 +42,11 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 ### Funciones directas
 
-Ninguna función declarada directamente en el módulo.
+- `get_video`
+- `fit_frame`
+- `get_video_frame`
+- `reset_all_video_timing`
+- `close_all_videos`
 
 ## Código fuente íntegro
 
@@ -84,6 +88,12 @@ class VideoBackground:
         self.fit_mode = self.FIT_HEIGHT
         self.enabled = False
 
+        # When True, frames are stored preserving the video's aspect ratio
+        # (scaled to fit within ``_target_size``), which is what the video
+        # element needs to cover/crop itself into its own rectangle.
+        self._preserve_aspect = False
+        self._target_size = (DISPLAY_WIDTH, DISPLAY_HEIGHT)
+
         # Video metadata
         self._frame_count = 0
         self._fps = 30
@@ -119,13 +129,16 @@ class VideoBackground:
         self._load_thread = None
         self._stop_loading = False
 
-    def load_video(self, path, callback=None):
+    def load_video(self, path, callback=None, target_size=None):
         """
         Load a video file and buffer all frames.
 
         Args:
             path: Path to video file
             callback: Optional callback(progress, done, error) for progress updates
+            target_size: Optional ``(w, h)`` bounding box. When given, frames are
+                stored preserving the video aspect ratio (no black bars), so a
+                video element can crop/cover its own rectangle.
 
         Returns:
             True if loading started successfully
@@ -139,6 +152,10 @@ class VideoBackground:
             if callback:
                 callback(0, True, "File not found")
             return False
+
+        self._preserve_aspect = target_size is not None
+        if target_size:
+            self._target_size = (int(target_size[0]), int(target_size[1]))
 
         # Stop any existing load
         self._stop_loading = True
@@ -208,31 +225,43 @@ class VideoBackground:
                 # Convert BGR to RGB
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                # Resize frame to target size
-                frame_resized = cv2.resize(
-                    frame_rgb,
-                    (new_width, new_height),
-                    interpolation=cv2.INTER_LINEAR
-                )
+                if self._preserve_aspect:
+                    # Store the frame as-is (aspect preserved, fitted within the
+                    # target box). The video element crops/covers at draw time.
+                    box_w, box_h = self._target_size
+                    ratio = min(box_w / max(1, self._video_width),
+                                box_h / max(1, self._video_height), 1.0)
+                    new_width = max(1, int(self._video_width * ratio))
+                    new_height = max(1, int(self._video_height * ratio))
+                    frame_resized = cv2.resize(
+                        frame_rgb, (new_width, new_height),
+                        interpolation=cv2.INTER_LINEAR)
+                    frames.append(frame_resized)
+                else:
+                    frame_resized = cv2.resize(
+                        frame_rgb,
+                        (new_width, new_height),
+                        interpolation=cv2.INTER_LINEAR
+                    )
 
-                # Create output frame with black background
-                output = np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
+                    # Create output frame with black background
+                    output = np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
 
-                # Calculate paste region (handle negative offsets for fit_width)
-                y_start = max(0, y_offset)
-                y_end = min(DISPLAY_HEIGHT, y_offset + new_height)
-                x_start = max(0, x_offset)
-                x_end = min(DISPLAY_WIDTH, x_offset + new_width)
+                    # Calculate paste region (handle negative offsets for fit_width)
+                    y_start = max(0, y_offset)
+                    y_end = min(DISPLAY_HEIGHT, y_offset + new_height)
+                    x_start = max(0, x_offset)
+                    x_end = min(DISPLAY_WIDTH, x_offset + new_width)
 
-                # Source region from resized frame
-                src_y_start = max(0, -y_offset)
-                src_y_end = src_y_start + (y_end - y_start)
-                src_x_start = max(0, -x_offset)
-                src_x_end = src_x_start + (x_end - x_start)
+                    # Source region from resized frame
+                    src_y_start = max(0, -y_offset)
+                    src_y_end = src_y_start + (y_end - y_start)
+                    src_x_start = max(0, -x_offset)
+                    src_x_end = src_x_start + (x_end - x_start)
 
-                output[y_start:y_end, x_start:x_end] = frame_resized[src_y_start:src_y_end, src_x_start:src_x_end]
+                    output[y_start:y_end, x_start:x_end] = frame_resized[src_y_start:src_y_end, src_x_start:src_x_end]
 
-                frames.append(output)
+                    frames.append(output)
                 frame_idx += 1
 
                 # Limit frames to prevent excessive memory usage
@@ -532,4 +561,83 @@ class VideoBackground:
 
 # Global instance
 video_background = VideoBackground()
+
+
+# ---------------------------------------------------------------------------
+# Per-path cache for the "video" element
+# ---------------------------------------------------------------------------
+_video_cache = {}
+
+
+def get_video(path, target_size=None):
+    """Return a shared :class:`VideoBackground` for ``path`` (loaded once)."""
+    if not path:
+        return None
+    key = os.path.abspath(os.path.expanduser(path))
+    inst = _video_cache.get(key)
+    if inst is not None and target_size:
+        box = inst._target_size
+        if target_size[0] > box[0] or target_size[1] > box[1]:
+            inst.load_video(path, target_size=target_size)
+    if inst is None:
+        inst = VideoBackground()
+        if not inst.load_video(path, target_size=target_size):
+            return None
+        _video_cache[key] = inst
+    return inst
+
+
+def fit_frame(frame, size, fit_mode=VideoBackground.FIT_HEIGHT):
+    """Scale ``frame`` into ``size`` according to ``fit_mode``.
+
+    - ``fit_height`` / ``fit_width``: cover (scale to match that axis, crop the
+      other, centered).
+    - ``stretch``: force the exact size.
+    - ``contain``: fit inside preserving aspect (transparent bars).
+    """
+    tw, th = max(1, int(size[0])), max(1, int(size[1]))
+    vw, vh = frame.size
+    if vw <= 0 or vh <= 0:
+        return None
+    if fit_mode == "stretch":
+        return frame.convert("RGBA").resize((tw, th), Image.BILINEAR)
+    aspect = vw / vh
+    if fit_mode == "contain":
+        ratio = min(tw / vw, th / vh)
+        new_w = max(1, int(round(vw * ratio)))
+        new_h = max(1, int(round(vh * ratio)))
+    elif fit_mode == VideoBackground.FIT_WIDTH:
+        new_w = tw
+        new_h = max(1, int(round(tw / aspect)))
+    else:  # fit_height (default) -> cover
+        new_h = th
+        new_w = max(1, int(round(th * aspect)))
+    scaled = frame.convert("RGBA").resize((new_w, new_h), Image.BILINEAR)
+    canvas = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+    canvas.paste(scaled, ((tw - new_w) // 2, (th - new_h) // 2), scaled)
+    return canvas
+
+
+def get_video_frame(path, size, fit_mode=VideoBackground.FIT_HEIGHT):
+    """Return an RGBA PIL frame of ``path`` fitted (cover) to ``size``."""
+    instance = get_video(path, target_size=size)
+    if instance is None:
+        return None
+    frame = instance.get_frame_pil()
+    if frame is None:
+        return None
+    return fit_frame(frame, size, fit_mode)
+
+
+def reset_all_video_timing():
+    """Reset playback timing of every cached video (system wake)."""
+    for instance in _video_cache.values():
+        instance.reset_timing()
+
+
+def close_all_videos():
+    """Release every cached video instance."""
+    for instance in list(_video_cache.values()):
+        instance.close()
+    _video_cache.clear()
 ```

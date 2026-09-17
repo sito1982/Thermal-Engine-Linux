@@ -12,10 +12,10 @@ widgets that need a custom look just set an objectName the stylesheet targets
 import os
 import tempfile
 
-from PySide6.QtCore import QPointF, QSize, Qt
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QPolygonF
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QLabel, QToolButton
+from PySide6.QtWidgets import QAbstractButton, QLabel, QToolButton
 
 # ---------------------------------------------------------------------------
 # Design tokens
@@ -192,6 +192,51 @@ class LogoLabel(QLabel):
     def __init__(self, text, parent=None):
         super().__init__(text.upper(), parent)
         self.setObjectName("appLogo")
+
+
+class SwitchButton(QAbstractButton):
+    """Pill-shaped On/Off switch (checkable).
+
+    Draws a rounded track, a sliding knob and the state text ("On"/"Off").
+    """
+
+    def __init__(self, checked=True, parent=None, tooltip=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setChecked(bool(checked))
+        self.setFixedSize(60, 24)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if tooltip:
+            self.setToolTip(tooltip)
+        self.toggled.connect(lambda _checked: self.update())
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        width, height = self.width(), self.height()
+        radius = height / 2.0
+        on = self.isChecked()
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(ACCENT if on else DOT_OFF))
+        painter.drawRoundedRect(QRectF(0, 0, width, height), radius, radius)
+
+        knob_radius = radius - 3
+        cx = (width - radius) if on else radius
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(QPointF(cx, height / 2.0), knob_radius, knob_radius)
+
+        font = painter.font()
+        font.setPointSizeF(7.5)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#0c0d0f" if on else TEXT))
+        if on:
+            text_rect = QRectF(4, 0, width - radius - 4, height)
+        else:
+            text_rect = QRectF(2 * radius, 0, width - radius - 4, height)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter,
+                         "On" if on else "Off")
 
 
 _spinbox_arrows_cache = {}

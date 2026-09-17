@@ -18,7 +18,7 @@ class DMDSender:
     """Envía frames RGB565 a un ESP32 DMD por TCP de forma persistente."""
 
     CONNECT_TIMEOUT = 2.0
-    SEND_TIMEOUT = 1.0
+    SEND_TIMEOUT = 2.0
     BACKOFF_BASE = 0.5
     BACKOFF_MAX = 30.0
 
@@ -38,13 +38,14 @@ class DMDSender:
         self._header = bytes([0xAA, 0x55, width, height])
         self._frame_buf = bytearray(4 + self._payload_size)
         self._frame_buf[:4] = self._header
+        self._ok_streak = 0
 
     @property
     def is_connected(self):
         return self._sock is not None
 
     def connect(self):
-        """Abre la conexión TCP. Reintenta con backoff si falla."""
+        """Abre la conexión TCP con keep-alive. Reintenta con backoff si falla."""
         self.close()
         try:
             s = socket.create_connection(
@@ -52,8 +53,15 @@ class DMDSender:
                 timeout=self.CONNECT_TIMEOUT,
             )
             s.settimeout(self.SEND_TIMEOUT)
+            # El receptor del ESP32 descarta al cliente si la ventana de lwIP se
+            # satura; desactivar Nagle y mantener la conexión viva ayuda.
+            try:
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            except OSError:
+                pass
             self._sock = s
-            self._backoff = self.BACKOFF_BASE
+            print(f"[DMD] Conectado a {self.ip}:{self.port}")
             return True
         except (OSError, socket.error):
             self._sock = None
@@ -66,6 +74,10 @@ class DMDSender:
             except OSError:
                 pass
             self._sock = None
+
+    def _backoff_sleep(self):
+        self._backoff = min(self._backoff * 2, self.BACKOFF_MAX)
+        time.sleep(self._backoff)
 
     def send_frame(self, rgb565_bytes):
         """Envía un frame completo (header + payload) por TCP.
@@ -85,21 +97,28 @@ class DMDSender:
         self._frame_buf[4:] = rgb565_bytes
         frame = bytes(self._frame_buf)
 
+        if self._sock is None and not self.connect():
+            # No dejar que la GUI/hilo reconecte en bucle: backoff real.
+            self._backoff_sleep()
+            return False
+
         try:
-            if self._sock is None:
-                if not self.connect():
-                    return False
             self._sock.sendall(frame)
             self._send_count += 1
             self._last_send_time = time.monotonic()
             self._error_count = 0
+            self._ok_streak += 1
+            # Solo se considera la conexión "estable" tras varios envíos buenos;
+            # así el backoff no se reinicia en cada reconexión (evita el parpadeo).
+            if self._ok_streak >= 8:
+                self._backoff = self.BACKOFF_BASE
             return True
         except (OSError, socket.error):
             self._error_count += 1
+            self._ok_streak = 0
+            print(f"[DMD] Error de envío (reconectando en {self._backoff:.1f}s)")
             self.close()
-            # Backoff exponencial
-            self._backoff = min(self._backoff * 2, self.BACKOFF_MAX)
-            time.sleep(self._backoff)
+            self._backoff_sleep()
             return False
 
     def send_frame_safe(self, rgb565_bytes):
@@ -133,6 +152,8 @@ class DMDSenderThread(QThread):
         self._sender = DMDSender(ip, port, width, height, fps)
         self._frame_queue = queue.Queue(maxsize=2)
         self._running = False
+        self._last_frame = None
+        self._paused = False
 
     # --- Delegación al DMDSender interno (API compatible) ---
     @property
@@ -178,18 +199,51 @@ class DMDSenderThread(QThread):
             except (queue.Empty, ValueError):
                 pass
 
+    def set_paused(self, paused):
+        """Pausa/reanuda el envío sin destruir el hilo ni la conexión.
+
+        Al pausar, el worker deja de mandar frames (el receptor vuelve a sus
+        GIFs tras su timeout); al reanudar continúa con el último frame.
+        """
+        self._paused = bool(paused)
+
     def run(self):
+        """Envía frames a cadencia constante.
+
+        El worker mantiene la cadencia (``fps``) y **reenvía el último frame**
+        cuando la cola está vacía, de modo que el stream nunca se interrumpe más
+        de lo que aguanta el receptor (``IMAGE_TIMEOUT``) aunque la GUI no
+        produzca frames nuevos (p. ej. mientras se edita). Si ``set_paused(True)``
+        está activo, no envía nada.
+        """
         self._running = True
+        period = 1.0 / max(1, self._sender.fps)
         try:
             while self._running:
-                try:
-                    frame = self._frame_queue.get(timeout=1.0)
-                except queue.Empty:
+                if self._paused:
+                    time.sleep(period)
                     continue
+                frame = None
                 try:
-                    self._sender.send_frame_safe(frame)
-                except Exception:
-                    pass
+                    frame = self._frame_queue.get(timeout=period)
+                except queue.Empty:
+                    frame = self._last_frame
+                else:
+                    # Descartar los pendientes y quedarse con el más reciente.
+                    try:
+                        while True:
+                            frame = self._frame_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                if frame is None:
+                    continue
+                self._last_frame = frame
+                start = time.perf_counter()
+                self._sender.send_frame_safe(frame)
+                elapsed = time.perf_counter() - start
+                remaining = period - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
         finally:
             self._sender.close()
 

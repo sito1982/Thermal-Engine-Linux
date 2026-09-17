@@ -77,3 +77,6 @@ fotos/
 
 # Obsidian vault
 .obsidian/
+
+# Iconos de usuario (el elemento `icon` los carga en runtime; no se redistribuyen)
+icons/

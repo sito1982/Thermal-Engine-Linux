@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "presets.py"
-source_sha256: d87a82812ce85a9fabf060a0ef1e2aeb722a3fabcfb7a843325ff5f801b8cc08
-source_bytes: 25492
-source_lines: 649
+source_sha256: 9bc8a1a1512f70e61701c7e3d805989427626b57cdc95a027056184495a755b6
+source_bytes: 25335
+source_lines: 644
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -616,11 +616,6 @@ class PresetsPanel(QWidget):
             "display_width": DISPLAY_HEIGHT if orientation_vertical else DISPLAY_WIDTH,
             "display_height": DISPLAY_WIDTH if orientation_vertical else DISPLAY_HEIGHT,
             "elements": [],
-            "video_background": {
-                "video_path": "",
-                "fit_mode": "fit_height",
-                "enabled": False
-            }
         }
 
         # Save the preset (without thumbnail since it's empty/black)

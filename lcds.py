@@ -278,6 +278,14 @@ DEVICE_TYPES = [
         badge="TCP · RGB565",
         resolutions=["128×32"],
     ),
+    DeviceType(
+        id="custom",
+        label="Custom Canvas",
+        tagline="Lienzo libre a la resolución que elijas (sin salida física). "
+                "Útil para publicar en Lite o servir por Web.",
+        badge="Free · Free size",
+        resolutions=[],
+    ),
 ]
 
 

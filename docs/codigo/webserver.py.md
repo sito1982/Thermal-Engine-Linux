@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "webserver.py"
-source_sha256: d3aecd6da6c980d85abcfcf23af1fd88a38b43b2c2e722dcb257a874c24b263a
-source_bytes: 13589
-source_lines: 392
+source_sha256: c574f5046f48e46f90bbea41943a3049f2133455319d70f74d55eaac358c5d19
+source_bytes: 14441
+source_lines: 409
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -202,14 +202,17 @@ def image_jpeg():
         req_h = None
 
     # Fast path: return cached JPEG if available and no post-processing requested
-    cached = getattr(_WINDOW, '_last_jpeg_data', None)
+    cached = (getattr(_WINDOW, '_web_jpeg_data', None)
+              or getattr(_WINDOW, '_last_jpeg_data', None))
     if cached and not (req_w or req_h):
-        # If vertical mode is active and the window renders unrotated, check and rotate
+        # La fuente del webserver puede ser LCD (que aplica el giro de modo
+        # vertical) o HDMI (que no). _web_jpeg_rotated indica si el JPEG ya
+        # viene rotado por el propio render.
         try:
-            vertical = bool(getattr(_WINDOW, '_vertical_mode', False))
+            rotated = bool(getattr(_WINDOW, '_web_jpeg_rotated', False))
         except Exception:
-            vertical = False
-        if vertical and PIL_AVAILABLE:
+            rotated = False
+        if rotated and PIL_AVAILABLE:
             # Post-process rotation via Pillow for the cached image to correct orientation
             try:
                 buf = io.BytesIO(cached)
@@ -230,6 +233,11 @@ def image_jpeg():
 
     # Slow path: render on the Qt thread and cache result.
     def make_jpeg():
+        if hasattr(_WINDOW, '_update_web_jpeg_cache'):
+            _WINDOW._update_web_jpeg_cache()
+            jpeg = getattr(_WINDOW, '_web_jpeg_data', None)
+            if jpeg:
+                return jpeg
         img = _WINDOW.render_theme_image()
         jpeg = _WINDOW.image_to_jpeg(img, quality=95)
         try:
@@ -241,22 +249,24 @@ def image_jpeg():
     data, err = run_on_qt_and_wait(make_jpeg, timeout=15.0)
     if err:
         # Try to fall back to any cached image produced in the meantime
-        fallback = getattr(_WINDOW, '_last_jpeg_data', None)
+        fallback = (getattr(_WINDOW, '_web_jpeg_data', None)
+                    or getattr(_WINDOW, '_last_jpeg_data', None))
         if fallback:
             data = fallback
         else:
             abort(500, description=f"Render error: {err}")
 
     # If post-processing requested (resize or rotate), use Pillow when available
-    need_post = PIL_AVAILABLE and (req_w is not None or req_h is not None or bool(getattr(_WINDOW, '_vertical_mode', False)))
+    need_post = PIL_AVAILABLE and (req_w is not None or req_h is not None
+                                   or bool(getattr(_WINDOW, '_web_jpeg_rotated', False)))
 
     if need_post:
         try:
             with Image.open(io.BytesIO(data)) as _im:
                 im = _im.copy()
 
-            # Rotate to correct vertical mode if needed
-            if getattr(_WINDOW, '_vertical_mode', False):
+            # Rotate to correct vertical mode if needed (LCD source only)
+            if getattr(_WINDOW, '_web_jpeg_rotated', False):
                 # Invert rotation direction on server-side to match client expectation
                 im = im.rotate(90, expand=True)
 
@@ -300,7 +310,8 @@ def debug_status():
 
     # Fast direct check (best-effort, not strictly thread-safe but acceptable for debug)
     try:
-        data_direct = getattr(_WINDOW, '_last_jpeg_data', None)
+        data_direct = (getattr(_WINDOW, '_web_jpeg_data', None)
+                       or getattr(_WINDOW, '_last_jpeg_data', None))
         if data_direct:
             return jsonify(window=True, has_cached=True, cache_size=len(data_direct))
     except Exception:
@@ -310,7 +321,8 @@ def debug_status():
     # Fall back to querying on the Qt thread
     def get_status():
         try:
-            data = getattr(_WINDOW, '_last_jpeg_data', None)
+            data = (getattr(_WINDOW, '_web_jpeg_data', None)
+                    or getattr(_WINDOW, '_last_jpeg_data', None))
             return {
                 'window': True,
                 'has_cached': bool(data),
@@ -337,6 +349,11 @@ def force_render():
         return jsonify(success=False, error='no_window'), 503
 
     def make_jpeg():
+        if hasattr(_WINDOW, '_update_web_jpeg_cache'):
+            _WINDOW._update_web_jpeg_cache()
+            jpeg = getattr(_WINDOW, '_web_jpeg_data', None)
+            if jpeg:
+                return len(jpeg)
         img = _WINDOW.render_theme_image()
         jpeg = _WINDOW.image_to_jpeg(img, quality=95)
         try:

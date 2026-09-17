@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "linux_sensors.py"
-source_sha256: bc8c05aaa994820d02343d5a857d2e37e279285f48801e7a21858411edd6bf53
-source_bytes: 16311
-source_lines: 483
+source_sha256: aa1883377ce56d0eb16366271d5776681ee7c98d0e1cde8b5fdd6aa92f9845c8
+source_bytes: 21452
+source_lines: 618
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -59,6 +59,7 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 - `_read_text_file`
 - `_read_int_file`
+- `_read_game_fps`
 - `get_linux_reader`
 - `is_linux_sensors_available`
 - `get_linux_sensors`
@@ -177,6 +178,12 @@ class _NvidiaBackend:
             mem = nv.nvmlDeviceGetMemoryInfo(h)
             if mem.total > 0 and "gpu_memory_percent" not in result:
                 result["gpu_memory_percent"] = float(mem.used) / float(mem.total) * 100.0
+            if mem.total > 0:
+                result["gpu_memory_used"] = float(mem.used) / (1024 ** 3)
+        except Exception:
+            pass
+        try:
+            result["gpu_fan_percent"] = float(nv.nvmlDeviceGetFanSpeed(h))
         except Exception:
             pass
         return result or None
@@ -185,7 +192,8 @@ class _NvidiaBackend:
         """Alternativa usando nvidia-smi con salida CSV."""
         query = (
             "temperature.gpu,utilization.gpu,utilization.memory,"
-            "clocks.current.graphics,clocks.current.memory,power.draw"
+            "clocks.current.graphics,clocks.current.memory,power.draw,"
+            "fan.speed,memory.used"
         )
         try:
             out = subprocess.check_output(
@@ -218,11 +226,15 @@ class _NvidiaBackend:
             ("gpu_clock", 3, int),
             ("gpu_memory_clock", 4, int),
             ("gpu_power", 5, float),
+            ("gpu_fan_percent", 6, float),
         ]
         for key, idx, cast in mapping:
             val = _num(idx, cast)
             if val is not None:
                 result[key] = val
+        mem_used = _num(7, float)
+        if mem_used is not None:
+            result["gpu_memory_used"] = mem_used / 1024.0  # MiB -> GiB
         return result or None
 
     def close(self):
@@ -275,6 +287,9 @@ class _AmdGpuBackend:
         mclk = self._read_int(os.path.join(self._hwmon, "freq2_input"))
         if mclk is not None:
             result["gpu_memory_clock"] = int(mclk / 1_000_000)
+        fan = self._read_int(os.path.join(self._hwmon, "fan1_input"))
+        if fan:
+            result["gpu_fan"] = float(fan)
         return result
 
     @staticmethod
@@ -364,6 +379,32 @@ def _read_int_file(path):
         return int(val)
     except ValueError:
         return None
+
+
+def _read_game_fps(path):
+    """Read the last FPS sample from a MangoHud log file (CSV or plain number)."""
+    with open(path, "r", errors="ignore") as handle:
+        lines = [line.strip() for line in handle if line.strip()]
+    if not lines:
+        return None
+    if len(lines) == 1:
+        try:
+            return float(lines[0])
+        except ValueError:
+            return None
+    header = [col.strip().lower() for col in lines[0].split(",")]
+    try:
+        column = header.index("fps")
+    except ValueError:
+        return None
+    for line in reversed(lines[1:]):
+        parts = line.split(",")
+        if column < len(parts):
+            try:
+                return float(parts[column])
+            except ValueError:
+                continue
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +510,90 @@ class LinuxSensorReader:
                 return round(watts, 1)
         return 0.0
 
+    # --- Ventiladores y temperaturas auxiliares ---------------------------
+    def get_fans(self):
+        """RPM de ventiladores de CPU, sistema y bomba (best-effort)."""
+        fans = {"cpu_fan": 0.0, "sys_fan": 0.0, "pump": 0.0}
+        if not HAS_PSUTIL:
+            return fans
+        try:
+            data = psutil.sensors_fans()
+        except Exception:
+            data = {}
+        others = []
+        for entries in (data or {}).values():
+            for entry in entries:
+                label = (getattr(entry, "label", "") or "").lower()
+                rpm = float(getattr(entry, "current", 0) or 0)
+                if rpm <= 0:
+                    continue
+                if "pump" in label:
+                    fans["pump"] = rpm
+                elif "cpu" in label:
+                    fans["cpu_fan"] = rpm
+                elif "gpu" in label:
+                    # Se prefiere el ventilador de GPU del backend de GPU.
+                    pass
+                else:
+                    others.append(rpm)
+        if not fans["sys_fan"] and others:
+            fans["sys_fan"] = max(others)
+        return fans
+
+    def get_aux_temps(self):
+        """Temperaturas auxiliares (NVMe / placa base), best-effort."""
+        out = {"nvme_temp": 0.0, "mainboard_temp": 0.0}
+        if not HAS_PSUTIL:
+            return out
+        try:
+            temps = psutil.sensors_temperatures()
+        except Exception:
+            return out
+        board_chips = ("acpitz", "motherboard", "it87", "nct", "asus", "asus_wmi",
+                       "nct6775", "nct6798", "w83627ehf")
+        for chip, entries in (temps or {}).items():
+            chip_l = (chip or "").lower()
+            for entry in entries:
+                label = (entry.label or "").lower()
+                current = float(entry.current or 0)
+                if current <= 0:
+                    continue
+                if "nvme" in chip_l or "nvme" in label:
+                    out["nvme_temp"] = max(out["nvme_temp"], current)
+                elif any(name in chip_l for name in board_chips):
+                    out["mainboard_temp"] = max(out["mainboard_temp"], current)
+        return out
+
+    @staticmethod
+    def get_game_fps():
+        """FPS de juego desde un log de MangoHud (best-effort).
+
+        Busca en ``MANGOHUD_LOG`` (ruta a CSV o a un fichero con un número) y
+        en los directorios por defecto de MangoHud (``~/mangohud``,
+        ``~/.local/share/mangohud``).
+        """
+        candidates = []
+        env_path = os.environ.get("MANGOHUD_LOG")
+        if env_path:
+            candidates.append(os.path.expanduser(env_path))
+        for folder in ("~/mangohud", "~/.local/share/mangohud"):
+            directory = os.path.expanduser(folder)
+            if os.path.isdir(directory):
+                try:
+                    candidates.extend(sorted(
+                        glob.glob(os.path.join(directory, "*.csv")),
+                        key=os.path.getmtime, reverse=True))
+                except OSError:
+                    pass
+        for path in candidates:
+            try:
+                value = _read_game_fps(path)
+            except OSError:
+                continue
+            if value is not None:
+                return value
+        return 0.0
+
     # --- Lecturas de GPU ---------------------------------------------------
     def _gpu_data(self):
         if self._nvidia and self._nvidia.available:
@@ -482,6 +607,8 @@ class LinuxSensorReader:
     def get_thermal_sensors(self):
         """Devuelve los sensores en el formato que espera sensors.py."""
         gpu = self._gpu_data()
+        fans = self.get_fans()
+        aux = self.get_aux_temps()
         return {
             "cpu_temp": self.get_cpu_temp(),
             "cpu_clock": self.get_cpu_clock(),
@@ -491,7 +618,16 @@ class LinuxSensorReader:
             "gpu_clock": int(gpu.get("gpu_clock", 0)),
             "gpu_memory_clock": int(gpu.get("gpu_memory_clock", 0)),
             "gpu_memory_percent": gpu.get("gpu_memory_percent", 0.0),
+            "gpu_memory_used": gpu.get("gpu_memory_used", 0.0),
             "gpu_power": gpu.get("gpu_power", 0.0),
+            "gpu_fan": gpu.get("gpu_fan", 0.0),
+            "gpu_fan_percent": gpu.get("gpu_fan_percent", 0.0),
+            "cpu_fan": fans["cpu_fan"],
+            "sys_fan": fans["sys_fan"],
+            "pump": fans["pump"],
+            "nvme_temp": aux["nvme_temp"],
+            "mainboard_temp": aux["mainboard_temp"],
+            "game_fps": self.get_game_fps(),
         }
 
     def get_all_readings(self):

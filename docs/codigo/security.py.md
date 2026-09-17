@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "security.py"
-source_sha256: 1e14624d53f8f42f1eb75673c334ef2057e4e32853d21ca00be26c90c6b15b6b
-source_bytes: 9284
-source_lines: 283
+source_sha256: 2e63aac6f4e36ffedcb589047737382aedef2a5a5f4c143b67e139efc516d232
+source_bytes: 9422
+source_lines: 285
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -159,7 +159,9 @@ def validate_preset_schema(data):
     allowed_keys = {
         'name', 'background_color', 'display_width', 'display_height',
         'elements', 'video_background', 'targets', 'lcd_model', 'dmd_config',
-        'lcd', 'dmd', 'hdmi', 'hdmi_config'
+        'lcd', 'dmd', 'hdmi', 'hdmi_config', 'lite',
+        # Feature: fuente del webserver y canvas Custom (solo-Web/Lite).
+        'web', 'custom', 'custom_config',
     }
     for key in data.keys():
         if key not in allowed_keys:
@@ -258,7 +260,7 @@ def validate_element_schema(element, index):
     # only guarantees the stored action is well-formed before the app gates and
     # confirms it at runtime.
     if 'tap_action' in element:
-        if element['tap_action'] not in ('none', 'command'):
+        if element['tap_action'] not in ('none', 'command', 'transition'):
             errors.append(f"{prefix}: invalid 'tap_action'")
     for field in ('tap_command', 'tap_workdir'):
         if field in element and element[field]:

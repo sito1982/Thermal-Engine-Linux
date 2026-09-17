@@ -28,6 +28,7 @@ from PySide6.QtCore import QRect, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QComboBox,
     QDialog,
     QFrame,
@@ -36,6 +37,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QRadioButton,
+    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -172,17 +175,17 @@ def _hdmi_svg():
 
 def _svg_for(device_id):
     return {"web": _web_svg, "lcd": _lcd_svg, "dmd": _dmd_svg,
-            "hdmi": _hdmi_svg}[device_id]()
+            "hdmi": _hdmi_svg, "custom": _web_svg}[device_id]()
 
 
 def _card_art_size(device_id):
     return {"web": (96, 62), "lcd": (56, 76), "dmd": (96, 62),
-            "hdmi": (96, 62)}[device_id]
+            "hdmi": (96, 62), "custom": (96, 62)}[device_id]
 
 
 def _thumb_size(device_id):
     return {"web": (44, 28), "lcd": (26, 36), "dmd": (44, 28),
-            "hdmi": (44, 28)}[device_id]
+            "hdmi": (44, 28), "custom": (44, 28)}[device_id]
 
 
 # ----------------------------------------------------------- Step indicator --
@@ -542,6 +545,12 @@ class NewProjectDialog(QDialog):
         self._lcd_model = None
         self._add_mode = bool(add_mode)
         self._selected = set()
+        # Tipo de proyecto: "studio" (sensores locales, flujo habitual) o
+        # "lite" (sensores y salidas de un ThermalEngineLite remoto).
+        self._project_type = "studio"
+        self._lite_info = None
+        self._lite_url = ""
+        self._lite_token = ""
         if web_checked:
             self._selected.add("web")
         if lcd_checked:
@@ -556,7 +565,7 @@ class NewProjectDialog(QDialog):
         } if isinstance(used, dict) else set(used) & {"web", "lcd", "dmd", "hdmi"}
 
         self._build_ui()
-        self._set_step(0, refresh=False)
+        self._set_step("devices" if self._add_mode else "type", refresh=False)
         self._refresh_config()
 
     # ------------------------------------------------------------------ UI --
@@ -574,10 +583,13 @@ class NewProjectDialog(QDialog):
 
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
-        self.stack.addWidget(self._build_page_devices())   # 0
-        self.stack.addWidget(self._build_page_dmd())       # 1 (solo si DMD)
-        self.stack.addWidget(self._build_page_hdmi())      # 2 (solo si HDMI)
-        self.stack.addWidget(self._build_page_config())    # 3
+        self.stack.addWidget(self._build_page_type())      # 0 (nuevo proyecto)
+        self.stack.addWidget(self._build_page_devices())   # 1
+        self.stack.addWidget(self._build_page_dmd())       # 2 (solo si DMD)
+        self.stack.addWidget(self._build_page_hdmi())      # 3 (solo si HDMI)
+        self.stack.addWidget(self._build_page_config())    # 4
+        self.stack.addWidget(self._build_page_lite())      # 5 (solo si Lite)
+        self.stack.addWidget(self._build_page_resolution())  # 6 (solo-Web)
 
         # Footer
         footer = QHBoxLayout()
@@ -608,6 +620,78 @@ class NewProjectDialog(QDialog):
         footer.addWidget(self.action_btn)
         root.addLayout(footer)
 
+    def _build_page_type(self):
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 4, 0, 0)
+        v.setSpacing(12)
+
+        title = QLabel("Tipo de proyecto")
+        title.setStyleSheet(
+            f"color: {TEXT}; font-size: 18px; font-weight: 700; "
+            f"background: transparent; border: none;")
+        v.addWidget(title)
+        sub = QLabel(
+            "Elige de dónde vienen los sensores y dónde se despliega el tema.")
+        sub.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 12px; "
+            f"background: transparent; border: none;")
+        v.addWidget(sub)
+
+        self.type_group = QButtonGroup(self)
+        self._type_radios = {}
+        options = (
+            ("studio", "Thermal Engine Studio Project",
+             "Sensores de este equipo. Flujo habitual: eliges los dispositivos "
+             "y el tema se renderiza en local."),
+            ("lite", "Thermal Engine Lite Project",
+             "Sensores y salidas de un ThermalEngineLite remoto. Editas aquí con "
+             "sus datos en vivo y publicas el tema en ese equipo."),
+        )
+        for tid, label, desc in options:
+            card = QFrame()
+            card.setStyleSheet(
+                f"QFrame {{ background-color: {CARD_BG}; "
+                f"border: 1px solid {BORDER_LIGHT}; border-radius: 10px; }}")
+            lay = QVBoxLayout(card)
+            lay.setContentsMargins(14, 12, 14, 12)
+            lay.setSpacing(4)
+
+            rb = QRadioButton(label)
+            rb.setStyleSheet(
+                f"QRadioButton {{ color: {TEXT}; font-size: 14px; "
+                f"font-weight: 600; background: transparent; border: none; }}")
+            lay.addWidget(rb)
+
+            d = QLabel(desc)
+            d.setWordWrap(True)
+            d.setStyleSheet(
+                f"color: {TEXT_DIM}; font-size: 11px; "
+                f"background: transparent; border: none;")
+            lay.addWidget(d)
+
+            self.type_group.addButton(rb)
+            self._type_radios[tid] = rb
+            rb.toggled.connect(
+                lambda checked, t=tid: self._on_type_changed(t, checked))
+            v.addWidget(card)
+
+        self._type_radios["studio"].setChecked(True)
+        v.addStretch(1)
+        return page
+
+    def _on_type_changed(self, tid, checked):
+        if not checked:
+            return
+        self._project_type = tid
+        if tid != "lite":
+            self._lite_info = None
+        # Refrescar el indicador de pasos (los pasos cambian con el tipo).
+        try:
+            self._sync_indicator("type")
+        except Exception:
+            pass
+
     def _build_page_devices(self):
         page = QWidget()
         v = QVBoxLayout(page)
@@ -630,7 +714,7 @@ class NewProjectDialog(QDialog):
         v.addWidget(sub)
 
         self.cards = {}
-        for dev_id in ("web", "lcd", "hdmi", "dmd"):
+        for dev_id in ("web", "lcd", "hdmi", "dmd", "custom"):
             self.cards[dev_id] = DeviceCard(
                 self.devices[dev_id],
                 selected=dev_id in self._selected,
@@ -640,7 +724,7 @@ class NewProjectDialog(QDialog):
 
         row = QHBoxLayout()
         row.setSpacing(12)
-        for dev_id in ("web", "lcd", "hdmi", "dmd"):
+        for dev_id in ("web", "lcd", "hdmi", "dmd", "custom"):
             row.addWidget(self.cards[dev_id], 1)
         v.addLayout(row)
 
@@ -986,6 +1070,19 @@ class NewProjectDialog(QDialog):
         self.name_row_widget.setVisible(not self._add_mode)
         v.addWidget(self.name_row_widget)
 
+        # Resumen de solo lectura para proyectos Lite (destinos/sensores del
+        # equipo remoto); se muestra en lugar de las filas de dispositivo.
+        self.lite_cfg_summary = QLabel("")
+        self.lite_cfg_summary.setWordWrap(True)
+        self.lite_cfg_summary.setStyleSheet(
+            f"QFrame {{ background-color: {CARD_BG}; "
+            f"border: 1px solid {BORDER_LIGHT}; border-radius: 10px; }}"
+            f"color: {TEXT_SECONDARY}; font-size: 12px; "
+            f"background-color: {CARD_BG}; border: 1px solid {BORDER_LIGHT}; "
+            f"border-radius: 10px; padding: 10px 12px;")
+        self.lite_cfg_summary.setVisible(False)
+        v.addWidget(self.lite_cfg_summary)
+
         # Resolución por dispositivo: la marca el LCD, no es configurable.
         self.dev_rows = QWidget()
         self._dev_rows_lay = QVBoxLayout(self.dev_rows)
@@ -1033,6 +1130,158 @@ class NewProjectDialog(QDialog):
         v.addStretch(1)
         return page
 
+    def _build_page_lite(self):
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 4, 0, 0)
+        v.setSpacing(12)
+
+        title = QLabel("Conexión con ThermalEngineLite")
+        title.setStyleSheet(
+            f"color: {TEXT}; font-size: 18px; font-weight: 700; "
+            f"background: transparent; border: none;")
+        v.addWidget(title)
+        sub = QLabel(
+            "Studio tomará de este equipo los destinos, las dimensiones y los "
+            "sensores en vivo. El tema se publicará allí.")
+        sub.setWordWrap(True)
+        sub.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 12px; "
+            f"background: transparent; border: none;")
+        v.addWidget(sub)
+
+        def field_row(label_text, widget):
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(70)
+            lbl.setStyleSheet(
+                f"color: {TEXT_SECONDARY}; font-size: 12px; font-weight: 600; "
+                f"background: transparent; border: none;")
+            row.addWidget(lbl)
+            row.addWidget(widget, 1)
+            return row
+
+        self.lite_host_edit = QLineEdit()
+        self.lite_host_edit.setMinimumHeight(34)
+        self.lite_host_edit.setPlaceholderText("192.168.1.247")
+        self.lite_host_edit.setStyleSheet(self._field_qss())
+        v.addLayout(field_row("Host / IP", self.lite_host_edit))
+
+        self.lite_port_edit = QLineEdit("4241")
+        self.lite_port_edit.setMinimumHeight(34)
+        self.lite_port_edit.setValidator(self._int_validator(1, 65535))
+        self.lite_port_edit.setStyleSheet(self._field_qss())
+        v.addLayout(field_row("Puerto", self.lite_port_edit))
+
+        self.lite_token_edit = QLineEdit()
+        self.lite_token_edit.setMinimumHeight(34)
+        self.lite_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.lite_token_edit.setPlaceholderText("token del equipo (web_token)")
+        self.lite_token_edit.setStyleSheet(self._field_qss())
+        v.addLayout(field_row("Token", self.lite_token_edit))
+
+        # Prefill con la última conexión usada.
+        last_url = settings.get_setting("lite_last_url", "") or ""
+        if last_url:
+            host = last_url.split("://", 1)[-1]
+            if ":" in host:
+                host, _, port = host.partition(":")
+                self.lite_port_edit.setText(port or "4241")
+            self.lite_host_edit.setText(host)
+        last_token = (settings.get_setting("lite_tokens", {}) or {}).get(
+            last_url, "") if last_url else ""
+        if last_token:
+            self.lite_token_edit.setText(last_token)
+
+        test_row = QHBoxLayout()
+        test_row.setSpacing(10)
+        self.lite_test_btn = QPushButton("Probar conexión")
+        self.lite_test_btn.setMinimumHeight(30)
+        self.lite_test_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; "
+            f"border: 1px solid {ACC}; color: {ACC}; border-radius: 8px; "
+            f"padding: 6px 14px; font-size: 12px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background: rgba(0, 200, 150, 0.12); }}"
+            f"QPushButton:disabled {{ color: {TEXT_FAINT}; "
+            f"border-color: {BORDER_LIGHT}; }}")
+        self.lite_test_btn.clicked.connect(self._run_lite_test)
+        test_row.addWidget(self.lite_test_btn)
+        self.lite_status = QLabel("")
+        self.lite_status.setWordWrap(True)
+        self.lite_status.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 11px; "
+            f"background: transparent; border: none;")
+        test_row.addWidget(self.lite_status, 1)
+        v.addLayout(test_row)
+
+        self.lite_summary = QLabel("")
+        self.lite_summary.setWordWrap(True)
+        self.lite_summary.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 12px; "
+            f"background-color: {CARD_BG}; border: 1px solid {BORDER_LIGHT}; "
+            f"border-radius: 10px; padding: 10px 12px;")
+        self.lite_summary.setVisible(False)
+        v.addWidget(self.lite_summary)
+
+        v.addStretch(1)
+        return page
+
+    def _run_lite_test(self):
+        host = self.lite_host_edit.text().strip()
+        if not host:
+            self.lite_status.setStyleSheet(f"color: {ERROR}; font-size: 11px;")
+            self.lite_status.setText("Introduce el host o la IP del equipo.")
+            return
+        try:
+            port = int(self.lite_port_edit.text().strip() or "4241")
+        except ValueError:
+            port = 4241
+        token = self.lite_token_edit.text().strip()
+
+        from lite_client import LiteSensorClient, normalize_lite_url
+        url = normalize_lite_url(host, port)
+
+        self.lite_test_btn.setEnabled(False)
+        self.lite_status.setStyleSheet(f"color: {WARN}; font-size: 11px;")
+        self.lite_status.setText("Conectando…")
+        QApplication.processEvents()
+
+        ok, info, err = LiteSensorClient.probe(url, token)
+        self.lite_test_btn.setEnabled(True)
+
+        if not ok:
+            self._lite_info = None
+            self.lite_summary.setVisible(False)
+            self.lite_status.setStyleSheet(f"color: {ERROR}; font-size: 11px;")
+            self.lite_status.setText(
+                f"No se pudo conectar a {url}: {err}\n"
+                "Comprueba que ThermalEngineLite está en marcha y el token.")
+            self._update_footer()
+            return
+
+        self._lite_info = info
+        self._lite_url = url
+        self._lite_token = token
+        targets = info.get("targets") or {}
+        self._selected = {k for k, val in targets.items() if val}
+
+        sample = info.get("sensor_sample") or {}
+        names = ", ".join(sorted(k.upper() for k in self._selected)) or "ninguno"
+        self.lite_summary.setText(
+            f"Equipo: {info.get('hostname') or '?'} · "
+            f"{info.get('app', 'Lite')} {info.get('version', '')}\n"
+            f"Tema activo: {info.get('theme') or '?'}\n"
+            f"Destinos: {names}\n"
+            f"Sensores: CPU {float(sample.get('cpu_percent', 0)):.0f}% · "
+            f"{float(sample.get('cpu_temp', 0)):.0f}°C · "
+            f"RAM {float(sample.get('ram_percent', 0)):.0f}%")
+        self.lite_summary.setVisible(True)
+        self.lite_status.setStyleSheet(f"color: {ACC}; font-size: 11px;")
+        self.lite_status.setText("Conectado. Destinos y sensores cargados.")
+        self._refresh_config()
+        self._update_footer()
+
     @staticmethod
     def _field_lbl_qss():
         return (
@@ -1063,54 +1312,215 @@ class NewProjectDialog(QDialog):
 
     # ----------------------------------------------------- páginas / flujo --
     def _page_index(self, page_id):
-        """Mapea un page_id ('devices'|'dmd'|'hdmi'|'config') a índice del stack.
+        """Mapea un page_id a índice del stack.
 
-        El stack fijo es [devices(0), dmd(1), hdmi(2), config(3)]; las páginas
-        DMD/HDMI solo se usan como paso si el usuario las marcó.
+        El stack fijo es [type(0), devices(1), dmd(2), hdmi(3), config(4),
+        lite(5)]; las páginas DMD/HDMI/Lite solo se usan como paso según el tipo
+        de proyecto y los dispositivos marcados.
         """
+        if page_id == "type":
+            return 0
+        if page_id == "devices":
+            return 1
         if page_id == "dmd":
-            return 1 if "dmd" in self._selected else None
+            return 2 if "dmd" in self._selected else None
         if page_id == "hdmi":
-            return 2 if "hdmi" in self._selected else None
-        if page_id == "config":
-            return 3
-        return 0
+            return 3 if "hdmi" in self._selected else None
+        if page_id == "lite":
+            return 5
+        if page_id == "resolution":
+            return 6
+        return 4  # config
+
+    def _build_page_resolution(self):
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 4, 0, 0)
+        v.setSpacing(12)
+
+        title = QLabel("Resolución del canvas")
+        title.setStyleSheet(
+            f"color: {TEXT}; font-size: 18px; font-weight: 700; "
+            f"background: transparent; border: none;")
+        v.addWidget(title)
+        sub = QLabel(
+            "Este proyecto solo tiene salida Web, así que no hay una resolución "
+            "de dispositivo que defina el lienzo. Elige una para crearlo.")
+        sub.setWordWrap(True)
+        sub.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 12px; "
+            f"background: transparent; border: none;")
+        v.addWidget(sub)
+
+        card = QFrame()
+        card.setStyleSheet(
+            f"QFrame {{ background-color: {CARD_BG}; "
+            f"border: 1px solid {BORDER_LIGHT}; border-radius: 10px; }}")
+        form = QVBoxLayout(card)
+        form.setContentsMargins(14, 12, 14, 12)
+        form.setSpacing(8)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        preset_lbl = QLabel("Preset")
+        preset_lbl.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 12px; font-weight: 600; "
+            f"background: transparent; border: none;")
+        row.addWidget(preset_lbl)
+        self.res_preset_combo = QComboBox()
+        self._res_presets = (
+            ("1920 × 480 (panel LCD)", (1920, 480)),
+            ("1280 × 720 (HD)", (1280, 720)),
+            ("1920 × 1080 (Full HD)", (1920, 1080)),
+            ("2560 × 1440 (QHD)", (2560, 1440)),
+            ("800 × 480", (800, 480)),
+            ("480 × 800 (vertical)", (480, 800)),
+        )
+        for label, size in self._res_presets:
+            self.res_preset_combo.addItem(label, size)
+        self.res_preset_combo.addItem("Personalizado…", None)
+        self.res_preset_combo.setMinimumHeight(32)
+        self.res_preset_combo.setStyleSheet(self._field_qss())
+        self.res_preset_combo.currentIndexChanged.connect(self._on_res_preset_changed)
+        row.addWidget(self.res_preset_combo, 1)
+        form.addLayout(row)
+
+        size_row = QHBoxLayout()
+        size_row.setSpacing(8)
+        w_lbl = QLabel("Ancho")
+        w_lbl.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 12px; "
+            f"background: transparent; border: none;")
+        size_row.addWidget(w_lbl)
+        self.res_w_spin = QSpinBox()
+        self.res_w_spin.setRange(16, 8192)
+        self.res_w_spin.setValue(1920)
+        self.res_w_spin.setStyleSheet(self._field_qss())
+        self.res_w_spin.valueChanged.connect(self._on_res_size_changed)
+        size_row.addWidget(self.res_w_spin)
+        h_lbl = QLabel("Alto")
+        h_lbl.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 12px; "
+            f"background: transparent; border: none;")
+        size_row.addWidget(h_lbl)
+        self.res_h_spin = QSpinBox()
+        self.res_h_spin.setRange(16, 8192)
+        self.res_h_spin.setValue(480)
+        self.res_h_spin.setStyleSheet(self._field_qss())
+        self.res_h_spin.valueChanged.connect(self._on_res_size_changed)
+        size_row.addWidget(self.res_h_spin)
+        size_row.addStretch(1)
+        form.addLayout(size_row)
+
+        self.res_preview_label = QLabel("")
+        self.res_preview_label.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 11px; "
+            f"background: transparent; border: none;")
+        form.addWidget(self.res_preview_label)
+
+        v.addWidget(card)
+        v.addStretch(1)
+        self._on_res_preset_changed()
+        return page
+
+    def _on_res_preset_changed(self):
+        size = self.res_preset_combo.currentData()
+        if size is not None:
+            for spin, value in ((self.res_w_spin, size[0]), (self.res_h_spin, size[1])):
+                spin.blockSignals(True)
+                spin.setValue(int(value))
+                spin.blockSignals(False)
+        self._update_res_preview()
+
+    def _on_res_size_changed(self, *args):
+        # Al tocar ancho/alto manualmente, el preset pasa a "Personalizado".
+        current = (self.res_w_spin.value(), self.res_h_spin.value())
+        for index in range(self.res_preset_combo.count()):
+            data = self.res_preset_combo.itemData(index)
+            if data is not None and tuple(data) == current:
+                self.res_preset_combo.blockSignals(True)
+                self.res_preset_combo.setCurrentIndex(index)
+                self.res_preset_combo.blockSignals(False)
+                break
+        else:
+            self.res_preset_combo.blockSignals(True)
+            self.res_preset_combo.setCurrentIndex(self.res_preset_combo.count() - 1)
+            self.res_preset_combo.blockSignals(False)
+        self._update_res_preview()
+
+    def _update_res_preview(self):
+        if not hasattr(self, "res_preview_label"):
+            return
+        self.res_preview_label.setText(
+            f"Canvas: {self.res_w_spin.value()} × {self.res_h_spin.value()} px")
+
+    def _web_canvas_resolution(self):
+        return (int(self.res_w_spin.value()), int(self.res_h_spin.value()))
+
+    def _is_web_only(self):
+        """True si el proyecto (studio o lite) solo tiene salida Web.
+
+        Sin LCD/DMD/HDMI no hay una resolución de canvas definida, así que el
+        asistente pide una para crear un lienzo custom.
+        """
+        if self._project_type == "lite":
+            if not self._lite_info:
+                return False
+            targets = self._lite_info.get("targets") or {}
+            return bool(targets.get("web")) and not any(
+                targets.get(k) for k in ("lcd", "dmd", "hdmi"))
+        return self._selected == {"web"}
 
     def _order(self):
-        """Secuencia de paso actual según los dispositivos marcados.
+        """Secuencia de pasos según el tipo de proyecto y dispositivos.
 
-        En modo añadir (botón "+") se omite el último paso de configuración,
-        que solo tiene sentido al crear un proyecto nuevo.
+        - En modo añadir (botón "+") no hay paso de tipo: flujo clásico.
+        - Proyecto Lite: Tipo -> Lite [-> Resolución] -> Configuración.
+        - Proyecto Studio: Tipo -> Dispositivo [-> DMD/HDMI] [-> Resolución] -> Config.
         """
-        seq = ["devices"]
-        if "dmd" in self._selected:
-            seq.append("dmd")
-        if "hdmi" in self._selected:
-            seq.append("hdmi")
-        # En modo añadir, el paso "config" solo se incluye si se añade un LCD
-        # (su modelo se elige ahí). En proyecto nuevo siempre se incluye.
-        if not self._add_mode or "lcd" in self._selected:
+        if self._add_mode:
+            seq = ["devices"]
+            if "dmd" in self._selected:
+                seq.append("dmd")
+            if "hdmi" in self._selected:
+                seq.append("hdmi")
+            if "custom" in self._selected:
+                seq.append("resolution")
+            if "lcd" in self._selected or "custom" in self._selected:
+                seq.append("config")
+            return seq
+        seq = ["type"]
+        if self._project_type == "lite":
+            seq.append("lite")
+            if self._is_web_only():
+                seq.append("resolution")
+            seq.append("config")
+        else:
+            seq.append("devices")
+            if "dmd" in self._selected:
+                seq.append("dmd")
+            if "hdmi" in self._selected:
+                seq.append("hdmi")
+            if self._is_web_only() or "custom" in self._selected:
+                seq.append("resolution")
             seq.append("config")
         return seq
 
     def _step_labels(self):
-        seq = self._order()
-        labels = []
-        for sid in seq:
-            if sid == "devices":
-                labels.append("Dispositivo")
-            elif sid == "dmd":
-                labels.append("DMD")
-            elif sid == "hdmi":
-                labels.append("HDMI")
-            else:
-                labels.append("Configuración")
-        return labels
+        names = {"type": "Tipo", "lite": "Lite", "devices": "Dispositivo",
+                 "dmd": "DMD", "hdmi": "HDMI", "resolution": "Resolución",
+                 "config": "Configuración"}
+        return [names.get(sid, sid.title()) for sid in self._order()]
 
     def _sync_indicator(self, current):
         seq = self._order()
         self._indicator.set_steps(self._step_labels())
-        self._indicator.set_step(seq.index(current))
+        try:
+            self._indicator.set_step(seq.index(current))
+        except ValueError:
+            # El paso ya no está en la secuencia (p. ej. cambió la selección
+            # de dispositivos): mantener el indicador en un índice válido.
+            self._indicator.set_step(0)
 
     def _on_card_clicked(self, dev_id):
         if dev_id not in self.cards:
@@ -1127,6 +1537,10 @@ class NewProjectDialog(QDialog):
             self._selected.add(dev_id)
             card.set_selected(True)
         self._update_footer()
+        try:
+            self._sync_indicator(self._current_step_id())
+        except Exception:
+            pass
 
     def _update_footer(self):
         has = len(self._selected) > 0
@@ -1145,31 +1559,57 @@ class NewProjectDialog(QDialog):
     def _current_step_id(self):
         idx = self.stack.currentIndex()
         if idx == 0:
-            return "devices"
+            return "type"
         if idx == 1:
-            return "dmd" if "dmd" in self._selected else "hdmi" \
-                if "hdmi" in self._selected else "config"
+            return "devices"
         if idx == 2:
+            return "dmd" if "dmd" in self._selected else (
+                "hdmi" if "hdmi" in self._selected else "config")
+        if idx == 3:
             return "hdmi" if "hdmi" in self._selected else "config"
+        if idx == 5:
+            return "lite"
+        if idx == 6:
+            return "resolution"
         return "config"
 
     def _set_step(self, step, refresh=True):
-        # Normalizar a id string ('devices'|'dmd'|'config'): el constructor
-        # arranca con el índice 0 (devices).
+        # Normalizar arranque por índice (el constructor usa 0).
         if step == 0:
-            step = "devices"
+            step = "type"
         page = self._page_index(step)
         self.stack.setCurrentIndex(page)
         self._sync_indicator(step)
-        is_last = step == self._order()[-1]
+        seq = self._order()
+        is_last = step == seq[-1]
         if is_last:
             self.action_btn.setText("Añadir" if self._add_mode else "Crear proyecto")
         else:
             self.action_btn.setText("Continuar →")
-        back_text = "Cancelar" if step == "devices" else "← Atrás"
-        self.back_btn.setText(back_text)
-        if step == "devices":
+        is_first = step == seq[0]
+        self.back_btn.setText("Cancelar" if is_first else "← Atrás")
+
+        if step == "type":
+            self.action_btn.setEnabled(True)
+            self.footer_hint.setStyleSheet(
+                f"color: {TEXT_DIM}; font-size: 11px;")
+            self.footer_hint.setText(
+                "Elige el tipo de proyecto para continuar.")
+        elif step == "lite":
+            self.action_btn.setEnabled(self._lite_info is not None)
+            self.footer_hint.setStyleSheet(
+                f"color: {TEXT_DIM}; font-size: 11px;")
+            self.footer_hint.setText(
+                "Prueba la conexión con el equipo Lite para continuar.")
+        elif step == "devices":
             self._update_footer()
+        elif step == "resolution":
+            self.action_btn.setEnabled(True)
+            self.footer_hint.setStyleSheet(
+                f"color: {TEXT_DIM}; font-size: 11px;")
+            self.footer_hint.setText(
+                "Este proyecto solo tiene salida Web: elige la resolución "
+                "del canvas.")
         else:
             if refresh:
                 self._refresh_config()
@@ -1177,6 +1617,7 @@ class NewProjectDialog(QDialog):
                     if self._add_mode else
                     "El proyecto se creará con los dispositivos seleccionados.")
             self.footer_hint.setText(hint)
+            self.action_btn.setEnabled(True)
 
     @staticmethod
     def _clear_layout(lay):
@@ -1192,6 +1633,29 @@ class NewProjectDialog(QDialog):
                     NewProjectDialog._clear_layout(sub)
 
     def _refresh_config(self):
+        # Proyecto Lite: los destinos/dimensiones vienen del equipo remoto.
+        if self._project_type == "lite" and self._lite_info:
+            info = self._lite_info
+            targets = info.get("targets") or {}
+            names = ", ".join(sorted(k.upper() for k in targets if targets[k])) \
+                or "ninguno"
+            lcd = info.get("lcd") or {}
+            dmd = info.get("dmd") or {}
+            self._lcd_model = info.get("lcd_model")
+            self.lite_cfg_summary.setText(
+                f"Equipo Lite: {info.get('hostname') or '?'} ({self._lite_url})\n"
+                f"Destinos: {names}\n"
+                f"LCD: {lcd.get('display_width')}×{lcd.get('display_height')} · "
+                f"DMD: {dmd.get('width')}×{dmd.get('height')}\n"
+                "El tema se publicará en este equipo; Studio no envía a "
+                "dispositivos locales.")
+            self.lite_cfg_summary.setVisible(True)
+            self.dev_rows.setVisible(False)
+            self.lcd_extra.setVisible(False)
+            return
+
+        self.lite_cfg_summary.setVisible(False)
+
         has_lcd = "lcd" in self._selected
         has_dmd = "dmd" in self._selected
         has_hdmi = "hdmi" in self._selected
@@ -1352,7 +1816,12 @@ class NewProjectDialog(QDialog):
     def _on_action(self):
         seq = self._order()
         current = self._current_step_id()
-        if len(self._selected) == 0:
+        if current == "devices" and len(self._selected) == 0:
+            return
+        if current == "lite" and self._lite_info is None:
+            self.lite_status.setStyleSheet(f"color: {WARN}; font-size: 11px;")
+            self.lite_status.setText(
+                "Prueba la conexión antes de continuar.")
             return
         idx = seq.index(current)
         if idx >= len(seq) - 1:
@@ -1488,10 +1957,65 @@ class NewProjectDialog(QDialog):
     # --------------------------------------------------------------- data ---
     def data(self):
         name = self.name_edit.text().strip() or "Untitled Project"
+
+        if self._project_type == "lite" and self._lite_info:
+            info = self._lite_info
+            targets = info.get("targets") or {}
+            dmd = dict(info.get("dmd") or {})
+            hdmi = info.get("hdmi") or {}
+            lcd = info.get("lcd") or {}
+            dmd_config = None
+            if targets.get("dmd"):
+                dmd_config = {
+                    "width": dmd.get("width", 128),
+                    "height": dmd.get("height", 32),
+                    "ip": dmd.get("ip"),
+                    "port": dmd.get("port", 8889),
+                    "fps": dmd.get("fps", 12),
+                    "model_id": dmd.get("model_id") or
+                    f"dmd_{dmd.get('width', 128)}_{dmd.get('height', 32)}",
+                }
+            hdmi_config = None
+            if targets.get("hdmi"):
+                hdmi_config = {
+                    "width": hdmi.get("width"),
+                    "height": hdmi.get("height"),
+                    "scale_mode": "letterbox",
+                    "fps": int(settings.get_setting("target_fps", 30) or 30),
+                }
+            return {
+                "name": name,
+                "project_type": "lite",
+                "lite": {
+                    "url": self._lite_url,
+                    "port": int(self.lite_port_edit.text().strip() or "4241"),
+                    "name": info.get("hostname"),
+                },
+                "lite_token": self._lite_token,
+                "targets": {
+                    "web": bool(targets.get("web")),
+                    "lcd": bool(targets.get("lcd")),
+                    "dmd": bool(targets.get("dmd")),
+                    "hdmi": bool(targets.get("hdmi")),
+                    "custom": False,
+                },
+                "lcd_model": info.get("lcd_model"),
+                "dmd_config": dmd_config,
+                "hdmi_config": hdmi_config,
+                "custom_config": None,
+                "lcd_display_width": lcd.get("display_width"),
+                "lcd_display_height": lcd.get("display_height"),
+                "web_width": (self._web_canvas_resolution()[0]
+                              if self._is_web_only() else None),
+                "web_height": (self._web_canvas_resolution()[1]
+                               if self._is_web_only() else None),
+            }
+
         web = "web" in self._selected
         lcd = "lcd" in self._selected
         dmd = "dmd" in self._selected
         hdmi = "hdmi" in self._selected
+        custom = "custom" in self._selected
 
         # Config DMD vigente (solo se rellena si el usuario marcó DMD)
         dmd_config = None
@@ -1532,17 +2056,27 @@ class NewProjectDialog(QDialog):
 
         return {
             "name": name,
+            "project_type": "studio",
             "web": web,
             "lcd": lcd,
             "dmd": dmd,
             "hdmi": hdmi,
+            "custom": custom,
             "lcd_model": self._lcd_model if lcd else None,
             "dmd_config": dmd_config,
             "hdmi_config": hdmi_config,
+            "custom_config": ({"width": self._web_canvas_resolution()[0],
+                               "height": self._web_canvas_resolution()[1]}
+                              if custom else None),
             "targets": {
                 "web": web,
                 "lcd": lcd,
                 "dmd": dmd,
                 "hdmi": hdmi,
+                "custom": custom,
             },
+            "web_width": (self._web_canvas_resolution()[0]
+                          if self._is_web_only() else None),
+            "web_height": (self._web_canvas_resolution()[1]
+                           if self._is_web_only() else None),
         }

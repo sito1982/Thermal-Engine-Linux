@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "properties.py"
-source_sha256: b7ee66d0c14b795ef6bed6ac7f579e622290fcc4c5474adc95eb688b3516f525
-source_bytes: 144485
-source_lines: 3275
+source_sha256: 24b4441e0d27f078bf7531c4dd2604aa5534e790f5ee3b90e5046283f1bd3112
+source_bytes: 173942
+source_lines: 3854
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -31,7 +31,7 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 - `from PySide6.QtWidgets import QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget`
 - `from ui_style import TEXT_DIM, SectionLabel`
 - `from actions import args_to_text, parse_args_text`
-- `from constants import DATA_SOURCES_CATEGORIZED, DISPLAY_HEIGHT, DISPLAY_WIDTH, ELEMENT_FIELD_VISIBILITY`
+- `from constants import DEFAULT_FONT_FAMILY, DISPLAY_HEIGHT, DISPLAY_WIDTH, DMD_TRANSITIONS, ELEMENT_FIELD_VISIBILITY, PORTABLE_FONT_FAMILIES, exclusive_provider, exclusive_provider_label, get_active_data_sources`
 
 ### Clases directas
 
@@ -633,10 +633,15 @@ class GradientBarEditor(QWidget):
 
 from actions import args_to_text, parse_args_text
 from constants import (
-    DATA_SOURCES_CATEGORIZED,
+    DEFAULT_FONT_FAMILY,
     DISPLAY_HEIGHT,
     DISPLAY_WIDTH,
+    DMD_TRANSITIONS,
     ELEMENT_FIELD_VISIBILITY,
+    PORTABLE_FONT_FAMILIES,
+    exclusive_provider,
+    exclusive_provider_label,
+    get_active_data_sources,
 )
 
 
@@ -679,6 +684,8 @@ class PropertiesPanel(QWidget):
     alignment_changed = Signal()  # Emitted when elements are aligned
     alignment_will_change = Signal()  # Emitted before alignment (for undo)
     test_action_requested = Signal()  # Test button for the HDMI touch action
+    # Ajustes de la pantalla activa (duration, transition, transition_ms).
+    screen_settings_changed = Signal(float, str, int)
 
     def __init__(self):
         super().__init__()
@@ -689,6 +696,10 @@ class PropertiesPanel(QWidget):
         self._dmd_mode = False  # True cuando la pestaña activa es DMD (fuentes Matrix Sans)
         self._dmd_size = None  # (width, height) del canvas DMD activo
         self._hdmi_size = None  # (width, height) del canvas HDMI activo
+        self._hdmi_mode = False  # True cuando la pestaña activa es HDMI (acciones táctiles)
+        self._lcd_size = None  # (width, height) de un canvas LCD/Web custom
+        self._custom_mode = False  # True cuando la pestaña activa es Custom
+        self._custom_size = None  # (width, height) del canvas Custom
 
         # Section headers for visibility control
         self.section_headers = {}
@@ -732,8 +743,8 @@ class PropertiesPanel(QWidget):
             self._set_spin_range(self.multi_y_spin, -1000, height + 1000)
             self._set_spin_range(self.multi_w_spin, 1, width * 2)
             self._set_spin_range(self.multi_h_spin, 1, height * 2)
-        elif self._hdmi_size:
-            canvas_w, canvas_h = self._hdmi_size
+        elif self._hdmi_size or (self._custom_mode and self._custom_size):
+            canvas_w, canvas_h = self._hdmi_size or self._custom_size
             radius_max = max(300, min(canvas_w, canvas_h) // 2)
             self._set_spin_range(self.x_spin, 0, canvas_w)
             self._set_spin_range(self.y_spin, 0, canvas_h)
@@ -748,13 +759,17 @@ class PropertiesPanel(QWidget):
             self._set_spin_range(self.multi_w_spin, 1, canvas_w * 2)
             self._set_spin_range(self.multi_h_spin, 1, canvas_h * 2)
         else:
-            canvas_w = DISPLAY_HEIGHT if self.vertical_mode else DISPLAY_WIDTH
-            canvas_h = DISPLAY_WIDTH if self.vertical_mode else DISPLAY_HEIGHT
+            if self._lcd_size:
+                canvas_w, canvas_h = self._lcd_size
+            elif self.vertical_mode:
+                canvas_w, canvas_h = DISPLAY_HEIGHT, DISPLAY_WIDTH
+            else:
+                canvas_w, canvas_h = DISPLAY_WIDTH, DISPLAY_HEIGHT
             self._set_spin_range(self.x_spin, 0, canvas_w)
             self._set_spin_range(self.y_spin, 0, canvas_h)
             self._set_spin_range(self.width_spin, 10, canvas_w)
             self._set_spin_range(self.height_spin, 10, canvas_h)
-            self._set_spin_range(self.radius_spin, 20, 300)
+            self._set_spin_range(self.radius_spin, 20, max(300, min(canvas_w, canvas_h) // 2))
             self._set_spin_range(self.font_size_spin, 8, 200)
             self._set_spin_range(self.label_font_size_spin, 8, 200)
             self._set_spin_range(self.line_width_spin, 1, 80)
@@ -773,7 +788,9 @@ class PropertiesPanel(QWidget):
         mínimos de LCD.
         """
         self._dmd_mode = bool(dmd_active)
+        self._hdmi_mode = False
         self._hdmi_size = None
+        self._custom_mode = False
         if dmd_active and width and height:
             self._dmd_size = (int(width), int(height))
         self._apply_dimension_ranges()
@@ -798,6 +815,27 @@ class PropertiesPanel(QWidget):
         if getattr(self, "current_element", None) is not None:
             self.set_element(self.current_element)
 
+    def set_lcd_canvas_size(self, width=None, height=None):
+        """Ajusta los rangos a un canvas LCD/Web custom (proyecto solo-Web)."""
+        self._custom_mode = False
+        self._lcd_size = (int(width), int(height)) if width and height else None
+        self._apply_dimension_ranges()
+        if getattr(self, "current_element", None) is not None:
+            self.set_element(self.current_element)
+
+    def set_custom_mode(self, width=None, height=None):
+        """Ajusta los rangos al canvas Custom (resolución libre, sin táctil)."""
+        self._dmd_mode = False
+        self._hdmi_mode = False
+        self._lcd_size = None
+        self._custom_mode = True
+        self._custom_size = ((int(width), int(height))
+                             if width and height else None)
+        self._apply_dimension_ranges()
+        self.load_system_fonts()
+        if getattr(self, "current_element", None) is not None:
+            self.set_element(self.current_element)
+
     def set_hdmi_mode(self, width=None, height=None):
         """Ajusta los rangos al canvas HDMI (resolución del monitor).
 
@@ -806,6 +844,8 @@ class PropertiesPanel(QWidget):
         real del monitor para no recortar los valores.
         """
         self._dmd_mode = False
+        self._hdmi_mode = True
+        self._custom_mode = False
         self._hdmi_size = (int(width), int(height)) if width and height else None
         self._apply_dimension_ranges()
         self.load_system_fonts()
@@ -854,11 +894,49 @@ class PropertiesPanel(QWidget):
         self.no_selection_container = QWidget()
         no_selection_layout = QVBoxLayout(self.no_selection_container)
         no_selection_layout.setContentsMargins(0, 0, 0, 0)
-        no_selection_layout.addStretch()
         self.no_selection_label = QLabel("Select an element to edit its properties")
         self.no_selection_label.setStyleSheet(f"color: {TEXT_DIM}; padding: 20px; font-style: italic;")
         self.no_selection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.no_selection_label.setWordWrap(True)
+
+        # Ajustes de la pantalla activa (solo cuando el canvas tiene pantallas),
+        # anclados arriba del panel.
+        self.screen_group = QGroupBox("Screen")
+        screen_form = QFormLayout(self.screen_group)
+        screen_form.setContentsMargins(8, 8, 8, 8)
+        screen_form.setSpacing(6)
+        self.screen_title_label = QLabel("")
+        self.screen_title_label.setStyleSheet(f"color: {TEXT_DIM};")
+        self.screen_title_label.setWordWrap(True)
+        screen_form.addRow(self.screen_title_label)
+
+        self.screen_duration_spin = NoScrollDoubleSpinBox()
+        self.screen_duration_spin.setRange(0.5, 600.0)
+        self.screen_duration_spin.setDecimals(1)
+        self.screen_duration_spin.setSingleStep(0.5)
+        self.screen_duration_spin.setSuffix(" s")
+        self.screen_duration_spin.valueChanged.connect(self._on_screen_settings_changed)
+        screen_form.addRow("Duration:", self.screen_duration_spin)
+
+        self.screen_transition_combo = NoScrollComboBox()
+        for transition_id, label in DMD_TRANSITIONS:
+            self.screen_transition_combo.addItem(label, transition_id)
+        self.screen_transition_combo.currentIndexChanged.connect(
+            self._on_screen_settings_changed)
+        screen_form.addRow("Transition:", self.screen_transition_combo)
+
+        self.screen_transition_ms_spin = NoScrollSpinBox()
+        self.screen_transition_ms_spin.setRange(0, 2000)
+        self.screen_transition_ms_spin.setSingleStep(50)
+        self.screen_transition_ms_spin.setSuffix(" ms")
+        self.screen_transition_ms_spin.valueChanged.connect(
+            self._on_screen_settings_changed)
+        screen_form.addRow("Time:", self.screen_transition_ms_spin)
+
+        self._screen_settings_updating = False
+        self.screen_group.setVisible(False)
+        no_selection_layout.addWidget(self.screen_group)
+        no_selection_layout.addStretch()
         no_selection_layout.addWidget(self.no_selection_label)
         no_selection_layout.addStretch()
         layout.addWidget(self.no_selection_container)
@@ -872,7 +950,6 @@ class PropertiesPanel(QWidget):
 
         self.props_widget = QWidget()
         self.props_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self.props_widget.setMaximumWidth(250)
         self.props_layout = QVBoxLayout(self.props_widget)
         self.props_layout.setSpacing(8)
         self.props_layout.setContentsMargins(4, 4, 4, 4)
@@ -1333,6 +1410,12 @@ class PropertiesPanel(QWidget):
         self.scale_proportionally_label = QLabel("")
         media_layout.addRow(self.scale_proportionally_label, self.scale_proportionally_check)
 
+        self.tint_check = QCheckBox("Tint")
+        self.tint_check.setToolTip("Recolorea el icono con el color del elemento")
+        self.tint_check.stateChanged.connect(self.on_property_changed)
+        self.tint_label = QLabel("")
+        media_layout.addRow(self.tint_label, self.tint_check)
+
         # GIF options
         self.gif_path_edit = QLineEdit()
         self.gif_path_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1362,11 +1445,44 @@ class PropertiesPanel(QWidget):
         self.scale_mode_label = self.create_label("Scale:")
         media_layout.addRow(self.scale_mode_label, self.scale_mode_combo)
 
+        # Video element options
+        self.video_path_edit = QLineEdit()
+        self.video_path_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.video_path_edit.setMinimumWidth(50)
+        self.video_path_edit.textChanged.connect(self.on_property_changed)
+        self.video_browse_btn = QPushButton("...")
+        self.video_browse_btn.setFixedWidth(30)
+        self.video_browse_btn.clicked.connect(self.browse_video)
+
+        video_layout = QHBoxLayout()
+        video_layout.setContentsMargins(0, 0, 0, 0)
+        video_layout.addWidget(self.video_path_edit, 1)
+        video_layout.addWidget(self.video_browse_btn, 0)
+
+        self.video_widget = QWidget()
+        self.video_widget.setLayout(video_layout)
+        self.video_label = self.create_label("Video:")
+        media_layout.addRow(self.video_label, self.video_widget)
+
+        self.video_fit_combo = NoScrollComboBox()
+        self.video_fit_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.video_fit_combo.setMinimumWidth(50)
+        self.video_fit_combo.addItem("Fit Height", "fit_height")
+        self.video_fit_combo.addItem("Fit Width", "fit_width")
+        self.video_fit_combo.addItem("Stretch", "stretch")
+        self.video_fit_combo.addItem("Contain", "contain")
+        self.video_fit_combo.currentIndexChanged.connect(self.on_property_changed)
+        self.video_fit_label = self.create_label("Fit:")
+        media_layout.addRow(self.video_fit_label, self.video_fit_combo)
+
         self.section_fields['media'] = [
             (self.image_label, self.image_widget),
             (self.scale_proportionally_label, self.scale_proportionally_check),
+            (self.tint_label, self.tint_check),
             (self.gif_label, self.gif_widget),
-            (self.scale_mode_label, self.scale_mode_combo)
+            (self.scale_mode_label, self.scale_mode_combo),
+            (self.video_label, self.video_widget),
+            (self.video_fit_label, self.video_fit_combo)
         ]
 
         # === OPTIONS SECTION ===
@@ -1489,6 +1605,68 @@ class PropertiesPanel(QWidget):
         self.color_empty_label = self.create_label("Empty Color:")
         options_layout.addRow(self.color_empty_label, self.color_empty_btn)
 
+        self.target_spin = NoScrollDoubleSpinBox()
+        self.target_spin.setRange(0.0, 100000.0)
+        self.target_spin.setDecimals(2)
+        self.target_spin.valueChanged.connect(self.on_property_changed)
+        self.target_label = self.create_label("Target:")
+        options_layout.addRow(self.target_label, self.target_spin)
+
+        self.sources_edit = QLineEdit()
+        self.sources_edit.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                        QSizePolicy.Policy.Fixed)
+        self.sources_edit.setPlaceholderText("cpu_percent, cpu_temp, gpu_temp")
+        self.sources_edit.textChanged.connect(self.on_property_changed)
+        self.sources_label = self.create_label("Sources:")
+        options_layout.addRow(self.sources_label, self.sources_edit)
+
+        # LCD element options (ring_gauge / segment_bar / level_bar / zone_bar)
+        self.orientation_combo = NoScrollComboBox()
+        self.orientation_combo.addItem("Horizontal", "horizontal")
+        self.orientation_combo.addItem("Vertical", "vertical")
+        self.orientation_combo.currentIndexChanged.connect(self.on_property_changed)
+        self.orientation_label = self.create_label("Orientation:")
+        options_layout.addRow(self.orientation_label, self.orientation_combo)
+
+        self.arc_span_spin = NoScrollSpinBox()
+        self.arc_span_spin.setRange(30, 360)
+        self.arc_span_spin.setValue(270)
+        self.arc_span_spin.valueChanged.connect(self.on_property_changed)
+        self.arc_span_label = self.create_label("Arc Span (°):")
+        options_layout.addRow(self.arc_span_label, self.arc_span_spin)
+
+        self.start_angle_spin = NoScrollSpinBox()
+        self.start_angle_spin.setRange(-180, 180)
+        self.start_angle_spin.setValue(-135)
+        self.start_angle_spin.valueChanged.connect(self.on_property_changed)
+        self.start_angle_label = self.create_label("Start Angle (°):")
+        options_layout.addRow(self.start_angle_label, self.start_angle_spin)
+
+        self.show_ticks_check = QCheckBox("Show Ticks")
+        self.show_ticks_check.stateChanged.connect(self.on_property_changed)
+        self.show_ticks_label = QLabel("")
+        options_layout.addRow(self.show_ticks_label, self.show_ticks_check)
+
+        self.thresholds_edit = QLineEdit()
+        self.thresholds_edit.setPlaceholderText("70, 90")
+        self.thresholds_edit.textChanged.connect(self.on_property_changed)
+        self.thresholds_label = self.create_label("Thresholds:")
+        options_layout.addRow(self.thresholds_label, self.thresholds_edit)
+
+        # Disk element: barra vertical (free/used/none) y sparklines read/write.
+        self.bar_mode_combo = NoScrollComboBox()
+        self.bar_mode_combo.addItem("Free space", "free")
+        self.bar_mode_combo.addItem("Used space", "used")
+        self.bar_mode_combo.addItem("None", "none")
+        self.bar_mode_combo.currentIndexChanged.connect(self.on_property_changed)
+        self.bar_mode_label = self.create_label("Bar:")
+        options_layout.addRow(self.bar_mode_label, self.bar_mode_combo)
+
+        self.show_sparklines_check = QCheckBox("Show Read/Write Sparklines")
+        self.show_sparklines_check.stateChanged.connect(self.on_property_changed)
+        self.show_sparklines_label = QLabel("")
+        options_layout.addRow(self.show_sparklines_label, self.show_sparklines_check)
+
         self.section_fields['options'] = [
             (self.show_background_label, self.show_background_check),
             (self.show_label_label, self.show_label_check),
@@ -1507,7 +1685,16 @@ class PropertiesPanel(QWidget):
             (self.segments_label, self.segments_spin),
             (self.gap_label, self.gap_spin),
             (self.line_width_label, self.line_width_spin),
-            (self.color_empty_label, self.color_empty_btn)
+            (self.color_empty_label, self.color_empty_btn),
+            (self.target_label, self.target_spin),
+            (self.sources_label, self.sources_edit),
+            (self.orientation_label, self.orientation_combo),
+            (self.arc_span_label, self.arc_span_spin),
+            (self.start_angle_label, self.start_angle_spin),
+            (self.show_ticks_label, self.show_ticks_check),
+            (self.thresholds_label, self.thresholds_edit),
+            (self.bar_mode_label, self.bar_mode_combo),
+            (self.show_sparklines_label, self.show_sparklines_check)
         ]
 
         # --- Interaction (HDMI touch) ---
@@ -1518,9 +1705,18 @@ class PropertiesPanel(QWidget):
         self.tap_action_combo = NoScrollComboBox()
         self.tap_action_combo.addItem("None", "none")
         self.tap_action_combo.addItem("Run command", "command")
+        self.tap_action_combo.addItem("Screen transition", "transition")
         self.tap_action_combo.currentIndexChanged.connect(self.on_tap_action_changed)
         self.tap_action_label = self.create_label("On tap:")
         interaction_layout.addRow(self.tap_action_label, self.tap_action_combo)
+
+        # Destino de la transición (solo si On tap = Screen transition).
+        self.tap_screen_combo = NoScrollComboBox()
+        self.tap_screen_combo.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                            QSizePolicy.Policy.Fixed)
+        self.tap_screen_combo.currentIndexChanged.connect(self.on_property_changed)
+        self.tap_screen_label = self.create_label("Go to screen:")
+        interaction_layout.addRow(self.tap_screen_label, self.tap_screen_combo)
 
         self.tap_command_edit = QLineEdit()
         self.tap_command_edit.textChanged.connect(self.on_property_changed)
@@ -1561,11 +1757,44 @@ class PropertiesPanel(QWidget):
 
         self.section_fields['interaction'] = [
             (self.tap_action_label, self.tap_action_combo),
+            (self.tap_screen_label, self.tap_screen_combo),
             (self.tap_command_label, self.tap_command_edit),
             (self.tap_args_label, self.tap_args_edit),
             (self.tap_workdir_label, self.tap_workdir_edit),
         ]
         self._update_tap_controls()
+
+        # --- Navigation (widget táctil touch_nav) ---
+        nav_frame, nav_layout = self.create_section("Navigation")
+        self.section_headers['navigation'] = nav_frame
+        self.props_layout.addWidget(nav_frame)
+
+        self.nav_position_combo = NoScrollComboBox()
+        self.nav_position_combo.addItem("Bottom", "bottom")
+        self.nav_position_combo.addItem("Top", "top")
+        self.nav_position_combo.addItem("Left", "left")
+        self.nav_position_combo.addItem("Right", "right")
+        self.nav_position_combo.currentIndexChanged.connect(self.on_property_changed)
+        self.nav_position_label = self.create_label("Position:")
+        nav_layout.addRow(self.nav_position_label, self.nav_position_combo)
+
+        self.nav_items_label = self.create_label("Items:")
+        self.nav_items_container = QWidget()
+        self.nav_items_layout = QVBoxLayout(self.nav_items_container)
+        self.nav_items_layout.setContentsMargins(0, 0, 0, 0)
+        self.nav_items_layout.setSpacing(4)
+        nav_layout.addRow(self.nav_items_label, self.nav_items_container)
+
+        self.nav_add_btn = QPushButton("Add item")
+        self.nav_add_btn.clicked.connect(self._add_nav_item)
+        nav_layout.addRow(QLabel(""), self.nav_add_btn)
+
+        self.section_fields['navigation'] = [
+            (self.nav_position_label, self.nav_position_combo),
+        ]
+        self._nav_rows = []
+        self._nav_updating = False
+        self._screen_targets = []
 
         # Add stretch at the end to push sections to top
         self.props_layout.addStretch()
@@ -1761,32 +1990,27 @@ class PropertiesPanel(QWidget):
         self.scroll_area.setVisible(False)
 
     def load_system_fonts(self):
-        font_db = QFontDatabase()
-        families = font_db.families()
+        # Solo fuentes "portables" (empaquetadas en assets/fonts/ttf): Lite las
+        # renderiza igual, sin depender de las fuentes del sistema.
+        for combo in (self.font_family_combo, self.label_font_family_combo):
+            combo.blockSignals(True)
+            combo.clear()
+            for name in PORTABLE_FONT_FAMILIES:
+                combo.addItem(name)
+            combo.blockSignals(False)
 
-        common_fonts = ["Arial", "Segoe UI", "Tahoma", "Verdana", "Times New Roman",
-                        "Calibri", "Consolas", "Courier New", "Georgia", "Impact"]
-
-        added = set()
-        for font in common_fonts:
-            if font in families:
-                self.font_family_combo.addItem(font)
-                self.label_font_family_combo.addItem(font)
-                added.add(font)
-
-        self.font_family_combo.insertSeparator(len(added))
-        self.label_font_family_combo.insertSeparator(len(added))
-
-        for family in sorted(families):
-            if family not in added and not family.startswith("@"):
-                self.font_family_combo.addItem(family)
-                self.label_font_family_combo.addItem(family)
+    @staticmethod
+    def _ensure_font_item(combo, family):
+        """Añade la familia si no está (para preservar fuentes no portables)."""
+        if family and combo.findText(family) < 0:
+            combo.addItem(family)
 
     def setup_source_combo(self):
         """Setup the source combo box with categorized items."""
         self.source_combo.clear()
 
-        for category, sources in DATA_SOURCES_CATEGORIZED.items():
+        active = get_active_data_sources()
+        for category, sources in active.items():
             # Add category header (disabled, styled differently)
             self.source_combo.addItem(f"── {category} ──")
             idx = self.source_combo.count() - 1
@@ -1805,20 +2029,52 @@ class PropertiesPanel(QWidget):
                 # Store the actual source ID in item data
                 self.source_combo.setItemData(idx, source_id, Qt.ItemDataRole.UserRole)
 
+        # Proveedor exclusivo sin fuentes (p. ej. Lite offline): indicarlo en vez
+        # de dejar solo `Static` sin explicación.
+        if exclusive_provider() and not any(cat != "Static" for cat in active):
+            label = exclusive_provider_label() or exclusive_provider()
+            self.source_combo.addItem(f"── {label} (offline) ──")
+            idx = self.source_combo.count() - 1
+            self.source_combo.model().item(idx).setEnabled(False)
+
+    def refresh_source_combo(self):
+        """Reconstruye el combo de fuentes (plugins/exclusividad) preservando la
+        selección actual."""
+        current = None
+        idx = self.source_combo.currentIndex()
+        if idx >= 0:
+            current = self.source_combo.itemData(idx, Qt.ItemDataRole.UserRole)
+        self.setup_source_combo()
+        if current:
+            self.set_source_by_id(current)
+
     def get_selected_source(self):
         """Get the currently selected source ID."""
         idx = self.source_combo.currentIndex()
         source_id = self.source_combo.itemData(idx, Qt.ItemDataRole.UserRole)
         return source_id if source_id else "static"
-
     def set_source_by_id(self, source_id):
-        """Set the combo box selection by source ID."""
+        """Selecciona la fuente por id; nunca recursa.
+
+        Si la fuente no está en el combo (p. ej. un proveedor exclusivo activo
+        que no la expone), se añade un item placeholder para conservarla y no
+        reescribir el elemento en silencio.
+        """
+        if source_id:
+            for i in range(self.source_combo.count()):
+                if self.source_combo.itemData(i, Qt.ItemDataRole.UserRole) == source_id:
+                    self.source_combo.setCurrentIndex(i)
+                    return
+            self.source_combo.addItem(f"    {source_id} (unavailable)")
+            idx = self.source_combo.count() - 1
+            self.source_combo.setItemData(idx, source_id, Qt.ItemDataRole.UserRole)
+            self.source_combo.setCurrentIndex(idx)
+            return
+        # Sin fuente: primer item con datos válidos (saltando cabeceras).
         for i in range(self.source_combo.count()):
-            if self.source_combo.itemData(i, Qt.ItemDataRole.UserRole) == source_id:
+            if self.source_combo.itemData(i, Qt.ItemDataRole.UserRole):
                 self.source_combo.setCurrentIndex(i)
                 return
-        # Fallback to static if not found
-        self.set_source_by_id("static")
 
     def on_source_changed(self, index):
         """Handle source combo box selection change."""
@@ -1889,29 +2145,35 @@ class PropertiesPanel(QWidget):
         # Colors section
         color_visible = visibility.get("color", True)
         bg_color_visible = visibility.get("bg_color", False)
+        show_gradient_visible = visibility.get("show_gradient", False)
 
-        # Gradient fill option is only for bar_gauge and circle_gauge
+        # Gradient fill option is only for bar_gauge and circle_gauge; the LCD
+        # elements use the "Show Gradient Fill" checkbox instead.
         gradient_fill_visible = element_type in ["bar_gauge", "circle_gauge"]
-        use_gradient = gradient_fill_visible and self.gradient_fill_check.isChecked()
+        gradient_fill_on = gradient_fill_visible and self.gradient_fill_check.isChecked()
+        use_gradient = gradient_fill_on
+        gradient_preview_visible = gradient_fill_on or (
+            show_gradient_visible and self.show_gradient_check.isChecked())
 
         # Batch visibility updates to prevent flicker
         self.setUpdatesEnabled(False)
 
         # Show color button only when not using gradient fill
-        self.color_label.setVisible(color_visible and not use_gradient)
-        self.color_btn.setVisible(color_visible and not use_gradient)
+        self.color_label.setVisible(color_visible and not gradient_fill_on)
+        self.color_btn.setVisible(color_visible and not gradient_fill_on)
         self.bg_color_label.setVisible(bg_color_visible)
         self.bg_color_btn.setVisible(bg_color_visible)
 
         # Gradient fill checkbox and preview
         self.gradient_fill_label.setVisible(gradient_fill_visible)
         self.gradient_fill_check.setVisible(gradient_fill_visible)
-        self.gradient_preview_label.setVisible(use_gradient)
-        self.gradient_preview.setVisible(use_gradient)
+        self.gradient_preview_label.setVisible(gradient_preview_visible)
+        self.gradient_preview.setVisible(gradient_preview_visible)
 
         self.setUpdatesEnabled(True)
 
-        section_visible['colors'] = color_visible or bg_color_visible or gradient_fill_visible
+        section_visible['colors'] = (color_visible or bg_color_visible
+                                     or gradient_fill_visible or show_gradient_visible)
 
         # Appearance section
         border_radius_visible = visibility.get("border_radius", False)
@@ -2004,19 +2266,29 @@ class PropertiesPanel(QWidget):
 
         # Media section
         image_visible = visibility.get("image", False)
+        icon_visible = visibility.get("icon", False)
         gif_visible = visibility.get("gif", False)
         scale_mode_visible = visibility.get("scale_mode", False)
+        video_visible = visibility.get("video", False)
+        video_fit_visible = visibility.get("video_fit", False)
 
         self.image_label.setVisible(image_visible)
         self.image_widget.setVisible(image_visible)
-        self.scale_proportionally_label.setVisible(image_visible)
-        self.scale_proportionally_check.setVisible(image_visible)
+        self.scale_proportionally_label.setVisible(image_visible or icon_visible)
+        self.scale_proportionally_check.setVisible(image_visible or icon_visible)
+        self.tint_label.setVisible(icon_visible)
+        self.tint_check.setVisible(icon_visible)
         self.gif_label.setVisible(gif_visible)
         self.gif_widget.setVisible(gif_visible)
         self.scale_mode_label.setVisible(scale_mode_visible)
         self.scale_mode_combo.setVisible(scale_mode_visible)
+        self.video_label.setVisible(video_visible)
+        self.video_widget.setVisible(video_visible)
+        self.video_fit_label.setVisible(video_fit_visible)
+        self.video_fit_combo.setVisible(video_fit_visible)
 
-        section_visible['media'] = image_visible or gif_visible or scale_mode_visible
+        section_visible['media'] = (image_visible or gif_visible or scale_mode_visible
+                                    or video_visible or video_fit_visible)
 
         # Options section - element-specific options
         show_background_visible = visibility.get("show_background", False)
@@ -2080,6 +2352,8 @@ class PropertiesPanel(QWidget):
         gap_visible = visibility.get("gap", False)
         line_width_visible = visibility.get("line_width", False)
         color_empty_visible = visibility.get("color_empty", False)
+        target_visible = visibility.get("target", False)
+        sources_visible = visibility.get("sources", False)
         self.segments_label.setVisible(segments_visible)
         self.segments_spin.setVisible(segments_visible)
         self.gap_label.setVisible(gap_visible)
@@ -2088,6 +2362,34 @@ class PropertiesPanel(QWidget):
         self.line_width_spin.setVisible(line_width_visible)
         self.color_empty_label.setVisible(color_empty_visible)
         self.color_empty_btn.setVisible(color_empty_visible)
+        self.target_label.setVisible(target_visible)
+        self.target_spin.setVisible(target_visible)
+        self.sources_label.setVisible(sources_visible)
+        self.sources_edit.setVisible(sources_visible)
+
+        # LCD element options
+        orientation_visible = visibility.get("orientation", False)
+        arc_span_visible = visibility.get("arc_span", False)
+        start_angle_visible = visibility.get("start_angle", False)
+        show_ticks_visible = visibility.get("show_ticks", False)
+        thresholds_visible = visibility.get("thresholds", False)
+        self.orientation_label.setVisible(orientation_visible)
+        self.orientation_combo.setVisible(orientation_visible)
+        self.arc_span_label.setVisible(arc_span_visible)
+        self.arc_span_spin.setVisible(arc_span_visible)
+        self.start_angle_label.setVisible(start_angle_visible)
+        self.start_angle_spin.setVisible(start_angle_visible)
+        self.show_ticks_label.setVisible(show_ticks_visible)
+        self.show_ticks_check.setVisible(show_ticks_visible)
+        self.thresholds_label.setVisible(thresholds_visible)
+        self.thresholds_edit.setVisible(thresholds_visible)
+
+        bar_mode_visible = visibility.get("bar_mode", False)
+        show_sparklines_visible = visibility.get("show_sparklines", False)
+        self.bar_mode_label.setVisible(bar_mode_visible)
+        self.bar_mode_combo.setVisible(bar_mode_visible)
+        self.show_sparklines_label.setVisible(show_sparklines_visible)
+        self.show_sparklines_check.setVisible(show_sparklines_visible)
 
         section_visible['options'] = (show_background_visible or show_label_visible or
                                       show_gradient_visible or line_thickness_visible or
@@ -2097,14 +2399,48 @@ class PropertiesPanel(QWidget):
                                       time_format_visible or
                                       show_am_pm_visible or show_seconds_visible or
                                       show_leading_zero_visible or segments_visible or
-                                      gap_visible or line_width_visible or color_empty_visible)
+                                      gap_visible or line_width_visible or color_empty_visible or
+                                      target_visible or sources_visible or
+                                      orientation_visible or arc_span_visible or
+                                      start_angle_visible or show_ticks_visible or
+                                      thresholds_visible or bar_mode_visible or
+                                      show_sparklines_visible)
 
-        # Interaction (HDMI touch) está disponible para todos los tipos.
-        section_visible['interaction'] = True
+        # Interaction (HDMI touch): solo tiene sentido en un canvas HDMI.
+        section_visible['interaction'] = bool(self._hdmi_mode)
+
+        # Navigation: solo para el widget táctil touch_nav.
+        section_visible['navigation'] = (element_type == "touch_nav")
 
         # Update section header visibility
         for section, header in self.section_headers.items():
             header.setVisible(section_visible.get(section, False))
+
+    def _on_screen_settings_changed(self, *args):
+        if getattr(self, "_screen_settings_updating", False):
+            return
+        self.screen_settings_changed.emit(
+            float(self.screen_duration_spin.value()),
+            self.screen_transition_combo.currentData() or "",
+            int(self.screen_transition_ms_spin.value()))
+
+    def set_screen_settings(self, index=0, total=1, name="", duration=5.0,
+                            transition="fade", transition_ms=250):
+        """Muestra/edita los ajustes de la pantalla activa (canvas con pantallas)."""
+        self._screen_settings_updating = True
+        self.screen_title_label.setText(f"Screen {index + 1}/{total} — {name}")
+        self.screen_duration_spin.setValue(float(duration))
+        idx = self.screen_transition_combo.findData(transition)
+        self.screen_transition_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.screen_transition_ms_spin.setValue(int(transition_ms))
+        self._screen_settings_updating = False
+        self.no_selection_label.setVisible(False)
+        self.screen_group.setVisible(True)
+
+    def clear_screen_section(self):
+        """Oculta los ajustes de pantalla (el canvas no tiene pantallas)."""
+        self.screen_group.setVisible(False)
+        self.no_selection_label.setVisible(True)
 
     def set_element(self, element):
         self.current_element = None
@@ -2152,6 +2488,7 @@ class PropertiesPanel(QWidget):
         self.value_spin.blockSignals(True)
         self.image_path_edit.blockSignals(True)
         self.scale_proportionally_check.blockSignals(True)
+        self.tint_check.blockSignals(True)
         self.show_background_check.blockSignals(True)
         self.show_label_check.blockSignals(True)
         self.show_gradient_check.blockSignals(True)
@@ -2172,6 +2509,8 @@ class PropertiesPanel(QWidget):
         self.temp_hide_unit_check.blockSignals(True)
         self.gif_path_edit.blockSignals(True)
         self.scale_mode_combo.blockSignals(True)
+        self.video_path_edit.blockSignals(True)
+        self.video_fit_combo.blockSignals(True)
         self.bar_text_mode_combo.blockSignals(True)
         self.bar_text_position_combo.blockSignals(True)
         self.time_format_combo.blockSignals(True)
@@ -2181,6 +2520,15 @@ class PropertiesPanel(QWidget):
         self.segments_spin.blockSignals(True)
         self.gap_spin.blockSignals(True)
         self.line_width_spin.blockSignals(True)
+        self.target_spin.blockSignals(True)
+        self.sources_edit.blockSignals(True)
+        self.orientation_combo.blockSignals(True)
+        self.arc_span_spin.blockSignals(True)
+        self.start_angle_spin.blockSignals(True)
+        self.show_ticks_check.blockSignals(True)
+        self.thresholds_edit.blockSignals(True)
+        self.bar_mode_combo.blockSignals(True)
+        self.show_sparklines_check.blockSignals(True)
 
         self.name_edit.setText(element.name)
         self.x_spin.setValue(element.x)
@@ -2200,6 +2548,7 @@ class PropertiesPanel(QWidget):
         self.image_path_edit.setText(element.image_path)
         self.clip_checkbox.setChecked(element.clip)
         self.scale_proportionally_check.setChecked(element.scale_proportionally)
+        self.tint_check.setChecked(getattr(element, 'tint', False))
         self.show_background_check.setChecked(element.show_background)
         self.show_label_check.setChecked(element.show_label)
         self.show_gradient_check.setChecked(element.show_gradient)
@@ -2211,6 +2560,22 @@ class PropertiesPanel(QWidget):
         self.line_width_spin.setValue(getattr(element, 'line_width', 2))
         self.color_empty_btn.setStyleSheet(
             f"background-color: {getattr(element, 'color_empty', '#1a1a2e')};")
+        self.target_spin.setValue(float(getattr(element, 'target', 0) or 0))
+        self.sources_edit.setText(
+            ", ".join(getattr(element, 'sources', []) or []))
+        self.orientation_combo.setCurrentIndex(
+            max(0, self.orientation_combo.findData(
+                getattr(element, 'orientation', 'horizontal') or 'horizontal')))
+        self.arc_span_spin.setValue(int(getattr(element, 'arc_span', 270) or 270))
+        self.start_angle_spin.setValue(int(getattr(element, 'start_angle', -135) or 0))
+        self.show_ticks_check.setChecked(getattr(element, 'show_ticks', False))
+        self.thresholds_edit.setText(
+            ", ".join(str(t) for t in (getattr(element, 'thresholds', []) or [])))
+        self.bar_mode_combo.setCurrentIndex(
+            max(0, self.bar_mode_combo.findData(
+                getattr(element, 'bar_mode', 'free') or 'free')))
+        self.show_sparklines_check.setChecked(
+            getattr(element, 'show_sparklines', True))
         self.rounded_corners_check.setChecked(element.rounded_corners)
         # Load bar border settings
         self.bar_border_check.setChecked(getattr(element, 'bar_border', False))
@@ -2232,7 +2597,9 @@ class PropertiesPanel(QWidget):
         self.animate_gauge_check.setChecked(getattr(element, 'animate_gauge', False))
         self.gauge_rounded_ends_check.setChecked(getattr(element, 'gauge_rounded_ends', False))
         self.label_font_size_spin.setValue(getattr(element, 'label_font_size', 16))
-        self.label_font_family_combo.setCurrentText(getattr(element, 'label_font_family', 'Arial'))
+        label_family = getattr(element, 'label_font_family', DEFAULT_FONT_FAMILY)
+        self._ensure_font_item(self.label_font_family_combo, label_family)
+        self.label_font_family_combo.setCurrentText(label_family)
         self.label_bold_checkbox.setChecked(getattr(element, 'label_font_bold', False))
         self.label_italic_checkbox.setChecked(getattr(element, 'label_font_italic', False))
         self.temp_hide_unit_check.setChecked(getattr(element, 'temp_hide_unit', False))
@@ -2243,6 +2610,13 @@ class PropertiesPanel(QWidget):
         scale_idx = self.scale_mode_combo.findData(scale_mode)
         if scale_idx >= 0:
             self.scale_mode_combo.setCurrentIndex(scale_idx)
+
+        # Video element options
+        self.video_path_edit.setText(getattr(element, 'video_path', ''))
+        video_fit = getattr(element, 'video_fit_mode', 'fit_height')
+        video_idx = self.video_fit_combo.findData(video_fit)
+        if video_idx >= 0:
+            self.video_fit_combo.setCurrentIndex(video_idx)
 
         # Bar gauge text options
         bar_text_mode = getattr(element, 'bar_text_mode', 'full')
@@ -2264,11 +2638,11 @@ class PropertiesPanel(QWidget):
         self.show_seconds_check.setChecked(getattr(element, 'show_seconds', True))
         self.show_leading_zero_check.setChecked(getattr(element, 'show_leading_zero', True))
 
+        self._ensure_font_item(self.font_family_combo, element.font_family)
         idx = self.font_family_combo.findText(element.font_family)
-        if idx >= 0:
-            self.font_family_combo.setCurrentIndex(idx)
-        else:
-            self.font_family_combo.setCurrentIndex(0)
+        if idx < 0:
+            idx = self.font_family_combo.findText(DEFAULT_FONT_FAMILY)
+        self.font_family_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
         self.bold_checkbox.setChecked(element.font_bold)
         self.italic_checkbox.setChecked(element.font_italic)
@@ -2290,20 +2664,33 @@ class PropertiesPanel(QWidget):
 
         # Interaction (HDMI touch): bloquea señales mientras se cargan valores.
         self.tap_action_combo.blockSignals(True)
+        self.tap_screen_combo.blockSignals(True)
         self.tap_command_edit.blockSignals(True)
         self.tap_args_edit.blockSignals(True)
         self.tap_workdir_edit.blockSignals(True)
         tap_action = getattr(element, 'tap_action', 'none') or 'none'
         tap_idx = self.tap_action_combo.findData(tap_action)
         self.tap_action_combo.setCurrentIndex(tap_idx if tap_idx >= 0 else 0)
+        tap_screen = getattr(element, 'tap_screen', 0)
+        ts_idx = self.tap_screen_combo.findData(tap_screen)
+        self.tap_screen_combo.setCurrentIndex(ts_idx if ts_idx >= 0 else 0)
         self.tap_command_edit.setText(getattr(element, 'tap_command', '') or '')
         self.tap_args_edit.setText(args_to_text(getattr(element, 'tap_args', []) or []))
         self.tap_workdir_edit.setText(getattr(element, 'tap_workdir', '') or '')
         self.tap_action_combo.blockSignals(False)
+        self.tap_screen_combo.blockSignals(False)
         self.tap_command_edit.blockSignals(False)
         self.tap_args_edit.blockSignals(False)
         self.tap_workdir_edit.blockSignals(False)
         self._update_tap_controls()
+
+        # Navigation (touch_nav): posición + items.
+        if hasattr(self, "nav_position_combo"):
+            self.nav_position_combo.blockSignals(True)
+            nav_pos = getattr(element, "nav_position", "bottom") or "bottom"
+            nav_idx = self.nav_position_combo.findData(nav_pos)
+            self.nav_position_combo.setCurrentIndex(nav_idx if nav_idx >= 0 else 0)
+            self.nav_position_combo.blockSignals(False)
 
         self.name_edit.blockSignals(False)
         self.x_spin.blockSignals(False)
@@ -2329,6 +2716,7 @@ class PropertiesPanel(QWidget):
         self.value_spin.blockSignals(False)
         self.image_path_edit.blockSignals(False)
         self.scale_proportionally_check.blockSignals(False)
+        self.tint_check.blockSignals(False)
         self.show_background_check.blockSignals(False)
         self.show_label_check.blockSignals(False)
         self.show_gradient_check.blockSignals(False)
@@ -2349,6 +2737,8 @@ class PropertiesPanel(QWidget):
         self.temp_hide_unit_check.blockSignals(False)
         self.gif_path_edit.blockSignals(False)
         self.scale_mode_combo.blockSignals(False)
+        self.video_path_edit.blockSignals(False)
+        self.video_fit_combo.blockSignals(False)
         self.bar_text_mode_combo.blockSignals(False)
         self.bar_text_position_combo.blockSignals(False)
         self.time_format_combo.blockSignals(False)
@@ -2358,9 +2748,19 @@ class PropertiesPanel(QWidget):
         self.segments_spin.blockSignals(False)
         self.gap_spin.blockSignals(False)
         self.line_width_spin.blockSignals(False)
+        self.target_spin.blockSignals(False)
+        self.sources_edit.blockSignals(False)
+        self.orientation_combo.blockSignals(False)
+        self.arc_span_spin.blockSignals(False)
+        self.start_angle_spin.blockSignals(False)
+        self.show_ticks_check.blockSignals(False)
+        self.thresholds_edit.blockSignals(False)
+        self.bar_mode_combo.blockSignals(False)
+        self.show_sparklines_check.blockSignals(False)
 
         self.current_element = element
         self._undo_state_saved = False
+        self._rebuild_nav_items_editor()
 
         # Re-run visibility now that all values are set (needed for gradient fill, etc.)
         self.update_visible_fields(element.type)
@@ -2410,6 +2810,7 @@ class PropertiesPanel(QWidget):
         self.image_path_edit.setEnabled(enabled)
         self.image_browse_btn.setEnabled(enabled)
         self.scale_proportionally_check.setEnabled(enabled)
+        self.tint_check.setEnabled(enabled)
 
         # Line chart options
         self.show_background_check.setEnabled(enabled)
@@ -2436,6 +2837,11 @@ class PropertiesPanel(QWidget):
         self.gif_browse_btn.setEnabled(enabled)
         self.scale_mode_combo.setEnabled(enabled)
 
+        # Video options
+        self.video_path_edit.setEnabled(enabled)
+        self.video_browse_btn.setEnabled(enabled)
+        self.video_fit_combo.setEnabled(enabled)
+
         # Digital clock time format options
         self.time_format_combo.setEnabled(enabled)
         self.show_am_pm_check.setEnabled(enabled)
@@ -2447,19 +2853,154 @@ class PropertiesPanel(QWidget):
         self.gap_spin.setEnabled(enabled)
         self.line_width_spin.setEnabled(enabled)
         self.color_empty_btn.setEnabled(enabled)
+        self.target_spin.setEnabled(enabled)
+        self.sources_edit.setEnabled(enabled)
+
+        # LCD element options
+        self.orientation_combo.setEnabled(enabled)
+        self.arc_span_spin.setEnabled(enabled)
+        self.start_angle_spin.setEnabled(enabled)
+        self.show_ticks_check.setEnabled(enabled)
+        self.thresholds_edit.setEnabled(enabled)
+        self.bar_mode_combo.setEnabled(enabled)
+        self.show_sparklines_check.setEnabled(enabled)
 
         # Interaction (HDMI touch)
         self.tap_action_combo.setEnabled(enabled)
+        self.tap_screen_combo.setEnabled(enabled)
         self.tap_test_btn.setEnabled(enabled)
         self._update_tap_controls(enabled)
 
+        # Navigation (touch_nav)
+        if hasattr(self, "nav_position_combo"):
+            self.nav_position_combo.setEnabled(enabled)
+            self.nav_add_btn.setEnabled(enabled)
+
     def _update_tap_controls(self, enabled=True):
-        """Habilita/deshabilita los campos según el tipo de acción elegido."""
-        is_command = (self.tap_action_combo.currentData() or "none") == "command"
+        """Muestra/habilita los campos según el tipo de interacción elegido."""
+        action = self.tap_action_combo.currentData() or "none"
+        is_command = action == "command"
+        is_transition = action == "transition"
         for widget in (self.tap_command_edit, self.tap_command_btn,
                        self.tap_args_edit, self.tap_workdir_edit,
                        self.tap_workdir_btn, self.tap_test_btn):
             widget.setEnabled(enabled and is_command)
+        for widget in (self.tap_command_label, self.tap_command_edit,
+                       self.tap_command_btn, self.tap_args_label,
+                       self.tap_args_edit, self.tap_workdir_label,
+                       self.tap_workdir_edit, self.tap_workdir_btn,
+                       self.tap_test_label, self.tap_test_btn):
+            widget.setVisible(is_command)
+        self.tap_screen_label.setVisible(is_transition)
+        self.tap_screen_combo.setVisible(is_transition)
+        self.tap_screen_combo.setEnabled(enabled and is_transition)
+
+    def set_screen_targets(self, targets):
+        """Rellena el combo de destino con ``[(index, name), ...]`` (HDMI)."""
+        self._screen_targets = list(targets or [])
+        combo = getattr(self, "tap_screen_combo", None)
+        if combo is not None:
+            current = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            for index, name in self._screen_targets:
+                combo.addItem(f"{index + 1}. {name}", int(index))
+            combo.addItem("Next", "next")
+            combo.addItem("Prev", "prev")
+            idx = combo.findData(current)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+        if (getattr(self, "_nav_rows", None) and self.current_element is not None
+                and getattr(self.current_element, "type", "") == "touch_nav"):
+            self._rebuild_nav_items_editor()
+
+    def _fill_nav_target_combo(self, combo, current=None):
+        combo.blockSignals(True)
+        combo.clear()
+        for index, name in self._screen_targets:
+            combo.addItem(f"{index + 1}. {name}", int(index))
+        combo.addItem("Next", "next")
+        combo.addItem("Prev", "prev")
+        idx = combo.findData(current)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _rebuild_nav_items_editor(self):
+        if not hasattr(self, "nav_items_layout"):
+            return
+        self._nav_updating = True
+        while self.nav_items_layout.count():
+            entry = self.nav_items_layout.takeAt(0)
+            widget = entry.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._nav_rows = []
+        element = self.current_element
+        items = list(getattr(element, "nav_items", []) or []) if element else []
+        for i, item in enumerate(items):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(4)
+            label_edit = QLineEdit(str(item.get("label", "")))
+            label_edit.setPlaceholderText("Label")
+            label_edit.textChanged.connect(
+                lambda _t, idx=i: self._on_nav_item_edited(idx))
+            row_layout.addWidget(label_edit, 1)
+            target_combo = NoScrollComboBox()
+            self._fill_nav_target_combo(target_combo, item.get("target"))
+            target_combo.currentIndexChanged.connect(
+                lambda _i, idx=i: self._on_nav_item_edited(idx))
+            row_layout.addWidget(target_combo, 1)
+            remove_btn = QPushButton("×")
+            remove_btn.setFixedWidth(24)
+            remove_btn.clicked.connect(
+                lambda _c=False, idx=i: self._remove_nav_item(idx))
+            row_layout.addWidget(remove_btn, 0)
+            self.nav_items_layout.addWidget(row)
+            self._nav_rows.append({"label": label_edit, "target": target_combo})
+        self._nav_updating = False
+
+    def _on_nav_item_edited(self, index):
+        if getattr(self, "_nav_updating", False) or self.current_element is None:
+            return
+        if getattr(self.current_element, "type", "") != "touch_nav":
+            return
+        items = list(self.current_element.nav_items or [])
+        if not (0 <= index < len(items)) or index >= len(self._nav_rows):
+            return
+        row = self._nav_rows[index]
+        items[index] = {"label": row["label"].text(),
+                        "target": row["target"].currentData()}
+        self.current_element.nav_items = items
+        if not self._undo_state_saved:
+            self.property_will_change.emit()
+            self._undo_state_saved = True
+        self.property_changed.emit()
+
+    def _add_nav_item(self):
+        if self.current_element is None or getattr(self.current_element, "type", "") != "touch_nav":
+            return
+        self.property_will_change.emit()
+        items = list(self.current_element.nav_items or [])
+        default_target = self._screen_targets[0][0] if self._screen_targets else 0
+        items.append({"label": f"Screen {len(items) + 1}", "target": default_target})
+        self.current_element.nav_items = items
+        self._rebuild_nav_items_editor()
+        self.property_changed.emit()
+
+    def _remove_nav_item(self, index):
+        if self.current_element is None or getattr(self.current_element, "type", "") != "touch_nav":
+            return
+        items = list(self.current_element.nav_items or [])
+        if not (0 <= index < len(items)):
+            return
+        self.property_will_change.emit()
+        del items[index]
+        self.current_element.nav_items = items
+        self._rebuild_nav_items_editor()
+        self.property_changed.emit()
 
     def on_tap_action_changed(self):
         self._update_tap_controls()
@@ -2530,6 +3071,7 @@ class PropertiesPanel(QWidget):
         self.current_element.max_value = self.max_value_spin.value()
         self.current_element.image_path = self.image_path_edit.text()
         self.current_element.scale_proportionally = self.scale_proportionally_check.isChecked()
+        self.current_element.tint = self.tint_check.isChecked()
 
         # Line chart options
         self.current_element.show_background = self.show_background_check.isChecked()
@@ -2565,6 +3107,11 @@ class PropertiesPanel(QWidget):
         self.current_element.gif_path = self.gif_path_edit.text()
         self.current_element.scale_mode = self.scale_mode_combo.currentData() or 'fit'
 
+        # Video options
+        self.current_element.video_path = self.video_path_edit.text()
+        self.current_element.video_fit_mode = (self.video_fit_combo.currentData()
+                                               or 'fit_height')
+
         # Digital clock time format options
         self.current_element.time_format = self.time_format_combo.currentData() or '24h'
         self.current_element.show_am_pm = self.show_am_pm_check.isChecked()
@@ -2575,11 +3122,35 @@ class PropertiesPanel(QWidget):
         self.current_element.segments = self.segments_spin.value()
         self.current_element.gap = self.gap_spin.value()
         self.current_element.line_width = self.line_width_spin.value()
+        self.current_element.target = self.target_spin.value()
+        self.current_element.sources = [
+            s.strip() for s in self.sources_edit.text().split(",") if s.strip()
+        ]
+
+        # LCD element options
+        self.current_element.orientation = self.orientation_combo.currentData() or 'horizontal'
+        self.current_element.arc_span = float(self.arc_span_spin.value())
+        self.current_element.start_angle = float(self.start_angle_spin.value())
+        self.current_element.show_ticks = self.show_ticks_check.isChecked()
+        self.current_element.bar_mode = self.bar_mode_combo.currentData() or "free"
+        self.current_element.show_sparklines = self.show_sparklines_check.isChecked()
+        try:
+            self.current_element.thresholds = [
+                float(x) for x in self.thresholds_edit.text().replace(";", ",").split(",")
+                if x.strip()
+            ]
+        except ValueError:
+            pass
 
         # Interaction (HDMI touch). El parseo de argumentos puede fallar
         # mientras se escribe (comillas sin cerrar): en ese caso se conserva la
         # lista anterior en vez de romper.
         self.current_element.tap_action = self.tap_action_combo.currentData() or "none"
+        _tap_screen = self.tap_screen_combo.currentData()
+        self.current_element.tap_screen = _tap_screen if _tap_screen is not None else 0
+        if getattr(self.current_element, "type", "") == "touch_nav":
+            self.current_element.nav_position = (
+                self.nav_position_combo.currentData() or "bottom")
         self.current_element.tap_command = self.tap_command_edit.text()
         try:
             self.current_element.tap_args = parse_args_text(self.tap_args_edit.text())
@@ -2861,6 +3432,14 @@ class PropertiesPanel(QWidget):
                     self._last_height = img_height
                     self.width_spin.blockSignals(False)
                     self.height_spin.blockSignals(False)
+
+    def browse_video(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Video", "",
+            "Video Files (*.mp4 *.avi *.mkv *.mov *.webm);;All Files (*)"
+        )
+        if path:
+            self.video_path_edit.setText(path)
 
     def set_multi_selection(self, elements, indices):
         """Show alignment panel for multiple selected elements."""

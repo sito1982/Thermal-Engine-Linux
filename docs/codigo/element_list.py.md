@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "element_list.py"
-source_sha256: fb7ca449f28327262a22c5a1775b316988d888b3ab910e625094e2ccef407a3c
-source_bytes: 45878
-source_lines: 1157
+source_sha256: 648a29dead6861b4e30c9b0e1832f7adfe89e542913914b6cc221cf190509095
+source_bytes: 48701
+source_lines: 1222
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -29,7 +29,7 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 - `from PySide6.QtCore import Qt, Signal`
 - `from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap, QStandardItem, QStandardItemModel`
 - `from PySide6.QtWidgets import QAbstractItemView, QComboBox, QHBoxLayout, QInputDialog, QLabel, QMenu, QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget`
-- `from constants import DEFAULT_ELEMENT_PROPS, DMD_DEFAULT_ELEMENT_PROPS, DMD_ELEMENT_TYPES, ELEMENT_TYPES`
+- `from constants import DEFAULT_ELEMENT_PROPS, DMD_DEFAULT_ELEMENT_PROPS, DMD_DEFAULT_FONT_FAMILY, DMD_ELEMENT_TYPES, ELEMENT_TYPES, HDMI_ONLY_TYPES`
 - `from element import ThemeElement`
 - `from elements import get_custom_element`
 - `from ui_style import ACCENT, TEXT_DIM, TEXT_FAINT, IconButton, SectionLabel`
@@ -80,8 +80,10 @@ from PySide6.QtWidgets import (
 from constants import (
     DEFAULT_ELEMENT_PROPS,
     DMD_DEFAULT_ELEMENT_PROPS,
+    DMD_DEFAULT_FONT_FAMILY,
     DMD_ELEMENT_TYPES,
     ELEMENT_TYPES,
+    HDMI_ONLY_TYPES,
 )
 from element import ThemeElement
 from elements import get_custom_element
@@ -91,9 +93,16 @@ from ui_style import ACCENT, TEXT_DIM, TEXT_FAINT, IconButton, SectionLabel
 # amigables y agrupados en secciones; el id real se guarda como itemData.
 ELEMENT_TYPE_GROUPS = (
     ("Simple Elements", ("circle_gauge", "bar_gauge", "text", "rectangle",
-                         "clock", "image")),
+                         "clock", "image", "video", "icon")),
     ("Complex Elements", ("line_chart", "gif", "gauge_circle_dmd",
                           "segmented_bar", "bar_chart")),
+    ("LCD Elements", ("ring_gauge", "segment_bar", "zone_bar", "stat_tile",
+                      "sparkline", "level_bar", "column_chart", "disk_element")),
+    ("Interactive", ("touch_nav",)),
+    ("DMD Widgets", ("dmd_bar", "dmd_value_bar", "dmd_blocks", "dmd_zones",
+                     "dmd_big_number", "dmd_giant_number", "dmd_sparkline",
+                     "dmd_histogram", "dmd_strip", "dmd_arc", "dmd_ring",
+                     "dmd_fan", "dmd_panel")),
 )
 ELEMENT_TYPE_LABELS = {
     "circle_gauge": "Gauge",
@@ -102,11 +111,35 @@ ELEMENT_TYPE_LABELS = {
     "rectangle": "Rectangle",
     "clock": "Clock",
     "image": "Image",
+    "video": "Video",
+    "icon": "Icon",
     "line_chart": "Line Chart",
     "gif": "GIF",
     "gauge_circle_dmd": "DMD Gauge",
     "segmented_bar": "MultiPart Bar",
     "bar_chart": "Bars Chart",
+    "ring_gauge": "Ring Gauge",
+    "segment_bar": "Segmented Bar",
+    "zone_bar": "Zone Bar",
+    "stat_tile": "Stat Tile",
+    "sparkline": "Sparkline",
+    "level_bar": "Level Bar",
+    "column_chart": "Column Chart",
+    "disk_element": "Disk",
+    "touch_nav": "Touch Navigation",
+    "dmd_bar": "Classic Bar new",
+    "dmd_value_bar": "Value Bar new",
+    "dmd_blocks": "Console Blocks new",
+    "dmd_zones": "Zone Bar new",
+    "dmd_big_number": "Big Number new",
+    "dmd_giant_number": "Giant Number new",
+    "dmd_sparkline": "Sparkline new",
+    "dmd_histogram": "Histogram new",
+    "dmd_strip": "Power Strip new",
+    "dmd_arc": "Arc Gauge new",
+    "dmd_ring": "Ring Gauge new",
+    "dmd_fan": "Fan Needle new",
+    "dmd_panel": "Panel new",
 }
 
 
@@ -173,6 +206,7 @@ class ElementListPanel(QWidget):
         self._icon_cache = {}  # Cache for element type icons
         self._group_icon = None  # Cache for group icon
         self._dmd_mode = False  # True when the active project targets a DMD
+        self._hdmi_mode = False  # True when the active target is HDMI (touch_nav)
         self.setup_ui()
 
     def setup_ui(self):
@@ -213,6 +247,10 @@ class ElementListPanel(QWidget):
         """
         model = QStandardItemModel()
         covered = set()
+
+        # Los tipos HDMI-only (navegación táctil) solo aparecen en HDMI.
+        if not self._dmd_mode and not self._hdmi_mode:
+            types_list = [t for t in types_list if t not in HDMI_ONLY_TYPES]
 
         def add_header(title):
             header = QStandardItem(title)
@@ -267,6 +305,12 @@ class ElementListPanel(QWidget):
         self._dmd_mode = dmd_active
         types = DMD_ELEMENT_TYPES if dmd_active else ELEMENT_TYPES
         self.set_available_types(types)
+
+    def set_hdmi_mode(self, hdmi_active):
+        """El widget de navegación táctil solo está disponible en HDMI."""
+        self._hdmi_mode = bool(hdmi_active)
+        if not self._dmd_mode:
+            self.set_available_types(ELEMENT_TYPES)
 
     def show_context_menu(self, position):
         """Show context menu for tree items."""
@@ -356,6 +400,8 @@ class ElementListPanel(QWidget):
             "rectangle": ("#ff9900", "rect"),
             "clock": ("#ffff00", "clock"),
             "image": ("#ff66ff", "image"),
+            "video": ("#58a6ff", "image"),
+            "icon": ("#ffcc66", "image"),
             "line_chart": ("#00ff96", "chart"),
             "gif": ("#ff66ff", "image"),
         }
@@ -424,11 +470,26 @@ class ElementListPanel(QWidget):
             "rectangle": "Rectangle",
             "clock": "Clock",
             "image": "Image",
+            "video": "Video",
+            "icon": "Icon",
             "line_chart": "Chart",
             "gif": "GIF",
             "gauge_circle_dmd": "DMD Gauge",
             "segmented_bar": "MultiPart Bar",
             "bar_chart": "Bars Chart",
+            "dmd_bar": "Classic Bar",
+            "dmd_value_bar": "Value Bar",
+            "dmd_blocks": "Console Blocks",
+            "dmd_zones": "Zone Bar",
+            "dmd_big_number": "Big Number",
+            "dmd_giant_number": "Giant Number",
+            "dmd_sparkline": "Sparkline",
+            "dmd_histogram": "Histogram",
+            "dmd_strip": "Power Strip",
+            "dmd_arc": "Arc Gauge",
+            "dmd_ring": "Ring Gauge",
+            "dmd_fan": "Fan Needle",
+            "dmd_panel": "Panel",
         }
 
         type_label = type_names.get(element.type, element.type.replace("_", " ").title())
@@ -448,8 +509,8 @@ class ElementListPanel(QWidget):
             text=self.get_friendly_label(element),
             hidden=hidden,
             locked=element.locked,
-            on_eye=lambda i=idx: self.toggle_visible(i),
-            on_lock=lambda i=idx: self.toggle_lock(i),
+            on_eye=lambda _checked=False, i=idx: self.toggle_visible(i),
+            on_lock=lambda _checked=False, i=idx: self.toggle_lock(i),
         )
         return item, row
 
@@ -632,6 +693,10 @@ class ElementListPanel(QWidget):
         else:
             props = defaults.get(element_type, {}).copy()
         props["name"] = f"{element_type}_{len(self.elements) + 1}"
+        if self._dmd_mode:
+            # DMD usa la fuente empaquetada Tiny5 por defecto (no la del modelo).
+            props.setdefault("font_family", DMD_DEFAULT_FONT_FAMILY)
+            props.setdefault("label_font_family", DMD_DEFAULT_FONT_FAMILY)
 
         element = ThemeElement(element_type, **props)
         self.elements.append(element)

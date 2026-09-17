@@ -121,8 +121,46 @@ def test_animated_detection_helper(win):
 
     win.hdmi_elements = [ThemeElement("line_chart", name="c")]
     assert win._hdmi_has_animated_elements() is True
+    # Un elemento de vídeo también anima por tiempo: debe forzar re-render.
+    win.hdmi_elements = [ThemeElement("video", name="v", video_path="/tmp/x.mp4")]
+    assert win._hdmi_has_animated_elements() is True
     win.hdmi_elements = [ThemeElement("text", name="t")]
     assert win._hdmi_has_animated_elements() is False
+
+
+def test_dmd_screen_management(win):
+    from element import ThemeElement
+
+    win.dmd_screens = [win.dmd_screens[0]]
+    win.dmd_active_screen = 0
+    win.add_dmd_screen()
+    assert len(win.dmd_screens) == 2
+    assert win.dmd_active_screen == 1
+    win.duplicate_dmd_screen(0)
+    assert len(win.dmd_screens) == 3
+    win.move_dmd_screen(0, 1)
+    win.delete_dmd_screen(0)
+    assert len(win.dmd_screens) == 2
+    # Activar una pantalla sincroniza la lista de elementos en edición.
+    win.dmd_screens[0].elements.append(ThemeElement("text", text="a"))
+    win._activate_dmd_screen(0)
+    assert win.dmd_elements is win.dmd_screens[0].elements
+    # Nunca se puede quedar sin pantallas.
+    win.delete_dmd_screen(0)
+    win.delete_dmd_screen(0)
+    assert len(win.dmd_screens) == 1
+
+
+def test_dmd_no_transitions_keeps_single_frame(win):
+    from dmd_screens import DMDScreen
+
+    win.dmd_output_canvas.set_dmd_size(128, 32)
+    win.dmd_screens = [DMDScreen(name="A"), DMDScreen(name="B")]
+    win.dmd_transitions_enabled = False
+    win._dmd_play_index = 1
+    rgb = win._dmd_next_frame({}, win.dmd_output_canvas)
+    assert rgb.shape == (32, 128, 3)
+    assert win._dmd_play_index == 1  # sin transiciones no avanza
 
 
 def test_wizard_add_mode_lcd_includes_config_step(qapp):
@@ -235,6 +273,36 @@ def test_lcd_tab_hidden_when_not_a_target(win):
 def test_lcd_tab_visible_when_target_present(win):
     win.apply_targets({"web": False, "lcd": True, "dmd": False, "hdmi": False})
     assert win.target_tabs.isTabVisible(win._lcd_tab_index)
+
+
+def _submenu_titles(win):
+    return [action.text() for action in win.display_menu.actions() if action.menu()]
+
+
+def test_display_menu_lists_active_devices(win):
+    win.apply_targets({"web": False, "lcd": True, "dmd": False, "hdmi": False})
+    assert "LCD" in _submenu_titles(win)
+    win.apply_targets({"web": False, "lcd": False, "dmd": True, "hdmi": True},
+                      dmd_config={"ip": "127.0.0.1", "port": 1, "width": 128,
+                                  "height": 32, "fps": 12, "model_id": "dmd_128_32"})
+    titles = _submenu_titles(win)
+    assert "DMD" in titles and "HDMI" in titles and "LCD" not in titles
+    win._shutdown_dmd_sender()
+    win._shutdown_hdmi_output()
+
+
+def test_output_switches_follow_active_canvas(win):
+    win.apply_targets({"web": False, "lcd": False, "dmd": True, "hdmi": True},
+                      dmd_config={"ip": "127.0.0.1", "port": 1, "width": 128,
+                                  "height": 32, "fps": 12, "model_id": "dmd_128_32"})
+    win.target_tabs.setCurrentIndex(win._dmd_tab_index)
+    assert not win.dmd_toggle_btn.isHidden()
+    assert win.hdmi_toggle_btn.isHidden()
+    win.target_tabs.setCurrentIndex(win._hdmi_tab_index)
+    assert not win.hdmi_toggle_btn.isHidden()
+    assert win.dmd_toggle_btn.isHidden()
+    win._shutdown_dmd_sender()
+    win._shutdown_hdmi_output()
 
 
 def test_dmd_toggle_pauses_and_resumes(win, monkeypatch):

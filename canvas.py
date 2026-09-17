@@ -9,7 +9,15 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QScrollArea, QWidget
 
-from constants import DISPLAY_HEIGHT, DISPLAY_WIDTH, PREVIEW_SCALE, SOURCE_UNITS
+from constants import (
+    DISPLAY_HEIGHT,
+    DISPLAY_WIDTH,
+    DMD_WIDGET_TYPES,
+    LCD_WIDGET_TYPES,
+    PREVIEW_SCALE,
+    SOURCE_UNITS,
+    resolve_icon_path,
+)
 from elements import get_custom_element
 from ui_style import ACCENT, BORDER
 from video_background import video_background
@@ -149,10 +157,10 @@ def get_value_with_unit(value, source, temp_hide_unit=False):
         return f"{value:.0f}{symbol}"
     elif unit_type == "power":
         return f"{value:.0f}{symbol}"
-    elif unit_type == "size":
+    elif unit_type in ("size", "energy", "speed"):
         return f"{value:.1f}{symbol}"
-    elif unit_type == "speed":
-        return f"{value:.1f}{symbol}"
+    elif unit_type == "digital":
+        return f"{value:.0f}{symbol}"
     else:  # percent
         return f"{value:.0f}{symbol}"
 
@@ -163,6 +171,7 @@ class CanvasPreview(QWidget):
     element_moved = Signal(int, int, int)
     element_resized = Signal(int)  # Emitted when element is resized
     drag_started = Signal()  # Emitted when drag/resize starts (for undo)
+    context_menu_requested = Signal(int, object)  # (element index or -1, global QPoint)
 
     # Resize handle positions
     HANDLE_NONE = 0
@@ -186,6 +195,9 @@ class CanvasPreview(QWidget):
         self._active_guides = []  # Smart guides visible during a drag: [(axis, value, a, b), ...]
         self.scale = PREVIEW_SCALE
         self.vertical_mode = False  # Rotates the preview 90 degrees to match a vertically mounted LCD
+        # Tamaño lógico del lienzo. Normalmente 1920×480 (o rotado en vertical),
+        # pero un proyecto solo-Web puede definir un canvas custom.
+        self._custom_size = None
         self.background_color = QColor(15, 15, 25)
         self.handle_size = 10
         self.group_selection_mode = False  # True when a complete group is selected
@@ -196,19 +208,44 @@ class CanvasPreview(QWidget):
         self._update_fixed_size()
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Enable keyboard input
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu_requested)
+
+    def _on_context_menu_requested(self, pos):
+        """Emite el índice del elemento bajo el cursor (-1 si vacío) + posición."""
+        index = self.get_element_at(pos) if hasattr(self, "get_element_at") else -1
+        if index is None:
+            index = -1
+        self.context_menu_requested.emit(int(index), self.mapToGlobal(pos))
+
+    def _design_size(self):
+        """Tamaño lógico del lienzo (ancho, alto) en espacio de diseño."""
+        if self._custom_size:
+            return self._custom_size
+        if self.vertical_mode:
+            return DISPLAY_HEIGHT, DISPLAY_WIDTH
+        return DISPLAY_WIDTH, DISPLAY_HEIGHT
+
+    def set_canvas_size(self, width, height):
+        """Define un tamaño de lienzo custom (proyectos solo-Web)."""
+        self._custom_size = (max(16, int(width)), max(16, int(height)))
+        self._glass_cache_valid = False
+        self._update_fixed_size()
+        self.update()
+
+    def clear_canvas_size(self):
+        """Vuelve al tamaño estándar (1920×480 o rotado en vertical)."""
+        if self._custom_size is None:
+            return
+        self._custom_size = None
+        self._glass_cache_valid = False
+        self._update_fixed_size()
+        self.update()
 
     def _update_fixed_size(self):
         """Set the widget's fixed size, swapping dimensions when in vertical mode."""
-        if self.vertical_mode:
-            self.setFixedSize(
-                int(DISPLAY_HEIGHT * self.scale),
-                int(DISPLAY_WIDTH * self.scale)
-            )
-        else:
-            self.setFixedSize(
-                int(DISPLAY_WIDTH * self.scale),
-                int(DISPLAY_HEIGHT * self.scale)
-            )
+        width, height = self._design_size()
+        self.setFixedSize(int(width * self.scale), int(height * self.scale))
 
     def set_vertical_mode(self, enabled):
         """Enable/disable the rotated (portrait) preview to match a vertically mounted LCD."""
@@ -233,8 +270,7 @@ class CanvasPreview(QWidget):
 
     def fit_scale_for(self, avail_w, avail_h, margin=28):
         """Compute the largest scale that fits ``avail_w x avail_h`` (preview px)."""
-        base_w = DISPLAY_HEIGHT if self.vertical_mode else DISPLAY_WIDTH
-        base_h = DISPLAY_WIDTH if self.vertical_mode else DISPLAY_HEIGHT
+        base_w, base_h = self._design_size()
         avail_w = max(1, avail_w - margin)
         avail_h = max(1, avail_h - margin)
         return max(MIN_ZOOM_SCALE, min(MAX_ZOOM_SCALE, min(avail_w / base_w, avail_h / base_h)))
@@ -398,12 +434,9 @@ class CanvasPreview(QWidget):
         # (DISPLAY_HEIGHT x DISPLAY_WIDTH) - matching render_theme_image() - so we
         # draw directly at the swapped size. No post-hoc rotation of the whole
         # picture is needed; element coordinates are defined in this same space.
-        if self.vertical_mode:
-            canvas_w = int(DISPLAY_HEIGHT * self.scale)
-            canvas_h = int(DISPLAY_WIDTH * self.scale)
-        else:
-            canvas_w = int(DISPLAY_WIDTH * self.scale)
-            canvas_h = int(DISPLAY_HEIGHT * self.scale)
+        design_w, design_h = self._design_size()
+        canvas_w = int(design_w * self.scale)
+        canvas_h = int(design_h * self.scale)
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -487,12 +520,22 @@ class CanvasPreview(QWidget):
             self.draw_clock(painter, element, x, y, selected)
         elif element.type == "image":
             self.draw_image(painter, element, x, y, selected)
+        elif element.type == "icon":
+            self.draw_icon(painter, element, x, y)
+        elif element.type == "video":
+            self.draw_video(painter, element, x, y)
         elif element.type == "gauge_circle_dmd":
             self.draw_gauge_circle_dmd(painter, element, x, y, selected)
         elif element.type == "segmented_bar":
             self.draw_segmented_bar(painter, element, x, y, selected)
         elif element.type == "bar_chart":
             self.draw_bar_chart(painter, element, x, y, selected)
+        elif element.type in LCD_WIDGET_TYPES:
+            self.draw_lcd_widget(painter, element, x, y)
+        elif element.type == "touch_nav":
+            self.draw_touch_nav(painter, element, x, y)
+        elif element.type in DMD_WIDGET_TYPES:
+            self.draw_dmd_widget(painter, element, x, y)
         else:
             # Try custom element
             custom = get_custom_element(element.type)
@@ -1081,6 +1124,68 @@ class CanvasPreview(QWidget):
         painter.setPen(QPen(frame, 1))
         painter.drawRect(QRectF(x, y, width, height))
 
+    def draw_video(self, painter, element, x, y):
+        """Draw the current frame of a ``video`` element (scaled to its rect)."""
+        width = int(element.width * self.scale)
+        height = int(element.height * self.scale)
+        path = getattr(element, "video_path", "")
+        if not path or not os.path.exists(path):
+            painter.fillRect(x, y, width, height, QColor(40, 40, 60))
+            painter.setPen(QPen(QColor(100, 100, 120)))
+            painter.drawRect(x, y, width, height)
+            painter.drawText(x + 5, y + height // 2, "No Video")
+            return
+        from video_background import get_video_frame
+
+        frame = get_video_frame(
+            path, (max(1, int(element.width)), max(1, int(element.height))),
+            getattr(element, "video_fit_mode", "fit_height"))
+        if frame is None:
+            return
+        image = QImage(frame.tobytes(), frame.width, frame.height,
+                       4 * frame.width, QImage.Format.Format_RGBA8888).copy()
+        painter.drawImage(QRectF(x, y, width, height), image)
+
+    def draw_lcd_widget(self, painter, element, x, y):
+        """Render one of the high-resolution LCD elements (antialiased, PIL path)."""
+        from lcd_widgets import render_element
+
+        width = max(1, int(element.width * self.scale))
+        height = max(1, int(element.height * self.scale))
+        self.get_animated_value(element)
+        pixels = render_element(element.type, element, width, height)
+        if pixels.size == 0:
+            return
+        image = QImage(pixels.tobytes(), width, height, 4 * width,
+                       QImage.Format.Format_RGBA8888)
+        painter.drawImage(QRectF(x, y, width, height), image)
+
+    def draw_touch_nav(self, painter, element, x, y):
+        """Render the HDMI touch-navigation widget (buttons along an edge)."""
+        from touch_nav import render
+
+        width = max(1, int(element.width * self.scale))
+        height = max(1, int(element.height * self.scale))
+        pixels = render(element, width, height)
+        if pixels.size == 0:
+            return
+        image = QImage(pixels.tobytes(), width, height, 4 * width,
+                       QImage.Format.Format_RGBA8888)
+        painter.drawImage(QRectF(x, y, width, height), image)
+
+    def draw_dmd_widget(self, painter, element, x, y):
+        """Render one of the HWMON·32 DMD widgets (128×32 logical, scaled)."""
+        from dmd_widgets import render_widget
+
+        width = max(1, int(element.width * self.scale))
+        height = max(1, int(element.height * self.scale))
+        pixels = render_widget(element.type, element, width, height)
+        if pixels.size == 0:
+            return
+        image = QImage(pixels.tobytes(), width, height, 4 * width,
+                       QImage.Format.Format_RGBA8888)
+        painter.drawImage(QRectF(x, y, width, height), image)
+
     def draw_text(self, painter, element, x, y, selected):
         color = apply_opacity(element.color, getattr(element, 'color_opacity', 100))
 
@@ -1260,6 +1365,35 @@ class CanvasPreview(QWidget):
             painter.drawRect(x, y, width, height)
             painter.drawText(x + 5, y + height // 2, "No Image")
 
+    def draw_icon(self, painter, element, x, y):
+        """Draw an Icon element loaded from the bundled icons/ folder."""
+        width = max(1, int(element.width * self.scale))
+        height = max(1, int(element.height * self.scale))
+        path = resolve_icon_path(getattr(element, "icon_name", ""))
+        if not path:
+            painter.fillRect(x, y, width, height, QColor(40, 40, 60))
+            return
+        image = QImage(path)
+        if image.isNull():
+            painter.fillRect(x, y, width, height, QColor(40, 40, 60))
+            return
+        if getattr(element, "tint", False):
+            tinted = QImage(image.size(), QImage.Format.Format_ARGB32)
+            tinted.fill(Qt.GlobalColor.transparent)
+            tint_painter = QPainter(tinted)
+            tint_painter.drawImage(0, 0, image)
+            tint_painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceIn)
+            tint_painter.fillRect(tinted.rect(), QColor(element.color))
+            tint_painter.end()
+            image = tinted
+        pixmap = QPixmap.fromImage(image)
+        ratio = (Qt.AspectRatioMode.KeepAspectRatio if element.scale_proportionally
+                 else Qt.AspectRatioMode.IgnoreAspectRatio)
+        pixmap = pixmap.scaled(width, height, ratio,
+                               Qt.TransformationMode.SmoothTransformation)
+        painter.drawPixmap(x, y, pixmap)
+
     def get_element_bounds(self, element):
         """Get the bounding rectangle for an element."""
         x = int(element.x * self.scale)
@@ -1292,9 +1426,7 @@ class CanvasPreview(QWidget):
 
     def _active_canvas_bounds(self):
         """Logical canvas extent for the current orientation: (w, h)."""
-        if self.vertical_mode:
-            return DISPLAY_HEIGHT, DISPLAY_WIDTH
-        return DISPLAY_WIDTH, DISPLAY_HEIGHT
+        return self._design_size()
 
     def _logical_bounds_from(self, element, ox, oy):
         """Logical bounds of an element anchored at origin (ox, oy)."""
@@ -1794,10 +1926,7 @@ class CanvasPreview(QWidget):
             # Clamp against the active canvas bounds - swapped when vertical mode
             # is enabled, since the logical design space is then DISPLAY_HEIGHT x
             # DISPLAY_WIDTH instead of DISPLAY_WIDTH x DISPLAY_HEIGHT.
-            if self.vertical_mode:
-                bound_w, bound_h = DISPLAY_HEIGHT, DISPLAY_WIDTH
-            else:
-                bound_w, bound_h = DISPLAY_WIDTH, DISPLAY_HEIGHT
+            bound_w, bound_h = self._design_size()
 
             for idx in self.selected_indices:
                 if idx in self.drag_start_positions:
@@ -1901,7 +2030,25 @@ class DMDCanvas(CanvasPreview):
         self.scale = 1.0
         self.vertical_mode = False
         self.background_color = QColor(0, 0, 0)
+        self._preview_image = None  # QImage superpuesta (preview de transiciones)
         self._update_fixed_size()
+
+    def set_preview_image(self, image):
+        """Overlay a QImage (or None to clear) on top of the canvas.
+
+        Se usa para previsualizar el ciclo de pantallas con transiciones sin
+        alterar los elementos en edición.
+        """
+        self._preview_image = image
+        self.update()
+
+    def _design_size(self):
+        """Tamaño lógico real del canvas (DMD/HDMI), no las constantes LCD.
+
+        Lo usan el clamp de arrastre y ``_active_canvas_bounds`` para que los
+        elementos puedan colocarse en todo el alto real del monitor.
+        """
+        return self.dmd_width, self.dmd_height
 
     def _update_fixed_size(self):
         self.setFixedSize(
@@ -1951,6 +2098,10 @@ class DMDCanvas(CanvasPreview):
             draw_individual = is_selected and not self.group_selection_mode
             self.draw_element(painter, self.elements[i], draw_individual)
 
+        # Preview del ciclo de pantallas (transiciones): se pinta encima.
+        if self._preview_image is not None:
+            painter.drawImage(QRectF(0, 0, cw, ch), self._preview_image)
+
         if len(self.selected_indices) > 1:
             self.draw_multi_selection_box(painter)
 
@@ -1998,6 +2149,29 @@ class DMDCanvas(CanvasPreview):
         painter.end()
 
         return img.bits().tobytes()
+
+    def get_frame_rgb888(self):
+        """Renderiza los elementos a un ``QImage`` RGB888 (sin antialiasing).
+
+        Se usa para componer las transiciones entre pantallas DMD.
+        """
+        img = QImage(self.dmd_width, self.dmd_height,
+                     QImage.Format.Format_RGB888)
+        img.fill(self.background_color)
+
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        old_scale = self.scale
+        self.scale = 1.0
+        try:
+            for i in range(len(self.elements) - 1, -1, -1):
+                self.draw_element(painter, self.elements[i], False)
+        finally:
+            self.scale = old_scale
+            painter.end()
+
+        return img
 
     def set_dmd_size(self, width, height):
         self.dmd_width = width

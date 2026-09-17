@@ -9,16 +9,28 @@ import sys
 import threading
 import time
 
+import numpy as np
 import psutil
 
 import actions
+import disks
+import plugins
 
 # Windows-specific imports for power event handling
 if sys.platform == 'win32':
     pass
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPixmap, QTextCursor
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,17 +40,21 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QSlider,
+    QSplitter,
     QStatusBar,
+    QStyle,
     QSystemTrayIcon,
     QTabBar,
     QTabWidget,
@@ -50,8 +66,19 @@ from PySide6.QtWidgets import (
 
 from benchmark import run_display_benchmark
 from canvas import CanvasPreview, CanvasScrollArea, DMDCanvas, HDMICanvas
-from lcds import find_lcd
-from ui_style import ACCENT, APP_BG, BORDER, DOT_OFF, DOT_ON, TEXT, TEXT_DIM, LogoLabel
+from lcds import find_lcd, get_dmd
+from lite_client import normalize_lite_url, port_from_url
+from ui_style import (
+    ACCENT,
+    APP_BG,
+    BORDER,
+    DOT_OFF,
+    DOT_ON,
+    TEXT,
+    TEXT_DIM,
+    LogoLabel,
+    SwitchButton,
+)
 
 
 class ConsoleOutputStream(QObject):
@@ -201,6 +228,9 @@ _psutil_data = {
     'ram_available': 0,
     'net_upload': 0,
     'net_download': 0,
+    'disk_read': 0,
+    'disk_write': 0,
+    'uptime': 0,
 }
 _psutil_data_lock = threading.Lock()
 _psutil_thread = None
@@ -208,6 +238,8 @@ _psutil_thread_running = False
 _cpu_percent_history = []
 _last_net_io = None
 _last_net_time = 0
+_last_disk_io = None
+_last_disk_time = 0
 _psutil_consecutive_errors = 0
 
 
@@ -215,6 +247,7 @@ def _psutil_polling_thread():
     """Background thread that continuously polls psutil data."""
     global _psutil_data, _psutil_thread_running, _cpu_percent_history
     global _last_net_io, _last_net_time, _psutil_consecutive_errors
+    global _last_disk_io, _last_disk_time
 
     # Initialize CPU percent
     try:
@@ -252,6 +285,30 @@ def _psutil_polling_thread():
             except:
                 pass
 
+            # Disk I/O (read/write MB/s) y uptime del sistema
+            disk_read = 0
+            disk_write = 0
+            uptime_hours = 0
+            try:
+                disk_io = psutil.disk_io_counters()
+                current_time = time.time()
+                if disk_io and _last_disk_io and _last_disk_time:
+                    time_delta = current_time - _last_disk_time
+                    if time_delta > 0:
+                        read_bytes = disk_io.read_bytes - _last_disk_io.read_bytes
+                        write_bytes = disk_io.write_bytes - _last_disk_io.write_bytes
+                        disk_read = (read_bytes / time_delta) / (1024 * 1024)
+                        disk_write = (write_bytes / time_delta) / (1024 * 1024)
+                _last_disk_io = disk_io
+                _last_disk_time = current_time
+            except:
+                pass
+            try:
+                uptime_hours = (time.time() - psutil.boot_time()) / 3600.0
+            except:
+                pass
+
+
             # Update shared data
             with _psutil_data_lock:
                 _psutil_data['cpu_percent'] = round(smoothed_cpu, 1)
@@ -260,6 +317,9 @@ def _psutil_polling_thread():
                 _psutil_data['ram_available'] = round(ram.available / (1024**3), 1)
                 _psutil_data['net_upload'] = round(net_upload, 2)
                 _psutil_data['net_download'] = round(net_download, 2)
+                _psutil_data['disk_read'] = round(disk_read, 2)
+                _psutil_data['disk_write'] = round(disk_write, 2)
+                _psutil_data['uptime'] = round(uptime_hours, 1)
 
             _psutil_consecutive_errors = 0
 
@@ -317,7 +377,20 @@ try:
 except ImportError:
     HAS_HID = False
 
-from constants import DISPLAY_HEIGHT, DISPLAY_WIDTH, SOURCE_UNITS
+from constants import (
+    DISPLAY_HEIGHT,
+    DISPLAY_WIDTH,
+    DMD_DEFAULT_DURATION_S,
+    DMD_DEFAULT_TRANSITION,
+    DMD_DEFAULT_TRANSITION_MS,
+    DMD_WIDGET_TYPES,
+    LCD_WIDGET_TYPES,
+    SOURCE_UNITS,
+    resolve_icon_path,
+)
+from dmd_screens import MAX_SCREENS, DMDScreen, screens_from_dmd
+from dmd_transitions import blend, render_screen_rgb, rgb_to_rgb565_le
+from screens import Screen, screens_from_block
 
 
 def get_value_with_unit(value, source, temp_hide_unit=False):
@@ -335,10 +408,10 @@ def get_value_with_unit(value, source, temp_hide_unit=False):
         return f"{value:.0f}{symbol}"
     elif unit_type == "power":
         return f"{value:.0f}{symbol}"
-    elif unit_type == "size":
+    elif unit_type in ("size", "energy", "speed"):
         return f"{value:.1f}{symbol}"
-    elif unit_type == "speed":
-        return f"{value:.1f}{symbol}"
+    elif unit_type == "digital":
+        return f"{value:.0f}{symbol}"
     else:  # percent
         return f"{value:.0f}{symbol}"
 import sensors
@@ -357,16 +430,227 @@ def hex_to_rgba(hex_color, opacity=100):
     b = int(hex_color[4:6], 16)
     a = int(255 * opacity / 100)
     return (r, g, b, a)
+
+
+# ---------------------------------------------------------------------------
+# Fuentes empaquetadas (assets/fonts/ttf): resolucion portable, igual que Lite.
+# ---------------------------------------------------------------------------
+_BUNDLED_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "assets", "fonts", "ttf")
+
+
+def _bundled_font_paths():
+    """Rutas de las fuentes .ttf empaquetadas (o lista vacía si no hay)."""
+    try:
+        return sorted(os.path.join(_BUNDLED_FONT_DIR, name)
+                      for name in os.listdir(_BUNDLED_FONT_DIR)
+                      if name.lower().endswith(".ttf"))
+    except OSError:
+        return []
+
+
+_BUNDLED_FAMILIES = {
+    "liberation mono": ("LiberationMono-Regular.ttf", "LiberationMono-Bold.ttf",
+                        "LiberationMono-Italic.ttf", "LiberationMono-BoldItalic.ttf"),
+    "liberation sans": ("LiberationSans-Regular.ttf", "LiberationSans-Bold.ttf",
+                        "LiberationSans-Italic.ttf", "LiberationSans-BoldItalic.ttf"),
+    "matrix sans print": ("MatrixSansPrint-Regular.ttf", None, None, None),
+    "matrix sans screen": ("MatrixSansScreen-Regular.ttf", None, None, None),
+    "matrix sans": ("MatrixSans-Regular.ttf", None, None, None),
+    "matrix sans raster": ("MatrixSansRaster-Regular.ttf", None, None, None),
+    "matrix sans video": ("MatrixSansVideo-Regular.ttf", None, None, None),
+    "pixel operator": ("PixelOperator.ttf", None, None, None),
+    "tiny5": ("Tiny5-Regular.ttf", None, None, None),
+    "silkscreen": ("Silkscreen-Regular.ttf", None, None, None),
+    "press start 2p": ("PressStart2P-Regular.ttf", None, None, None),
+    "micro 5": ("Micro5-Regular.ttf", None, None, None),
+    "vt323": ("VT323-Regular.ttf", None, None, None),
+}
+
+_FONT_FAMILY_ALIASES = {
+    "arial": "liberation sans",
+    "helvetica": "liberation sans",
+    "segoeui": "liberation sans",
+    "tahoma": "liberation sans",
+    "verdana": "liberation sans",
+    "calibri": "liberation sans",
+    "freesans": "liberation sans",
+    "couriernew": "liberation mono",
+    "consolas": "liberation mono",
+    "monospace": "liberation mono",
+    "notosansmono": "liberation mono",
+    "dejavusansmono": "liberation mono",
+}
+
+
+def _resolve_bundled_font(font_family, bold=False, italic=False):
+    """Ruta TTF empaquetada para una familia (o ``None``)."""
+    name = (font_family or "").strip().lower()
+    if not name:
+        return None
+    key = name
+    if key not in _BUNDLED_FAMILIES:
+        collapsed = {k.replace(" ", ""): k for k in _BUNDLED_FAMILIES}
+        key = collapsed.get(name.replace(" ", ""))
+    if key is None:
+        key = _FONT_FAMILY_ALIASES.get(name.replace(" ", "")) or \
+            _FONT_FAMILY_ALIASES.get(name)
+    if key is None:
+        return None
+    variants = _BUNDLED_FAMILIES.get(key)
+    if not variants:
+        return None
+    regular, bold_f, italic_f, bold_italic_f = variants
+    if bold and italic:
+        chosen = bold_italic_f or bold_f or italic_f or regular
+    elif bold:
+        chosen = bold_f or regular
+    elif italic:
+        chosen = italic_f or regular
+    else:
+        chosen = regular
+    path = os.path.join(_BUNDLED_FONT_DIR, chosen)
+    return path if os.path.exists(path) else None
+
+
 from element_list import ElementListPanel
 from elements import get_custom_element
+from icons_panel import IconsPanel
 from presets import PresetsPanel
 from properties import PropertiesPanel
-from video_background import HAS_CV2, video_background
+from video_background import close_all_videos, reset_all_video_timing
+from widgets import RECIPES, instantiate_widget
+from widgets_panel import WidgetsPanel
 
 # Tipos de elemento que se animan por tiempo (historial/segundero/GIF), no solo
 # por cambio de valor. Con estos presentes hay que renderizar cada frame aunque
 # la firma de valor no cambie, o la salida se ve a trompicones.
-HDMI_ANIMATED_TYPES = {"line_chart", "bar_chart", "gif", "clock"}
+HDMI_ANIMATED_TYPES = {"line_chart", "bar_chart", "gif", "clock", "video"}
+
+
+class _PublishEmitter(QObject):
+    """Emisor de senales para publicar un tema sin bloquear la interfaz.
+
+    El POST se ejecuta en un hilo y emite ``done``; al ser una conexion en cola,
+    el slot se ejecuta en el hilo de Qt aunque la emision venga del hilo de red.
+    """
+
+    done = Signal(bool, str)
+
+
+# Claves de nivel raíz que el servidor ThermalEngineLite acepta en POST /theme.
+# Se usa para enviar un payload compatible (el tema guardado puede tener más
+# claves nuevas que el Lite desconoce y rechazaría con "invalid theme").
+_LITE_THEME_KEYS = {
+    "name", "background_color", "display_width", "display_height",
+    "elements", "video_background", "targets", "lcd_model", "dmd_config",
+    "lcd", "dmd", "hdmi", "hdmi_config", "lite",
+}
+
+
+def build_lite_theme_payload(data):
+    """Devuelve una copia del tema limitada a las claves que Lite acepta.
+
+    ``targets`` se reduce a ``{web, lcd, dmd, hdmi}``. Así el `Publish to
+    ThermalEngineLite` sigue funcionando con servidores Lite que no conocen las
+    claves nuevas (``web``, ``custom``, ``custom_config``).
+    """
+    payload = {key: value for key, value in (data or {}).items()
+               if key in _LITE_THEME_KEYS}
+    targets = (data or {}).get("targets")
+    if isinstance(targets, dict):
+        payload["targets"] = {k: bool(targets.get(k))
+                              for k in ("web", "lcd", "dmd", "hdmi")}
+    elif isinstance(targets, list):
+        payload["targets"] = [t for t in targets
+                              if t in ("web", "lcd", "dmd", "hdmi")]
+    return payload
+
+
+# Prefijo de las fuentes del plugin Lite en Studio (p. ej. ``lite.cpu_temp``).
+# ThermalEngineLite resuelve las fuentes con los ids base (``cpu_temp``), así que
+# al publicar hay que quitarlo o el elemento se queda con su valor por defecto.
+_LITE_SOURCE_PREFIX = "lite."
+
+
+def _strip_lite_prefix(value):
+    if isinstance(value, str) and value.startswith(_LITE_SOURCE_PREFIX):
+        return value[len(_LITE_SOURCE_PREFIX):]
+    return value
+
+
+def _translate_elements_for_lite(elements):
+    for element in elements or []:
+        if not isinstance(element, dict):
+            continue
+        if "source" in element:
+            element["source"] = _strip_lite_prefix(element["source"])
+        sources = element.get("sources")
+        if isinstance(sources, list):
+            element["sources"] = [_strip_lite_prefix(s) for s in sources]
+
+
+def translate_theme_sources_for_lite(data):
+    """Traduce los ids ``lite.*`` a los ids base que usa ThermalEngineLite.
+
+    Recorre los elementos de todos los bloques (lcd/dmd/hdmi/custom, incluidas
+    las pantallas) y quita el prefijo del plugin Lite de ``source`` y ``sources``.
+    """
+    if not isinstance(data, dict):
+        return data
+    _translate_elements_for_lite(data.get("elements"))
+    for block_key in ("lcd", "dmd", "hdmi", "custom"):
+        block = data.get(block_key)
+        if not isinstance(block, dict):
+            continue
+        _translate_elements_for_lite(block.get("elements"))
+        for screen in block.get("screens") or []:
+            if isinstance(screen, dict):
+                _translate_elements_for_lite(screen.get("elements"))
+    return data
+
+
+def _post_theme(url, token, data):
+    """POST de un tema; devuelve ``(ok, status, detail)``."""
+    import urllib.error
+    import urllib.request
+
+    endpoint = url.rstrip("/")
+    if not endpoint.endswith("/theme"):
+        endpoint += "/theme"
+    try:
+        body = json.dumps(data).encode("utf-8")
+        req = urllib.request.Request(endpoint, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        if token:
+            req.add_header("X-Token", token)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            detail = resp.read().decode("utf-8", errors="replace").strip()
+            return (200 <= resp.status < 300), resp.status, detail
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace").strip()
+        return False, e.code, detail
+    except Exception as e:  # noqa: BLE001
+        return False, 0, str(e)
+
+
+def _publish_theme_http(emitter, url, token, data, fallback_data=None):
+    """Envia ``data`` (dict de tema) a ``<url>/theme`` por HTTP POST.
+
+    Si el servidor rechaza el tema completo por claves desconocidas (Lite antiguo),
+    reintenta una vez con ``fallback_data`` (versión saneada).
+    """
+    ok, status, detail = _post_theme(url, token, data)
+    if not ok and fallback_data is not None and "Unknown key" in detail:
+        ok, status, detail = _post_theme(url, token, fallback_data)
+        if ok:
+            detail = f"{detail} (compat payload)"
+    if ok:
+        emitter.done.emit(True, f"Published ({status}): {detail}")
+    elif status:
+        emitter.done.emit(False, f"HTTP {status}: {detail}")
+    else:
+        emitter.done.emit(False, f"Error: {detail}")
 
 
 class PlusTabBar(QTabBar):
@@ -471,11 +755,57 @@ class ThemeEditorWindow(QMainWindow):
         self._active_target = "lcd"  # "lcd" | "dmd" | "hdmi"
         self.lcd_elements = []
         self.lcd_background_color = "#0f0f19"
-        self.lcd_video_data = {}  # dict del video_background de la pestaña LCD
         self.dmd_elements = []
         self.dmd_background_color = "#000000"
+        # DMD screens (transitions): cada pantalla tiene sus elementos/fondo y
+        # un tiempo + transición. Con una sola pantalla el DMD va como siempre.
+        self.dmd_screens = [DMDScreen(name="Screen 1", elements=self.dmd_elements)]
+        self.dmd_active_screen = 0
+        self.dmd_transitions_enabled = True
+        self.dmd_default_duration_s = DMD_DEFAULT_DURATION_S
+        self.dmd_default_transition = DMD_DEFAULT_TRANSITION
+        self.dmd_default_transition_ms = DMD_DEFAULT_TRANSITION_MS
+        self.dmd_output_canvas = None  # canvas offscreen para el frame de salida
+        # Playback del ciclo
+        self._dmd_play_index = 0
+        self._dmd_play_elapsed = 0.0
+        self._dmd_play_phase = "show"  # "show" | "transition"
+        self._dmd_play_progress = 0.0
+        self._dmd_play_last = 0.0
+        self._dmd_preview_playing = False
         self.hdmi_elements = []
         self.hdmi_background_color = "#000000"
+        # HDMI screens (transiciones por tiempo y por toque): mismo modelo que
+        # el DMD. Con una sola pantalla el HDMI va como siempre.
+        self.hdmi_screens = [Screen(name="Screen 1", elements=self.hdmi_elements)]
+        self.hdmi_active_screen = 0
+        self.hdmi_transitions_enabled = True
+        self.hdmi_default_duration_s = DMD_DEFAULT_DURATION_S
+        self.hdmi_default_transition = DMD_DEFAULT_TRANSITION
+        self.hdmi_default_transition_ms = DMD_DEFAULT_TRANSITION_MS
+        self.hdmi_output_canvas = None  # canvas offscreen para los frames de salida
+        # Playback del ciclo HDMI
+        self._hdmi_play_index = 0
+        self._hdmi_play_elapsed = 0.0
+        self._hdmi_play_phase = "show"  # "show" | "transition"
+        self._hdmi_play_progress = 0.0
+        self._hdmi_play_last = 0.0
+        self._hdmi_transition_target = None  # salto manual (toque) pendiente
+        # Canvas Custom: lienzo libre (sin salida física) con pantallas y
+        # transiciones, pensado para Lite/Web.
+        self.custom_elements = []
+        self.custom_background_color = "#000000"
+        self.custom_screens = [Screen(name="Screen 1", elements=self.custom_elements)]
+        self.custom_active_screen = 0
+        self.custom_transitions_enabled = True
+        self.custom_default_duration_s = DMD_DEFAULT_DURATION_S
+        self.custom_default_transition = DMD_DEFAULT_TRANSITION
+        self.custom_default_transition_ms = DMD_DEFAULT_TRANSITION_MS
+        self.custom_canvas = None  # creado en setup_ui
+        stored_custom = settings.get_setting("custom_config", None)
+        self.project_custom_config = dict(stored_custom) if isinstance(
+            stored_custom, dict) else {"width": 1280, "height": 800,
+                                       "name": "Custom"}
         self.lcd_canvas = None  # creados en setup_ui
         self.dmd_canvas = None
         self.hdmi_canvas = None
@@ -488,8 +818,19 @@ class ThemeEditorWindow(QMainWindow):
         self._web_port = int(port or 4241)
         self.project_targets = dict(
             settings.get_setting("project_targets", {"web": True, "lcd": True}))
+        self.project_targets.setdefault("custom", False)
         lcd_default = settings.get_setting("lcd_model")
         self.project_lcd_id = lcd_default if lcd_default else None
+
+        # Proyecto Lite: los sensores y las salidas viven en un
+        # ThermalEngineLite remoto. En este modo Studio no arranca salidas
+        # locales; solo edita y publica, y el preview WEB muestra el del Lite.
+        self._lite_project = False
+        self._lite_client = None
+        self._lite_url = ""
+        self._lite_name = ""
+        self._lite_token = ""
+        self._lite_status_timer = None
 
         # Performance monitoring
         self.frame_times = []
@@ -502,6 +843,13 @@ class ThemeEditorWindow(QMainWindow):
         # Undo/Redo stacks
         self.undo_stack = []
         self.redo_stack = []
+        # Portapapeles interno de elementos (para copiar/pegar entre canvas).
+        self._element_clipboard = []
+        self._paste_count = 0
+        self._canvas_shortcuts = []
+        # Miniaturas de pantallas (chips) y su refresco debounced.
+        self._screen_chips = {}
+        self._screen_thumb_timer = None
         self.max_undo_levels = 50
 
         # Canvas update throttling (skip canvas updates during high-speed rendering)
@@ -522,6 +870,14 @@ class ThemeEditorWindow(QMainWindow):
         self._frame_buffer_lock = threading.Lock()
         self._last_frame_signature = None  # Signature of last rendered frame (for caching)
         self._last_jpeg_data = None  # Cached JPEG bytes for the last rendered frame
+        # Fuente que sirve el webserver ("auto" | "lcd" | "hdmi") y su caché
+        # JPEG propio, desacoplado del caché LCD (el hilo de render LCD también
+        # escribe _last_jpeg_data y pisaría la fuente si fuese HDMI).
+        self.web_source = "auto"
+        self._web_jpeg_data = None
+        self._web_jpeg_rotated = False
+        # Canvas custom para proyectos solo-Web (None = 1920×480 estándar).
+        self._web_canvas_size = None
         self._render_thread = None
         self._render_thread_running = False
 
@@ -546,14 +902,14 @@ class ThemeEditorWindow(QMainWindow):
         self.dmd_sender = None
         self.project_dmd_config = None
         self.dmd_send_timer = None
-        self._dmd_output_enabled = True  # Toggle: pausa/reanuda el stream DMD
+        self._dmd_output_enabled = False  # Toggle: pausa/reanuda el stream DMD
 
         # HDMI targets: ventana fullscreen + timer de render (canvas propio).
         self.hdmi_output = None
         self.hdmi_send_timer = None
         self.project_hdmi_config = settings.get_setting("hdmi_config", None)
         self._hdmi_last_signature = None
-        self._hdmi_output_enabled = True  # Toggle: conecta/desconecta la salida HDMI
+        self._hdmi_output_enabled = False  # Toggle: conecta/desconecta la salida HDMI
         self.hdmi_frame_times = []
         self.hdmi_last_frame_time = 0
 
@@ -587,8 +943,40 @@ class ThemeEditorWindow(QMainWindow):
         # Load default preset if one is set
         self.load_default_preset_on_startup()
 
+        # Arrancar plugins de fuentes de datos habilitados y refrescar el combo
+        # de fuentes periódicamente (las entidades HA pueden cambiar).
+        self._start_plugins()
+        self.plugins_refresh_timer = QTimer(self)
+        self.plugins_refresh_timer.timeout.connect(self._poll_plugin_sources)
+        self.plugins_refresh_timer.start(3000)
+
         # Auto-connect to display after window is shown
         QTimer.singleShot(500, self.auto_connect)
+
+    def _start_plugins(self):
+        plugins.reload_plugins()
+        plugins.start_enabled()
+        self._refresh_source_combo()
+
+    def _poll_plugin_sources(self):
+        if plugins.refresh_sources():
+            self._refresh_source_combo()
+
+    def _refresh_source_combo(self):
+        panel = getattr(self, "properties_panel", None)
+        if panel is not None:
+            panel.refresh_source_combo()
+
+    def show_plugins(self):
+        """Settings → Plugins...: gestiona los plugins de fuentes de datos."""
+        from plugins_dialog import PluginsDialog
+
+        dialog = PluginsDialog(self, on_changed=self._on_plugins_changed)
+        dialog.exec()
+
+    def _on_plugins_changed(self):
+        plugins.refresh_sources()
+        self._refresh_source_combo()
 
     # --- Elementos y fondo delegados según la pestaña activa (LCD/DMD/HDMI) --
     @property
@@ -598,6 +986,8 @@ class ThemeEditorWindow(QMainWindow):
             return self.lcd_elements
         if self._active_target == "hdmi":
             return self.hdmi_elements
+        if self._active_target == "custom":
+            return self.custom_elements
         return self.dmd_elements
 
     @elements.setter
@@ -606,6 +996,8 @@ class ThemeEditorWindow(QMainWindow):
             self.lcd_elements = value
         elif self._active_target == "hdmi":
             self.hdmi_elements = value
+        elif self._active_target == "custom":
+            self.custom_elements = value
         else:
             self.dmd_elements = value
 
@@ -616,6 +1008,8 @@ class ThemeEditorWindow(QMainWindow):
             return self.lcd_background_color
         if self._active_target == "hdmi":
             return self.hdmi_background_color
+        if self._active_target == "custom":
+            return self.custom_background_color
         return self.dmd_background_color
 
     @background_color.setter
@@ -624,25 +1018,31 @@ class ThemeEditorWindow(QMainWindow):
             self.lcd_background_color = value
         elif self._active_target == "hdmi":
             self.hdmi_background_color = value
+        elif self._active_target == "custom":
+            self.custom_background_color = value
         else:
             self.dmd_background_color = value
 
     @property
     def canvas(self):
-        """Canvas de la pestaña activa (LCD, DMD o HDMI)."""
+        """Canvas de la pestaña activa (LCD, DMD, HDMI o Custom)."""
         if self._active_target == "lcd":
             return self.lcd_canvas
         if self._active_target == "hdmi":
             return self.hdmi_canvas
+        if self._active_target == "custom":
+            return self.custom_canvas
         return self.dmd_canvas
 
     @property
     def canvas_scroll(self):
-        """ScrollArea de la pestaña activa (LCD, DMD o HDMI)."""
+        """ScrollArea de la pestaña activa (LCD, DMD, HDMI o Custom)."""
         if self._active_target == "lcd":
             return self.lcd_scroll
         if self._active_target == "hdmi":
             return self.hdmi_scroll
+        if self._active_target == "custom":
+            return self.custom_scroll
         return self.dmd_scroll
 
     def auto_connect(self):
@@ -683,8 +1083,8 @@ class ThemeEditorWindow(QMainWindow):
         """Handle system waking from sleep."""
         print("[Power] System waking up")
 
-        # Reset video background timing to prevent frame jumps
-        video_background.reset_timing()
+        # Reset video playback timing to prevent frame jumps
+        reset_all_video_timing()
 
         # Reset GIF playback timing
         try:
@@ -789,14 +1189,6 @@ class ThemeEditorWindow(QMainWindow):
             self.canvas.set_elements(self.lcd_elements)
             self.element_list.set_elements(self.lcd_elements)
 
-            video_data = default_preset_data.get("video_background", {})
-            if video_data:
-                video_background.from_dict(video_data)
-            else:
-                video_background.clear_video()
-            self.lcd_video_data = video_background.to_dict()
-            self._update_video_ui()
-
             print(f"[Startup] Loaded default preset: {self.theme_name}")
 
     def setup_ui(self):
@@ -859,18 +1251,6 @@ class ThemeEditorWindow(QMainWindow):
         self.bg_color_btn.clicked.connect(self.choose_background_color)
         toolbar.addWidget(self.bg_color_btn)
 
-        toolbar.addWidget(QLabel("Video"))
-        self.video_btn = QPushButton("None")
-        self.video_btn.clicked.connect(self.choose_video_background)
-        toolbar.addWidget(self.video_btn)
-
-        self.video_fit_combo = QComboBox()
-        self.video_fit_combo.addItem("Fit Height", "fit_height")
-        self.video_fit_combo.addItem("Fit Width", "fit_width")
-        self.video_fit_combo.currentIndexChanged.connect(self.on_video_fit_changed)
-        self.video_fit_combo.setEnabled(False)
-        toolbar.addWidget(self.video_fit_combo)
-
         toolbar_spacer = QWidget()
         toolbar_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(toolbar_spacer)
@@ -892,8 +1272,18 @@ class ThemeEditorWindow(QMainWindow):
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_lay.setSpacing(0)
 
+        # Pestañas laterales: elementos sueltos y widgets de resumen.
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setObjectName("leftTabs")
         self.element_list = ElementListPanel()
-        left_lay.addWidget(self.element_list, 1)
+        self.icons_panel = IconsPanel()
+        self.icons_panel.icon_selected.connect(self.insert_icon)
+        self.widgets_panel = WidgetsPanel()
+        self.widgets_panel.widget_selected.connect(self.insert_widget)
+        self.left_tabs.addTab(self.element_list, "Elements")
+        self.left_tabs.addTab(self.icons_panel, "Icons")
+        self.left_tabs.addTab(self.widgets_panel, "Widgets")
+        left_lay.addWidget(self.left_tabs, 1)
 
         # PresetsPanel sigue existiendo (save/load preset por defecto) pero ya
         # no es una pestaña: se usa internamente y se oculta.
@@ -954,26 +1344,28 @@ class ThemeEditorWindow(QMainWindow):
 
         bar_layout.addSpacing(12)
 
-        # Toggles de salida (siempre visibles cuando el target está activo):
-        # DMD pausa/reanuda el envío TCP; HDMI conecta/desconecta la ventana.
-        self.dmd_toggle_btn = QToolButton()
-        self.dmd_toggle_btn.setObjectName("zoomButton")
-        self.dmd_toggle_btn.setText("DMD")
-        self.dmd_toggle_btn.setCheckable(True)
-        self.dmd_toggle_btn.setChecked(True)
-        self.dmd_toggle_btn.setToolTip(
-            "Pausar/reanudar el envío de stream al DMD")
+        # Toggles de salida (switch On/Off). Solo se muestran cuando el canvas
+        # activo es el suyo: DMD pausa/reanuda el stream; HDMI conecta/desconecta.
+        self.dmd_toggle_label = QLabel("DMD")
+        self.dmd_toggle_label.setStyleSheet(f"color: {TEXT_DIM};")
+        self.dmd_toggle_label.setVisible(False)
+        bar_layout.addWidget(self.dmd_toggle_label)
+
+        self.dmd_toggle_btn = SwitchButton(
+            True, tooltip="Pausar/reanudar el envío de stream al DMD")
         self.dmd_toggle_btn.toggled.connect(self._on_dmd_output_toggled)
         self.dmd_toggle_btn.setVisible(False)
         bar_layout.addWidget(self.dmd_toggle_btn)
 
-        self.hdmi_toggle_btn = QToolButton()
-        self.hdmi_toggle_btn.setObjectName("zoomButton")
-        self.hdmi_toggle_btn.setText("HDMI")
-        self.hdmi_toggle_btn.setCheckable(True)
-        self.hdmi_toggle_btn.setChecked(True)
-        self.hdmi_toggle_btn.setToolTip(
-            "Conectar/desconectar la salida HDMI")
+        bar_layout.addSpacing(10)
+
+        self.hdmi_toggle_label = QLabel("HDMI")
+        self.hdmi_toggle_label.setStyleSheet(f"color: {TEXT_DIM};")
+        self.hdmi_toggle_label.setVisible(False)
+        bar_layout.addWidget(self.hdmi_toggle_label)
+
+        self.hdmi_toggle_btn = SwitchButton(
+            True, tooltip="Conectar/desconectar la salida HDMI")
         self.hdmi_toggle_btn.toggled.connect(self._on_hdmi_output_toggled)
         self.hdmi_toggle_btn.setVisible(False)
         bar_layout.addWidget(self.hdmi_toggle_btn)
@@ -1009,7 +1401,64 @@ class ThemeEditorWindow(QMainWindow):
 
         self.dmd_canvas = DMDCanvas(128, 32)
         self.dmd_scroll.setWidget(self.dmd_canvas)
-        self._dmd_tab_index = self.target_tabs.addTab(self.dmd_scroll, "DMD")
+        # Canvas offscreen usado para generar los frames de salida (permite que
+        # el editor muestre la pantalla en edición mientras el DMD reproduce).
+        self.dmd_output_canvas = DMDCanvas(128, 32)
+
+        # ----- Pestaña DMD: tira de pantallas (transiciones) + canvas -----
+        self.dmd_tab = QWidget()
+        dmd_layout = QVBoxLayout(self.dmd_tab)
+        dmd_layout.setContentsMargins(8, 6, 8, 0)
+        dmd_layout.setSpacing(6)
+
+        head = QWidget()
+        head_layout = QVBoxLayout(head)
+        head_layout.setContentsMargins(0, 0, 0, 0)
+        head_layout.setSpacing(4)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+        self.dmd_screens_buttons_widget = QWidget()
+        self.dmd_screens_buttons = QGridLayout(self.dmd_screens_buttons_widget)
+        self.dmd_screens_buttons.setContentsMargins(0, 0, 0, 0)
+        self.dmd_screens_buttons.setSpacing(4)
+        row1.addWidget(self.dmd_screens_buttons_widget)
+        self.dmd_add_screen_btn = QToolButton()
+        self.dmd_add_screen_btn.setText("+")
+        self.dmd_add_screen_btn.setToolTip("Añadir pantalla")
+        self.dmd_add_screen_btn.clicked.connect(self.add_dmd_screen)
+        row1.addWidget(self.dmd_add_screen_btn)
+        self.dmd_delete_screen_btn = QToolButton()
+        self.dmd_delete_screen_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
+        self.dmd_delete_screen_btn.setToolTip("Eliminar pantalla activa")
+        self.dmd_delete_screen_btn.clicked.connect(self.delete_active_dmd_screen)
+        row1.addWidget(self.dmd_delete_screen_btn)
+        self._dmd_del_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete),
+                                           self.dmd_screens_buttons_widget)
+        self._dmd_del_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._dmd_del_shortcut.activated.connect(self.delete_active_dmd_screen)
+        row1.addStretch(1)
+        self.dmd_transitions_label = QLabel("Transitions")
+        self.dmd_transitions_label.setStyleSheet(f"color: {TEXT_DIM};")
+        row1.addWidget(self.dmd_transitions_label)
+        self.dmd_transitions_switch = SwitchButton(
+            True, tooltip="Activar transiciones entre pantallas")
+        self.dmd_transitions_switch.toggled.connect(self.set_dmd_transitions_enabled)
+        row1.addWidget(self.dmd_transitions_switch)
+        self.dmd_preview_btn = QToolButton()
+        self.dmd_preview_btn.setText("Preview")
+        self.dmd_preview_btn.setCheckable(True)
+        self.dmd_preview_btn.setToolTip("Previsualizar el ciclo de pantallas")
+        self.dmd_preview_btn.toggled.connect(self.set_dmd_preview)
+        row1.addWidget(self.dmd_preview_btn)
+        head_layout.addLayout(row1)
+
+
+        dmd_layout.addWidget(head)
+        dmd_layout.addWidget(self.dmd_scroll, 1)
+        self._dmd_tab_index = self.target_tabs.addTab(self.dmd_tab, "DMD")
+        self._rebuild_dmd_screens_bar()
 
         # ----- Pestaña HDMI: canvas de edición a resolución del monitor -----
         self.hdmi_tab = QWidget()
@@ -1029,17 +1478,45 @@ class ThemeEditorWindow(QMainWindow):
             self._on_hdmi_monitor_combo_changed)
         hdmi_head.addWidget(self.hdmi_monitor_combo)
 
-        self.hdmi_refresh_button = QToolButton()
-        self.hdmi_refresh_button.setText("Actualizar")
-        self.hdmi_refresh_button.setToolTip("Volver a detectar monitores")
-        self.hdmi_refresh_button.clicked.connect(self._refresh_hdmi_monitor_combo)
-        hdmi_head.addWidget(self.hdmi_refresh_button)
-
         self.hdmi_resolution_label = QLabel("")
         self.hdmi_resolution_label.setStyleSheet(f"color: {TEXT_DIM};")
         hdmi_head.addWidget(self.hdmi_resolution_label)
         hdmi_head.addStretch(1)
         hdmi_layout.addLayout(hdmi_head)
+
+        # Tira de pantallas HDMI (transiciones por tiempo y por toque).
+        hdmi_row = QHBoxLayout()
+        hdmi_row.setSpacing(6)
+        self.hdmi_screens_buttons_widget = QWidget()
+        self.hdmi_screens_buttons = QGridLayout(self.hdmi_screens_buttons_widget)
+        self.hdmi_screens_buttons.setContentsMargins(0, 0, 0, 0)
+        self.hdmi_screens_buttons.setSpacing(4)
+        hdmi_row.addWidget(self.hdmi_screens_buttons_widget)
+        self.hdmi_add_screen_btn = QToolButton()
+        self.hdmi_add_screen_btn.setText("+")
+        self.hdmi_add_screen_btn.setToolTip("Añadir pantalla")
+        self.hdmi_add_screen_btn.clicked.connect(self.add_hdmi_screen)
+        hdmi_row.addWidget(self.hdmi_add_screen_btn)
+        self.hdmi_delete_screen_btn = QToolButton()
+        self.hdmi_delete_screen_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
+        self.hdmi_delete_screen_btn.setToolTip("Eliminar pantalla activa")
+        self.hdmi_delete_screen_btn.clicked.connect(self.delete_active_hdmi_screen)
+        hdmi_row.addWidget(self.hdmi_delete_screen_btn)
+        self._hdmi_del_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete),
+                                            self.hdmi_screens_buttons_widget)
+        self._hdmi_del_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._hdmi_del_shortcut.activated.connect(self.delete_active_hdmi_screen)
+        hdmi_row.addStretch(1)
+        self.hdmi_transitions_label = QLabel("Transitions")
+        self.hdmi_transitions_label.setStyleSheet(f"color: {TEXT_DIM};")
+        hdmi_row.addWidget(self.hdmi_transitions_label)
+        self.hdmi_transitions_switch = SwitchButton(
+            True, tooltip="Activar transiciones automáticas por tiempo entre pantallas")
+        self.hdmi_transitions_switch.toggled.connect(self.set_hdmi_transitions_enabled)
+        hdmi_row.addWidget(self.hdmi_transitions_switch)
+        hdmi_layout.addLayout(hdmi_row)
+
 
         self.hdmi_scroll = CanvasScrollArea()
         self.hdmi_scroll.setObjectName("canvasScroll")
@@ -1048,10 +1525,76 @@ class ThemeEditorWindow(QMainWindow):
         self.hdmi_scroll.viewport_resized.connect(self._on_canvas_viewport_resized)
 
         self.hdmi_canvas = HDMICanvas(1920, 1080)
+        self.hdmi_output_canvas = HDMICanvas(1920, 1080)
         self.hdmi_scroll.setWidget(self.hdmi_canvas)
         hdmi_layout.addWidget(self.hdmi_scroll, 1)
         self._hdmi_tab_index = self.target_tabs.addTab(self.hdmi_tab, "HDMI")
         self.target_tabs.setTabVisible(self._hdmi_tab_index, False)
+        self._rebuild_hdmi_screens_bar()
+
+        # ----- Pestaña Custom: canvas libre con pantallas/transiciones -----
+        self.custom_tab = QWidget()
+        custom_layout = QVBoxLayout(self.custom_tab)
+        custom_layout.setContentsMargins(8, 6, 8, 0)
+        custom_layout.setSpacing(6)
+
+        custom_head = QHBoxLayout()
+        custom_head.setSpacing(6)
+        self.custom_screens_buttons_widget = QWidget()
+        self.custom_screens_buttons = QGridLayout(self.custom_screens_buttons_widget)
+        self.custom_screens_buttons.setContentsMargins(0, 0, 0, 0)
+        self.custom_screens_buttons.setSpacing(4)
+        custom_head.addWidget(self.custom_screens_buttons_widget)
+        self.custom_add_screen_btn = QToolButton()
+        self.custom_add_screen_btn.setText("+")
+        self.custom_add_screen_btn.setToolTip("Añadir pantalla")
+        self.custom_add_screen_btn.clicked.connect(self.add_custom_screen)
+        custom_head.addWidget(self.custom_add_screen_btn)
+        self.custom_delete_screen_btn = QToolButton()
+        self.custom_delete_screen_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
+        self.custom_delete_screen_btn.setToolTip("Eliminar pantalla activa")
+        self.custom_delete_screen_btn.clicked.connect(self.delete_active_custom_screen)
+        custom_head.addWidget(self.custom_delete_screen_btn)
+        self._custom_del_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete),
+                                              self.custom_screens_buttons_widget)
+        self._custom_del_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._custom_del_shortcut.activated.connect(self.delete_active_custom_screen)
+        custom_head.addStretch(1)
+        self.custom_resolution_label = QLabel("")
+        self.custom_resolution_label.setStyleSheet(f"color: {TEXT_DIM};")
+        custom_head.addWidget(self.custom_resolution_label)
+        custom_head.addWidget(QLabel("Transitions"))
+        self.custom_transitions_switch = SwitchButton(
+            True, tooltip="Pantallas y transiciones (se publican al tema)")
+        self.custom_transitions_switch.toggled.connect(
+            self.set_custom_transitions_enabled)
+        custom_head.addWidget(self.custom_transitions_switch)
+        custom_layout.addLayout(custom_head)
+
+
+        self.custom_scroll = CanvasScrollArea()
+        self.custom_scroll.setObjectName("canvasScroll")
+        self.custom_scroll.setWidgetResizable(False)
+        self.custom_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.custom_scroll.viewport_resized.connect(self._on_canvas_viewport_resized)
+
+        cw = int(self.project_custom_config.get("width") or 1280)
+        ch = int(self.project_custom_config.get("height") or 800)
+        self.custom_canvas = HDMICanvas(cw, ch)
+        self.custom_scroll.setWidget(self.custom_canvas)
+        custom_layout.addWidget(self.custom_scroll, 1)
+        self._custom_tab_index = self.target_tabs.addTab(self.custom_tab, "Custom")
+        self.target_tabs.setTabVisible(self._custom_tab_index, False)
+        self._rebuild_custom_screens_bar()
+        self._sync_custom_screen_props()
+
+        # Copy/Paste: menú contextual en cada canvas + atajos acotados.
+        for canvas in (self.lcd_canvas, self.dmd_canvas, self.hdmi_canvas,
+                       self.custom_canvas):
+            canvas.context_menu_requested.connect(self._show_canvas_context_menu)
+            self._install_canvas_shortcuts(canvas)
+        self._install_canvas_shortcuts(self.element_list.tree_widget)
 
         # Hotplug: mantener el combo y la ventana de salida sincronizados.
         app = QApplication.instance()
@@ -1062,7 +1605,37 @@ class ThemeEditorWindow(QMainWindow):
 
         # ----- Pestaña WEB: preview en vivo de la imagen que sirve el
         # webserver (/image.jpg). Reutiliza el caché JPEG ya generado por el
-        # timer del webserver (_last_jpeg_data), sin renders extra.
+        # timer del webserver (_web_jpeg_data), sin renders extra.
+        self.web_tab = QWidget()
+        web_tab_layout = QVBoxLayout(self.web_tab)
+        web_tab_layout.setContentsMargins(8, 6, 8, 6)
+        web_tab_layout.setSpacing(6)
+
+        web_head = QHBoxLayout()
+        web_head.setSpacing(8)
+        web_source_lbl = QLabel("Source:")
+        web_source_lbl.setStyleSheet(f"color: {TEXT_DIM};")
+        web_head.addWidget(web_source_lbl)
+        self.web_source_combo = QComboBox()
+        self.web_source_combo.addItem("Auto (HDMI if present)", "auto")
+        self.web_source_combo.addItem("LCD", "lcd")
+        self.web_source_combo.addItem("HDMI", "hdmi")
+        self.web_source_combo.addItem("Custom", "custom")
+        self.web_source_combo.setMinimumWidth(180)
+        self.web_source_combo.currentIndexChanged.connect(self._on_web_source_changed)
+        web_head.addWidget(self.web_source_combo)
+        web_head.addStretch(1)
+        self.web_source_hint = QLabel("")
+        self.web_source_hint.setStyleSheet(f"color: {TEXT_DIM};")
+        web_head.addWidget(self.web_source_hint)
+        self.web_publish_btn = QPushButton("Publish to Lite...")
+        self.web_publish_btn.setToolTip(
+            "Send the current theme to a remote ThermalEngineLite (POST /theme)")
+        self.web_publish_btn.clicked.connect(self.publish_to_lite)
+        web_head.addWidget(self.web_publish_btn)
+        web_tab_layout.addLayout(web_head)
+        self._update_web_publish_visibility()
+
         self.web_scroll = CanvasScrollArea()
         self.web_scroll.setObjectName("canvasScroll")
         self.web_scroll.setWidgetResizable(True)
@@ -1074,7 +1647,8 @@ class ThemeEditorWindow(QMainWindow):
         self.web_preview.setStyleSheet("color: %s;" % TEXT_DIM)
         self.web_preview.setMinimumSize(100, 100)
         self.web_scroll.setWidget(self.web_preview)
-        self._web_tab_index = self.target_tabs.addTab(self.web_scroll, "WEB")
+        web_tab_layout.addWidget(self.web_scroll, 1)
+        self._web_tab_index = self.target_tabs.addTab(self.web_tab, "WEB")
         self.target_tabs.setTabVisible(self._web_tab_index, False)
 
         # Timer para refrescar el preview WEB desde el caché JPEG
@@ -1091,26 +1665,50 @@ class ThemeEditorWindow(QMainWindow):
         self.add_target_btn = QToolButton()
         self.add_target_btn.setText("+")
         self.add_target_btn.setToolTip(
-            "Añadir dispositivo a este proyecto (Web / LCD / HDMI / DMD)")
+            "Añadir dispositivo a este proyecto (Web / LCD / HDMI / DMD / Custom)")
         self.add_target_btn.setFixedSize(24, 24)
         self.add_target_btn.clicked.connect(self.add_project_target)
         self.target_tabs.tabBar().set_plus_button(self.add_target_btn)
+        # Menú contextual en las pestañas para eliminar un canvas/target.
+        tab_bar = self.target_tabs.tabBar()
+        tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        tab_bar.customContextMenuRequested.connect(self._on_target_tab_context_menu)
 
         center_layout.addWidget(self.target_tabs, 1)
 
-        main_layout.addWidget(center_col, 1)
-
-        # Right panel (260px) - properties
+        # Right panel - properties (redimensionable via splitter).
         self.properties_panel = PropertiesPanel()
-        self.properties_panel.setFixedWidth(260)
+        self.properties_panel.setMinimumWidth(260)
         self.properties_panel.setMinimumHeight(0)
-        main_layout.addWidget(self.properties_panel)
+        self.properties_panel.screen_settings_changed.connect(
+            self._on_screen_settings_changed)
+
+        self.center_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.center_splitter.setObjectName("centerSplitter")
+        self.center_splitter.setChildrenCollapsible(False)
+        self.center_splitter.setHandleWidth(3)
+        self.center_splitter.addWidget(center_col)
+        self.center_splitter.addWidget(self.properties_panel)
+        self.center_splitter.setStretchFactor(0, 1)
+        self.center_splitter.setStretchFactor(1, 0)
+        self.center_splitter.setSizes([1100, 330])
+        main_layout.addWidget(self.center_splitter, 1)
 
         # ----- Status bar (24px) -----
         self.status_bar = QStatusBar()
         self.status_bar.setFixedHeight(24)
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
+
+        # Indicador del origen de sensores remoto (proyecto Lite).
+        self.lite_status_label = QLabel("")
+        self.lite_status_label.setTextFormat(Qt.TextFormat.RichText)
+        self.lite_status_label.setStyleSheet(
+            "color: #9aa0aa; padding: 0 8px; background: transparent;")
+        self.status_bar.addPermanentWidget(self.lite_status_label)
+
+        self._lite_status_timer = QTimer(self)
+        self._lite_status_timer.timeout.connect(self._update_lite_indicator)
 
         self.perf_indicator = QLabel()
         self.perf_indicator.setObjectName("perfIndicator")
@@ -1197,7 +1795,19 @@ class ThemeEditorWindow(QMainWindow):
         self.redo_action.setEnabled(False)
         edit_menu.addAction(self.redo_action)
 
+        edit_menu.addSeparator()
+        copy_action = QAction("Copy Elements", self)
+        copy_action.triggered.connect(self.copy_selected_elements)
+        edit_menu.addAction(copy_action)
+        paste_action = QAction("Paste Elements", self)
+        paste_action.triggered.connect(self.paste_elements)
+        edit_menu.addAction(paste_action)
+        duplicate_action = QAction("Duplicate Elements", self)
+        duplicate_action.triggered.connect(self.duplicate_selected_elements)
+        edit_menu.addAction(duplicate_action)
+
         display_menu = menubar.addMenu("Display")
+        self.display_menu = display_menu
 
         self.connect_action = QAction("Connect", self)
         self.connect_action.triggered.connect(self.toggle_connection)
@@ -1213,28 +1823,19 @@ class ThemeEditorWindow(QMainWindow):
 
         display_menu.addSeparator()
 
-        fps_menu = display_menu.addMenu("Frame Rate")
-        self.fps_menu = fps_menu
-        self.fps_actions = []
-        for fps in [10, 20, 30, 60]:
-            action = QAction(f"{fps} FPS", self)
-            action.setCheckable(True)
-            action.setChecked(fps == self.target_fps)
-            action.triggered.connect(lambda checked, f=fps: self.set_target_fps(f))
-            fps_menu.addAction(action)
-            self.fps_actions.append(action)
-
-        fps_menu.addSeparator()
-
-        # Overdrive mode - uses threaded rendering and frame skipping for consistent timing
+        # Overdrive mode - threaded rendering with frame skipping (lives in the
+        # LCD submenu; see _rebuild_display_menu).
         self.overdrive_action = QAction("Overdrive Mode", self)
         self.overdrive_action.setCheckable(True)
         self.overdrive_action.setChecked(self._overdrive_mode)
         self.overdrive_action.setToolTip("Threaded rendering with frame skipping for smoother output")
         self.overdrive_action.triggered.connect(self.toggle_overdrive_mode)
-        fps_menu.addAction(self.overdrive_action)
 
-        display_menu.addSeparator()
+        # Los submenús por dispositivo (LCD/DMD/HDMI) con su frame rate se
+        # insertan antes de este separador y se reconstruyen dinámicamente.
+        self._display_sep = display_menu.addSeparator()
+        self.device_menus = []
+        self.lcd_fps_actions = []
 
         # Vertical mode - rotates both the on-screen preview and the LCD output 90 degrees
         self.vertical_mode_action = QAction("Vertical Mode", self)
@@ -1250,12 +1851,18 @@ class ThemeEditorWindow(QMainWindow):
         diagnose_action.triggered.connect(self.diagnose_sensors)
         display_menu.addAction(diagnose_action)
 
+        self._rebuild_display_menu()
+
         # Settings menu
         settings_menu = menubar.addMenu("Settings")
 
         settings_action = QAction("Preferences...", self)
         settings_action.triggered.connect(self.show_settings)
         settings_menu.addAction(settings_action)
+
+        plugins_action = QAction("Plugins...", self)
+        plugins_action.triggered.connect(self.show_plugins)
+        settings_menu.addAction(plugins_action)
 
         settings_menu.addSeparator()
 
@@ -1268,6 +1875,7 @@ class ThemeEditorWindow(QMainWindow):
         self.element_list.elements_selected.connect(self.on_elements_selected)
         self.element_list.elements_will_change.connect(self.save_undo_state)
         self.element_list.elements_changed.connect(self.refresh_canvas)
+        self.element_list.elements_changed.connect(self._schedule_screen_thumb_refresh)
 
         self.lcd_canvas.element_selected.connect(self.on_canvas_element_selected)
         self.lcd_canvas.elements_selected.connect(self.on_canvas_elements_selected)
@@ -1286,6 +1894,12 @@ class ThemeEditorWindow(QMainWindow):
         self.hdmi_canvas.element_moved.connect(self.on_element_moved)
         self.hdmi_canvas.element_resized.connect(self.on_element_resized)
         self.hdmi_canvas.drag_started.connect(self.save_undo_state)
+
+        self.custom_canvas.element_selected.connect(self.on_canvas_element_selected)
+        self.custom_canvas.elements_selected.connect(self.on_canvas_elements_selected)
+        self.custom_canvas.element_moved.connect(self.on_element_moved)
+        self.custom_canvas.element_resized.connect(self.on_element_resized)
+        self.custom_canvas.drag_started.connect(self.save_undo_state)
 
         self.properties_panel.property_will_change.connect(self.save_undo_state)
         self.properties_panel.property_changed.connect(self.refresh_canvas)
@@ -1330,11 +1944,10 @@ class ThemeEditorWindow(QMainWindow):
     # DMD target: canvas dedicado + envío TCP
     # ------------------------------------------------------------------
     def _on_target_tab_changed(self, index):
+        self._update_output_toggles()
         if index == self._web_tab_index:
-            # WEB es solo preview (read-only): oculta los paneles laterales de
-            # edición (Elements y Properties) y no cambia el target de edición.
-            self.left_panel.setVisible(False)
-            self.properties_panel.setVisible(False)
+            # WEB es solo preview (read-only): no cambia el target de edición y
+            # se mantienen los paneles para no desplazar las pestañas.
             return
         self.left_panel.setVisible(True)
         self.properties_panel.setVisible(True)
@@ -1342,6 +1955,8 @@ class ThemeEditorWindow(QMainWindow):
             target = "dmd"
         elif index == self._hdmi_tab_index:
             target = "hdmi"
+        elif index == self._custom_tab_index:
+            target = "custom"
         else:
             target = "lcd"
         self._switch_target(target)
@@ -1354,7 +1969,22 @@ class ThemeEditorWindow(QMainWindow):
             return self._dmd_tab_index
         if target == "hdmi":
             return self._hdmi_tab_index
+        if target == "custom":
+            return self._custom_tab_index
         return None
+
+    def _reserve_editor_canvas(self):
+        """Muestra el canvas LCD como editor cuando no hay target de edición.
+
+        Web es solo preview (read-only), así que no cuenta como editor. Devuelve
+        True si reservó el canvas LCD (proyectos solo-Web o Lite).
+        """
+        editing = any(self.target_tabs.isTabVisible(self._target_tab_index(t))
+                      for t in ("lcd", "dmd", "hdmi", "custom"))
+        self._canvas_reserved = not editing
+        if self._canvas_reserved:
+            self.target_tabs.setTabVisible(self._lcd_tab_index, True)
+        return self._canvas_reserved
 
     def _select_initial_target_tab(self, added=None):
         """Selecciona una pestaña de edición coherente con los targets activos.
@@ -1368,12 +1998,12 @@ class ThemeEditorWindow(QMainWindow):
         candidates = list(added or [])
         if self._active_target not in candidates:
             candidates.append(self._active_target)
-        for target in ("lcd", "dmd", "hdmi"):
+        for target in ("lcd", "dmd", "hdmi", "custom"):
             if target not in candidates:
                 candidates.append(target)
 
         for target in candidates:
-            if target not in ("lcd", "dmd", "hdmi"):
+            if target not in ("lcd", "dmd", "hdmi", "custom"):
                 continue
             if not self.project_targets.get(target):
                 continue
@@ -1382,7 +2012,59 @@ class ThemeEditorWindow(QMainWindow):
                 continue
             self.target_tabs.setCurrentIndex(index)
             return target
+        # Sin target de edición: si el canvas LCD se reservó como editor
+        # (solo-Web / Lite), seleccionarlo para aterrizar en el lienzo editable.
+        if (getattr(self, "_canvas_reserved", False)
+                and self.target_tabs.isTabVisible(self._lcd_tab_index)):
+            self.target_tabs.setCurrentIndex(self._lcd_tab_index)
+            return "lcd"
         return None
+
+    def _refresh_web_source_combo(self):
+        """Sincroniza el combo de fuente del webserver con los targets actuales."""
+        combo = getattr(self, "web_source_combo", None)
+        if combo is None:
+            return
+        has_hdmi = bool(self.project_targets.get("hdmi"))
+        has_custom = bool(self.project_targets.get("custom"))
+        stored = getattr(self, "web_source", "auto") or "auto"
+        if stored == "hdmi" and not has_hdmi:
+            stored = "auto"
+            self.web_source = "auto"
+        if stored == "custom" and not has_custom:
+            stored = "auto"
+            self.web_source = "auto"
+        # Deshabilitar las opciones sin target añadido.
+        model = combo.model()
+        availability = {"hdmi": has_hdmi, "custom": has_custom}
+        for row in range(combo.count()):
+            key = combo.itemData(row)
+            if key in availability and hasattr(model, "item"):
+                item = model.item(row)
+                if item is not None:
+                    item.setEnabled(availability[key])
+        combo.blockSignals(True)
+        idx = combo.findData(stored)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+        if hasattr(self, "web_source_hint"):
+            self.web_source_hint.setText(
+                f"serving: {self._effective_web_source().upper()}")
+
+    def _on_web_source_changed(self, index=None):
+        combo = getattr(self, "web_source_combo", None)
+        if combo is None:
+            return
+        self.web_source = combo.currentData() or "auto"
+        # Invalidar el caché para que el webserver sirva la nueva fuente ya.
+        self._web_jpeg_data = None
+        if hasattr(self, "web_source_hint"):
+            self.web_source_hint.setText(
+                f"serving: {self._effective_web_source().upper()}")
+        try:
+            self._update_web_jpeg_cache()
+        except Exception:
+            pass
 
     def _update_web_preview(self):
         """Actualiza el preview WEB con el último JPEG servido (/image.jpg).
@@ -1390,10 +2072,17 @@ class ThemeEditorWindow(QMainWindow):
         Reutiliza el caché JPEG ya generado por el webserver, así no hay
         renders extra del tema.
         """
-        data = getattr(self, "_last_jpeg_data", None)
+        if self._lite_project and self._lite_client is not None:
+            data = self._lite_client.latest_image()
+        else:
+            data = getattr(self, "_web_jpeg_data", None)
+            if not isinstance(data, bytes) or len(data) < 10:
+                data = getattr(self, "_last_jpeg_data", None)
         if not isinstance(data, bytes) or len(data) < 10:
             self.web_preview.clear()
-            self.web_preview.setText("WEB preview\n(serving image)")
+            self.web_preview.setText(
+                "WEB preview\n(remote Lite)" if self._lite_project
+                else "WEB preview\n(serving image)")
             return
         pixmap = QPixmap()
         if pixmap.loadFromData(data, "JPEG"):
@@ -1413,20 +2102,6 @@ class ThemeEditorWindow(QMainWindow):
             return
         self._active_target = target
 
-        # Video background solo existe para LCD: al salir de LCD se conserva su
-        # estado serializado y al volver se restaura; DMD/HDMI nunca usan video.
-        if target in ("dmd", "hdmi"):
-            self.lcd_video_data = video_background.to_dict()
-            video_background.clear_video()
-            self.video_btn.setEnabled(False)
-            self.video_fit_combo.setEnabled(False)
-        else:
-            video_background.clear_video()
-            if self.lcd_video_data:
-                video_background.from_dict(self.lcd_video_data)
-            self.video_btn.setEnabled(True)
-            self.video_fit_combo.setEnabled(bool(self.lcd_video_data))
-
         # El indicador del dispositivo solo refleja el target activo.
         if target == "lcd":
             self._set_device_status(bool(self.device))
@@ -1440,6 +2115,11 @@ class ThemeEditorWindow(QMainWindow):
                 self.device_status_label.setText(
                     f"HDMI {monitor.get('name', '')}" if active
                     else "HDMI sin monitor")
+        elif target == "custom":
+            if hasattr(self, "device_status_dot"):
+                self.device_status_dot.setStyleSheet(
+                    f"background-color: {DOT_OFF}; border-radius: 5px;")
+                self.device_status_label.setText("Custom canvas")
         else:
             if self.dmd_sender is not None and hasattr(self, "device_status_dot"):
                 if self.dmd_sender.is_connected:
@@ -1457,6 +2137,7 @@ class ThemeEditorWindow(QMainWindow):
         self.canvas.set_background_color(self.background_color)
         self.element_list.set_elements(self.elements)
         self.element_list.set_dmd_mode(target == "dmd")
+        self.element_list.set_hdmi_mode(target == "hdmi")
         if target == "dmd":
             dmd_w = self.dmd_canvas.dmd_width if self.dmd_canvas else 128
             dmd_h = self.dmd_canvas.dmd_height if self.dmd_canvas else 32
@@ -1465,18 +2146,23 @@ class ThemeEditorWindow(QMainWindow):
             hdmi_w = self.hdmi_canvas.hdmi_width if self.hdmi_canvas else 1920
             hdmi_h = self.hdmi_canvas.hdmi_height if self.hdmi_canvas else 1080
             self.properties_panel.set_hdmi_mode(hdmi_w, hdmi_h)
+        elif target == "custom":
+            cw = self.custom_canvas.hdmi_width if self.custom_canvas else 1280
+            ch = self.custom_canvas.hdmi_height if self.custom_canvas else 800
+            self.properties_panel.set_custom_mode(cw, ch)
         else:
             self.properties_panel.set_dmd_mode(False)
         self.element_list.refresh_list()
         self.properties_panel.set_element(None)
+        self._refresh_screen_section()
         self.canvas.set_selected_indices([])
 
         self.bg_color_btn.setStyleSheet(
             f"background-color: {self.background_color};"
             f" border: 1px solid {BORDER}; border-radius: 5px;"
         )
-        self._update_video_ui()
-        if target == "hdmi" and self.project_targets.get("hdmi"):
+        if (target == "hdmi" and self.project_targets.get("hdmi")
+                and self._hdmi_output_enabled):
             if self._selected_hdmi_monitor() is not None:
                 self._start_hdmi_output()
         QTimer.singleShot(10, self.fit_canvas)
@@ -1493,6 +2179,8 @@ class ThemeEditorWindow(QMainWindow):
             self.dmd_sender.stop()
         self.dmd_sender = DMDSenderThread(
             ip, port, width=w, height=h, fps=fps, parent=self)
+        # Si la salida estaba pausada, el sender arranca pausado.
+        self.dmd_sender.set_paused(not self._dmd_output_enabled)
         self.dmd_sender.start()
 
     def _shutdown_dmd_sender(self):
@@ -1505,6 +2193,7 @@ class ThemeEditorWindow(QMainWindow):
         if self.dmd_send_timer is None:
             fps = self.dmd_sender.fps if self.dmd_sender else 12
             interval = max(16, 1000 // fps)
+            self._dmd_play_last = 0.0  # evita un dt gigante tras una pausa
             self.dmd_send_timer = QTimer(self)
             self.dmd_send_timer.timeout.connect(self._tick_dmd_send)
             self.dmd_send_timer.start(interval)
@@ -1519,38 +2208,520 @@ class ThemeEditorWindow(QMainWindow):
     def _on_dmd_output_toggled(self, enabled):
         """Toggle de salida DMD: pausa/reanuda el envío de stream TCP."""
         self._dmd_output_enabled = bool(enabled)
+        if self.dmd_sender is not None:
+            self.dmd_sender.set_paused(not enabled)
         if enabled:
             if self.project_targets.get("dmd"):
                 self._start_dmd_loop()
         else:
             self._stop_dmd_loop()
 
-    def _tick_dmd_send(self):
-        """Tick del timer DMD: renderiza el frame RGB565 y lo envía por TCP."""
-        if self.dmd_canvas is None or self.dmd_sender is None:
-            return
-        canvas = self.dmd_canvas
-        # Actualizar valores dinámicos desde sensores como en el loop LCD
-        sensor_data = self.get_sensor_data()
-        for element in self.dmd_elements:
-            if element.source != "static" and element.source in sensor_data:
-                element.value = sensor_data[element.source]
+    def _update_output_toggles(self):
+        """Muestra los switches DMD/HDMI solo cuando su canvas está activo."""
+        current = self.target_tabs.currentIndex()
+        show_dmd = (current == self._dmd_tab_index
+                    and bool(self.project_targets.get("dmd")))
+        show_hdmi = (current == self._hdmi_tab_index
+                     and bool(self.project_targets.get("hdmi")))
+        for widget in (self.dmd_toggle_label, self.dmd_toggle_btn):
+            widget.setVisible(show_dmd)
+        for widget in (self.hdmi_toggle_label, self.hdmi_toggle_btn):
+            widget.setVisible(show_hdmi)
+
+    # ------------------------------------------------------------------
+    # DMD screens / transitions
+    # ------------------------------------------------------------------
+    def _thumb_canvas(self, target):
+        """Canvas offscreen (por target) para renderizar miniaturas."""
+        if target == "dmd":
+            width = self.dmd_canvas.dmd_width if self.dmd_canvas else 128
+            height = self.dmd_canvas.dmd_height if self.dmd_canvas else 32
+            canvas = getattr(self, "_dmd_thumb_canvas", None)
+            if canvas is None:
+                canvas = DMDCanvas(width, height)
+                self._dmd_thumb_canvas = canvas
+            else:
+                canvas.set_dmd_size(width, height)
+            return canvas
+        if target == "hdmi":
+            width = self.hdmi_canvas.hdmi_width if self.hdmi_canvas else 1920
+            height = self.hdmi_canvas.hdmi_height if self.hdmi_canvas else 1080
+            canvas = getattr(self, "_hdmi_thumb_canvas", None)
+            if canvas is None:
+                canvas = HDMICanvas(width, height)
+                self._hdmi_thumb_canvas = canvas
+            else:
+                canvas.set_hdmi_size(width, height)
+            return canvas
+        width = self.custom_canvas.hdmi_width if self.custom_canvas else 1280
+        height = self.custom_canvas.hdmi_height if self.custom_canvas else 800
+        canvas = getattr(self, "_custom_thumb_canvas", None)
+        if canvas is None:
+            canvas = HDMICanvas(width, height)
+            self._custom_thumb_canvas = canvas
+        else:
+            canvas.set_hdmi_size(width, height)
+        return canvas
+
+    def _screen_thumb_icon(self, target, screen):
+        """Miniatura (QIcon) de una pantalla, escalada a 96 px de ancho."""
+        from dmd_transitions import render_screen_rgb
 
         try:
-            if canvas.dmd_width != self.dmd_sender.width \
-                    or canvas.dmd_height != self.dmd_sender.height:
-                return  # Config dispar: se reconfigurará al entrar en modo DMD
-            payload = canvas.get_frame_rgb565()
+            rgb = render_screen_rgb(self._thumb_canvas(target), screen, None)
+            image = QPixmap.fromImage(self._dmd_rgb_to_qimage(rgb))
+        except Exception:
+            return QIcon()
+        return QIcon(image.scaledToWidth(96, Qt.TransformationMode.SmoothTransformation))
+
+    def _populate_screens_bar(self, layout, target, screens, active, menu_fn,
+                              activate_fn, columns=6):
+        """Reemplaza los chips de pantalla por miniaturas clicables."""
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        chips = []
+        for index, screen in enumerate(screens):
+            button = QToolButton()
+            button.setCheckable(True)
+            button.setChecked(index == active)
+            button.setToolTip(screen.name)
+            icon = self._screen_thumb_icon(target, screen)
+            button.setIcon(icon)
+            size = icon.pixmap(96, 96).size()
+            if not size.isEmpty():
+                button.setIconSize(size)
+            button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            button.customContextMenuRequested.connect(
+                lambda pos, idx=index, fn=menu_fn: fn(idx, pos))
+            button.clicked.connect(
+                lambda checked=False, idx=index, fn=activate_fn: fn(idx))
+            layout.addWidget(button, index // columns, index % columns)
+            chips.append(button)
+        self._screen_chips[target] = chips
+        return chips
+
+    def _schedule_screen_thumb_refresh(self):
+        if self._screen_thumb_timer is None:
+            self._screen_thumb_timer = QTimer(self)
+            self._screen_thumb_timer.setSingleShot(True)
+            self._screen_thumb_timer.timeout.connect(self._refresh_active_screen_thumbnail)
+        self._screen_thumb_timer.start(300)
+
+    def _refresh_active_screen_thumbnail(self):
+        target = self._active_target
+        if target == "dmd":
+            screens, active = self.dmd_screens, self.dmd_active_screen
+        elif target == "hdmi":
+            screens, active = self.hdmi_screens, self.hdmi_active_screen
+        elif target == "custom":
+            screens, active = self.custom_screens, self.custom_active_screen
+        else:
+            return
+        chips = self._screen_chips.get(target) or []
+        if 0 <= active < len(chips) and active < len(screens):
+            chips[active].setIcon(self._screen_thumb_icon(target, screens[active]))
+
+    def _rebuild_dmd_screens_bar(self):
+        layout = getattr(self, "dmd_screens_buttons", None)
+        if layout is None:
+            return
+        self._populate_screens_bar(
+            layout, "dmd", self.dmd_screens, self.dmd_active_screen,
+            self._dmd_screen_menu, self._activate_dmd_screen)
+        if getattr(self, "dmd_add_screen_btn", None) is not None:
+            self.dmd_add_screen_btn.setEnabled(len(self.dmd_screens) < MAX_SCREENS)
+        if getattr(self, "dmd_delete_screen_btn", None) is not None:
+            self.dmd_delete_screen_btn.setEnabled(len(self.dmd_screens) > 1)
+
+
+    def _activate_dmd_screen(self, index):
+        """Activa una pantalla DMD para editarla (sincroniza canvas y paneles)."""
+        if not self.dmd_screens:
+            return
+        index = max(0, min(index, len(self.dmd_screens) - 1))
+        self.dmd_active_screen = index
+        screen = self.dmd_screens[index]
+        self.dmd_elements = screen.elements
+        self.dmd_background_color = screen.background_color
+        # Mostrar en la salida la pantalla que se está editando.
+        self._dmd_play_index = index
+        self._dmd_play_phase = "show"
+        self._dmd_play_elapsed = 0.0
+        self._dmd_play_progress = 0.0
+        self._dmd_play_last = 0.0
+        canvas = getattr(self, "dmd_canvas", None)
+        if canvas is not None:
+            canvas.set_elements(self.dmd_elements)
+            canvas.set_background_color(self.dmd_background_color)
+            canvas.set_preview_image(None)
+            canvas.update()
+        element_list = getattr(self, "element_list", None)
+        if element_list is not None:
+            element_list.set_elements(self.dmd_elements)
+            element_list.refresh_list()
+        if getattr(self, "properties_panel", None) is not None:
+            self.properties_panel.set_element(None)
+        if (getattr(self, "bg_color_btn", None) is not None
+                and self._active_target == "dmd"):
+            self.bg_color_btn.setStyleSheet(
+                f"background-color: {self.dmd_background_color};"
+                f" border: 1px solid {BORDER}; border-radius: 5px;")
+        self._sync_dmd_screen_props()
+        self._rebuild_dmd_screens_bar()
+
+    def _sync_dmd_screen_props(self):
+        if not self.dmd_screens:
+            return
+        self.dmd_active_screen = max(0, min(self.dmd_active_screen, len(self.dmd_screens) - 1))
+        screen = self.dmd_screens[self.dmd_active_screen]
+        self.dmd_transitions_switch.blockSignals(True)
+        self.dmd_transitions_switch.setChecked(bool(self.dmd_transitions_enabled))
+        self.dmd_transitions_switch.blockSignals(False)
+        if self._active_target == "dmd":
+            self.properties_panel.set_screen_settings(
+                index=self.dmd_active_screen, total=len(self.dmd_screens),
+                name=screen.name, duration=screen.duration_s,
+                transition=screen.transition, transition_ms=screen.transition_ms)
+
+
+
+    def add_dmd_screen(self):
+        if len(self.dmd_screens) >= MAX_SCREENS:
+            return
+        screen = DMDScreen(
+            name=f"Screen {len(self.dmd_screens) + 1}",
+            duration_s=self.dmd_default_duration_s,
+            transition=self.dmd_default_transition,
+            transition_ms=self.dmd_default_transition_ms)
+        self.dmd_screens.append(screen)
+        self._activate_dmd_screen(len(self.dmd_screens) - 1)
+
+    def duplicate_dmd_screen(self, index):
+        if len(self.dmd_screens) >= MAX_SCREENS:
+            return
+        source = self.dmd_screens[index]
+        copy = DMDScreen.from_dict(source.to_dict())
+        copy.name = f"{source.name} copy"
+        self.dmd_screens.insert(index + 1, copy)
+        self._activate_dmd_screen(index + 1)
+
+    def delete_dmd_screen(self, index):
+        if len(self.dmd_screens) <= 1:
+            return
+        del self.dmd_screens[index]
+        self._activate_dmd_screen(min(index, len(self.dmd_screens) - 1))
+
+    def delete_active_dmd_screen(self):
+        self.delete_dmd_screen(self.dmd_active_screen)
+
+    def rename_dmd_screen(self, index):
+        from PySide6.QtWidgets import QInputDialog
+        screen = self.dmd_screens[index]
+        name, ok = QInputDialog.getText(self, "Rename screen", "Name:", text=screen.name)
+        if ok and name.strip():
+            screen.name = name.strip()
+            self._rebuild_dmd_screens_bar()
+
+    def move_dmd_screen(self, index, delta):
+        target = index + delta
+        if 0 <= target < len(self.dmd_screens):
+            self.dmd_screens[index], self.dmd_screens[target] = (
+                self.dmd_screens[target], self.dmd_screens[index])
+            self._activate_dmd_screen(target)
+
+    def _dmd_screen_menu(self, index, pos):
+        menu = QMenu(self)
+        menu.addAction("Duplicate", lambda: self.duplicate_dmd_screen(index))
+        menu.addAction("Rename...", lambda: self.rename_dmd_screen(index))
+        menu.addAction("Move left", lambda: self.move_dmd_screen(index, -1))
+        menu.addAction("Move right", lambda: self.move_dmd_screen(index, 1))
+        menu.addSeparator()
+        delete_action = menu.addAction("Delete", lambda: self.delete_dmd_screen(index))
+        delete_action.setEnabled(len(self.dmd_screens) > 1)
+        sender = self.sender()
+        if sender is not None:
+            menu.exec(sender.mapToGlobal(pos))
+
+    def set_dmd_transitions_enabled(self, enabled):
+        self.dmd_transitions_enabled = bool(enabled)
+        if not self.dmd_transitions_enabled and getattr(self, "dmd_canvas", None):
+            self.dmd_canvas.set_preview_image(None)
+        self._sync_dmd_screen_props()
+
+    def _on_screen_settings_changed(self, duration, transition, transition_ms):
+        """Escribe los ajustes de pantalla editados en Properties en la activa."""
+        target = self._active_target
+        if target == "dmd" and self.dmd_screens:
+            screen = self.dmd_screens[self.dmd_active_screen]
+        elif target == "hdmi" and self.hdmi_screens:
+            screen = self.hdmi_screens[self.hdmi_active_screen]
+        elif target == "custom" and self.custom_screens:
+            screen = self.custom_screens[self.custom_active_screen]
+        else:
+            return
+        screen.duration_s = float(duration)
+        if transition:
+            screen.transition = transition
+        screen.transition_ms = int(transition_ms)
+
+    def _refresh_screen_section(self):
+        """Sincroniza la sección Screen de Properties con el target activo."""
+        if self._active_target == "dmd":
+            self._sync_dmd_screen_props()
+        elif self._active_target == "hdmi":
+            self._sync_hdmi_screen_props()
+        elif self._active_target == "custom":
+            self._sync_custom_screen_props()
+        else:
+            self.properties_panel.clear_screen_section()
+
+    def set_dmd_preview(self, playing):
+        self._dmd_preview_playing = bool(playing)
+        if not self._dmd_preview_playing and getattr(self, "dmd_canvas", None):
+            self.dmd_canvas.set_preview_image(None)
+            self.dmd_canvas.update()
+
+    # ------------------------------------------------------------------
+    # HDMI screens / transitions
+    # ------------------------------------------------------------------
+    def _rebuild_hdmi_screens_bar(self):
+        layout = getattr(self, "hdmi_screens_buttons", None)
+        if layout is None:
+            return
+        self._populate_screens_bar(
+            layout, "hdmi", self.hdmi_screens, self.hdmi_active_screen,
+            self._hdmi_screen_menu, self._activate_hdmi_screen)
+        if getattr(self, "hdmi_add_screen_btn", None) is not None:
+            self.hdmi_add_screen_btn.setEnabled(len(self.hdmi_screens) < MAX_SCREENS)
+        if getattr(self, "hdmi_delete_screen_btn", None) is not None:
+            self.hdmi_delete_screen_btn.setEnabled(len(self.hdmi_screens) > 1)
+        props = getattr(self, "properties_panel", None)
+        if props is not None and hasattr(props, "set_screen_targets"):
+            props.set_screen_targets(
+                [(i, s.name) for i, s in enumerate(self.hdmi_screens)])
+
+
+    def _activate_hdmi_screen(self, index):
+        """Activa una pantalla HDMI para editarla (sincroniza canvas y paneles)."""
+        if not self.hdmi_screens:
+            return
+        index = max(0, min(index, len(self.hdmi_screens) - 1))
+        self.hdmi_active_screen = index
+        screen = self.hdmi_screens[index]
+        self.hdmi_elements = screen.elements
+        self.hdmi_background_color = screen.background_color
+        # Mostrar en la salida la pantalla que se está editando.
+        self._hdmi_play_index = index
+        self._hdmi_play_phase = "show"
+        self._hdmi_play_elapsed = 0.0
+        self._hdmi_play_progress = 0.0
+        self._hdmi_transition_target = None
+        self._hdmi_play_last = 0.0
+        canvas = getattr(self, "hdmi_canvas", None)
+        if canvas is not None:
+            canvas.set_elements(self.hdmi_elements)
+            canvas.set_background_color(self.hdmi_background_color)
+            canvas.update()
+        if self._active_target == "hdmi":
+            element_list = getattr(self, "element_list", None)
+            if element_list is not None:
+                element_list.set_elements(self.hdmi_elements)
+                element_list.refresh_list()
+            if getattr(self, "properties_panel", None) is not None:
+                self.properties_panel.set_element(None)
+            if getattr(self, "bg_color_btn", None) is not None:
+                self.bg_color_btn.setStyleSheet(
+                    f"background-color: {self.hdmi_background_color};"
+                    f" border: 1px solid {BORDER}; border-radius: 5px;")
+        self._sync_hdmi_screen_props()
+        self._rebuild_hdmi_screens_bar()
+
+    def _sync_hdmi_screen_props(self):
+        if not self.hdmi_screens:
+            return
+        self.hdmi_active_screen = max(0, min(self.hdmi_active_screen, len(self.hdmi_screens) - 1))
+        screen = self.hdmi_screens[self.hdmi_active_screen]
+        self.hdmi_transitions_switch.blockSignals(True)
+        self.hdmi_transitions_switch.setChecked(bool(self.hdmi_transitions_enabled))
+        self.hdmi_transitions_switch.blockSignals(False)
+        if self._active_target == "hdmi":
+            self.properties_panel.set_screen_settings(
+                index=self.hdmi_active_screen, total=len(self.hdmi_screens),
+                name=screen.name, duration=screen.duration_s,
+                transition=screen.transition, transition_ms=screen.transition_ms)
+
+
+
+    def add_hdmi_screen(self):
+        if len(self.hdmi_screens) >= MAX_SCREENS:
+            return
+        screen = Screen(
+            name=f"Screen {len(self.hdmi_screens) + 1}",
+            duration_s=self.hdmi_default_duration_s,
+            transition=self.hdmi_default_transition,
+            transition_ms=self.hdmi_default_transition_ms)
+        self.hdmi_screens.append(screen)
+        self._activate_hdmi_screen(len(self.hdmi_screens) - 1)
+
+    def duplicate_hdmi_screen(self, index):
+        if len(self.hdmi_screens) >= MAX_SCREENS:
+            return
+        source = self.hdmi_screens[index]
+        copy = Screen.from_dict(source.to_dict())
+        copy.name = f"{source.name} copy"
+        self.hdmi_screens.insert(index + 1, copy)
+        self._activate_hdmi_screen(index + 1)
+
+    def delete_hdmi_screen(self, index):
+        if len(self.hdmi_screens) <= 1:
+            return
+        del self.hdmi_screens[index]
+        self._activate_hdmi_screen(min(index, len(self.hdmi_screens) - 1))
+
+    def delete_active_hdmi_screen(self):
+        self.delete_hdmi_screen(self.hdmi_active_screen)
+
+    def rename_hdmi_screen(self, index):
+        from PySide6.QtWidgets import QInputDialog
+        screen = self.hdmi_screens[index]
+        name, ok = QInputDialog.getText(self, "Rename screen", "Name:", text=screen.name)
+        if ok and name.strip():
+            screen.name = name.strip()
+            self._rebuild_hdmi_screens_bar()
+
+    def move_hdmi_screen(self, index, delta):
+        target = index + delta
+        if 0 <= target < len(self.hdmi_screens):
+            self.hdmi_screens[index], self.hdmi_screens[target] = (
+                self.hdmi_screens[target], self.hdmi_screens[index])
+            self._activate_hdmi_screen(target)
+
+    def _hdmi_screen_menu(self, index, pos):
+        menu = QMenu(self)
+        menu.addAction("Duplicate", lambda: self.duplicate_hdmi_screen(index))
+        menu.addAction("Rename...", lambda: self.rename_hdmi_screen(index))
+        menu.addAction("Move left", lambda: self.move_hdmi_screen(index, -1))
+        menu.addAction("Move right", lambda: self.move_hdmi_screen(index, 1))
+        menu.addSeparator()
+        delete_action = menu.addAction("Delete", lambda: self.delete_hdmi_screen(index))
+        delete_action.setEnabled(len(self.hdmi_screens) > 1)
+        sender = self.sender()
+        if sender is not None:
+            menu.exec(sender.mapToGlobal(pos))
+
+    def set_hdmi_transitions_enabled(self, enabled):
+        self.hdmi_transitions_enabled = bool(enabled)
+        self._sync_hdmi_screen_props()
+
+    def _goto_hdmi_screen(self, index, effect=None, transition_ms=None):
+        """Salta a una pantalla HDMI con transición (interacción táctil)."""
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            return
+        count = len(self.hdmi_screens)
+        if count == 0:
+            return
+        index = index % count
+        current = self._hdmi_play_index % count
+        if index == current:
+            self._hdmi_play_elapsed = 0.0
+            return
+        screen = self.hdmi_screens[current]
+        self._hdmi_transition_target = index
+        self._hdmi_transition_effect = (effect or screen.transition
+                                        or self.hdmi_default_transition)
+        self._hdmi_transition_ms = int(transition_ms or screen.transition_ms
+                                       or self.hdmi_default_transition_ms)
+        self._hdmi_play_phase = "transition"
+        self._hdmi_play_progress = 0.0
+
+    def _hdmi_next_frame(self, sensor_data):
+        """Array RGB del frame HDMI actual (pantalla o transición)."""
+        screens = self.hdmi_screens or [Screen()]
+        canvas = self.hdmi_output_canvas or self.hdmi_canvas
+        if canvas is None:
+            return None
+        now = time.perf_counter()
+        if self._hdmi_play_last == 0.0:
+            self._hdmi_play_last = now
+        dt = max(0.0, min(0.5, now - self._hdmi_play_last))
+        self._hdmi_play_last = now
+
+        if self._hdmi_play_index >= len(screens):
+            self._hdmi_play_index = 0
+
+        if self._hdmi_play_phase == "transition":
+            manual = self._hdmi_transition_target is not None
+            if manual:
+                next_index = self._hdmi_transition_target % len(screens)
+                effect = getattr(self, "_hdmi_transition_effect",
+                                 self.hdmi_default_transition)
+                duration_ms = max(1, int(getattr(self, "_hdmi_transition_ms",
+                                                 self.hdmi_default_transition_ms)))
+            else:
+                next_index = (self._hdmi_play_index + 1) % len(screens)
+                effect = screens[self._hdmi_play_index].transition
+                duration_ms = max(1, int(screens[self._hdmi_play_index].transition_ms))
+            self._hdmi_play_progress += (dt * 1000.0) / duration_ms
+            rgb_a = render_screen_rgb(canvas, screens[self._hdmi_play_index], sensor_data)
+            rgb_b = render_screen_rgb(canvas, screens[next_index], sensor_data)
+            if effect == "cut" or self._hdmi_play_progress >= 1.0:
+                self._hdmi_play_index = next_index
+                self._hdmi_play_phase = "show"
+                self._hdmi_play_elapsed = 0.0
+                self._hdmi_play_progress = 0.0
+                self._hdmi_transition_target = None
+                return rgb_b
+            return blend(rgb_a, rgb_b, effect, self._hdmi_play_progress)
+
+        # Fase "show".
+        screen = screens[self._hdmi_play_index]
+        if not self.hdmi_transitions_enabled or len(screens) <= 1:
+            return render_screen_rgb(canvas, screen, sensor_data)
+        self._hdmi_play_elapsed += dt
+        if self._hdmi_play_elapsed < max(0.1, float(screen.duration_s)):
+            return render_screen_rgb(canvas, screen, sensor_data)
+        # Inicia transición automática hacia la siguiente pantalla.
+        self._hdmi_play_elapsed = 0.0
+        self._hdmi_play_phase = "transition"
+        self._hdmi_play_progress = 0.0
+        self._hdmi_transition_target = None
+        return render_screen_rgb(canvas, screen, sensor_data)
+
+    def _tick_dmd_send(self):
+        """Tick del timer DMD: renderiza el frame (con transiciones) y lo envía."""
+        if (self.dmd_canvas is None or self.dmd_sender is None
+                or not self._dmd_output_enabled):
+            return
+        canvas = self.dmd_output_canvas or self.dmd_canvas
+        if canvas.dmd_width != self.dmd_sender.width \
+                or canvas.dmd_height != self.dmd_sender.height:
+            return  # Config dispar: se reconfigurará al entrar en modo DMD
+
+        sensor_data = self.get_sensor_data()
+        try:
+            rgb = self._dmd_next_frame(sensor_data, canvas)
+            # El sender añade la cabecera AA 55 w h: se le pasa solo el payload.
+            payload = rgb_to_rgb565_le(rgb)
             self.dmd_sender.push(payload)
             self.record_dmd_frame_time()
+
+            # Previsualización del ciclo en el canvas del editor.
+            if self._dmd_preview_playing and self.dmd_canvas is not None:
+                self.dmd_canvas.set_preview_image(self._dmd_rgb_to_qimage(rgb))
+
+            # Refrescar el canvas de edición de forma espaciada.
             self._canvas_update_counter += 1
             if self._canvas_update_counter >= self._canvas_update_interval:
                 self._canvas_update_counter = 0
-                canvas.set_elements(self.dmd_elements)
-                canvas.update()
+                self.dmd_canvas.set_elements(self.dmd_elements)
+                self.dmd_canvas.update()
+
             # Estado del indicador (el worker informa de la conexión real).
-            # Solo se muestra estando en el target DMD; si estamos en LCD el
-            # status refleja unicamente el dispositivo LCD.
             if self._active_target != "dmd":
                 return
             if self.dmd_sender.is_connected and hasattr(self, "device_status_dot"):
@@ -1564,6 +2735,203 @@ class ThemeEditorWindow(QMainWindow):
                 self.device_status_label.setText("DMD sin conexión")
         except Exception as e:
             print(f"[DMD] Error en envío: {e}")
+
+    def _dmd_next_frame(self, sensor_data, canvas):
+        """Devuelve el array RGB del frame DMD actual (pantalla o transición)."""
+        screens = self.dmd_screens or [DMDScreen()]
+        now = time.perf_counter()
+        if self._dmd_play_last == 0.0:
+            self._dmd_play_last = now
+        dt = max(0.0, min(0.5, now - self._dmd_play_last))
+        self._dmd_play_last = now
+
+        # Sin transiciones (o una sola pantalla): comportamiento clásico.
+        if not self.dmd_transitions_enabled or len(screens) <= 1:
+            self._dmd_play_phase = "show"
+            self._dmd_play_progress = 0.0
+            if self._dmd_play_index >= len(screens):
+                self._dmd_play_index = 0
+            return render_screen_rgb(canvas, screens[self._dmd_play_index], sensor_data)
+
+        if self._dmd_play_phase == "show":
+            self._dmd_play_elapsed += dt
+            screen = screens[self._dmd_play_index % len(screens)]
+            if self._dmd_play_elapsed < max(0.1, float(screen.duration_s)):
+                return render_screen_rgb(canvas, screen, sensor_data)
+            self._dmd_play_elapsed = 0.0
+            self._dmd_play_phase = "transition"
+            self._dmd_play_progress = 0.0
+
+        # Fase de transición entre pantalla actual y la siguiente.
+        screen_a = screens[self._dmd_play_index % len(screens)]
+        next_index = (self._dmd_play_index + 1) % len(screens)
+        screen_b = screens[next_index]
+        duration_ms = max(1, int(screen_a.transition_ms))
+        self._dmd_play_progress += (dt * 1000.0) / duration_ms
+
+        rgb_a = render_screen_rgb(canvas, screen_a, sensor_data)
+        rgb_b = render_screen_rgb(canvas, screen_b, sensor_data)
+        if self._dmd_play_progress >= 1.0:
+            self._dmd_play_index = next_index
+            self._dmd_play_phase = "show"
+            self._dmd_play_elapsed = 0.0
+            self._dmd_play_progress = 0.0
+            return rgb_b
+        return blend(rgb_a, rgb_b, screen_a.transition, self._dmd_play_progress)
+
+    @staticmethod
+    def _dmd_rgb_to_qimage(rgb):
+        from PySide6.QtGui import QImage
+
+        height, width = rgb.shape[:2]
+        data = np.ascontiguousarray(rgb)
+        return QImage(data.tobytes(), width, height, 3 * width,
+                      QImage.Format.Format_RGB888).copy()
+
+    # ------------------------------------------------------------------
+    # Custom canvas (screens/transitions, sin salida física)
+    # ------------------------------------------------------------------
+    def set_custom_canvas_size(self, width, height):
+        """Ajusta el tamaño del canvas Custom y sincroniza paneles."""
+        width = max(16, int(width))
+        height = max(16, int(height))
+        self.project_custom_config = dict(self.project_custom_config or {})
+        self.project_custom_config.update({"width": width, "height": height})
+        settings.set_setting("custom_config", self.project_custom_config)
+        if self.custom_canvas is not None:
+            self.custom_canvas.set_hdmi_size(width, height)
+            self.custom_canvas.set_elements(self.custom_elements)
+        if getattr(self, "custom_resolution_label", None) is not None:
+            self.custom_resolution_label.setText(f"{width}×{height}")
+        if self._active_target == "custom":
+            self.properties_panel.set_custom_mode(width, height)
+
+    def _rebuild_custom_screens_bar(self):
+        layout = getattr(self, "custom_screens_buttons", None)
+        if layout is None:
+            return
+        self._populate_screens_bar(
+            layout, "custom", self.custom_screens, self.custom_active_screen,
+            self._custom_screen_menu, self._activate_custom_screen)
+        if getattr(self, "custom_add_screen_btn", None) is not None:
+            self.custom_add_screen_btn.setEnabled(len(self.custom_screens) < MAX_SCREENS)
+        if getattr(self, "custom_delete_screen_btn", None) is not None:
+            self.custom_delete_screen_btn.setEnabled(len(self.custom_screens) > 1)
+
+
+    def _activate_custom_screen(self, index):
+        if not self.custom_screens:
+            return
+        index = max(0, min(index, len(self.custom_screens) - 1))
+        self.custom_active_screen = index
+        screen = self.custom_screens[index]
+        self.custom_elements = screen.elements
+        self.custom_background_color = screen.background_color
+        canvas = getattr(self, "custom_canvas", None)
+        if canvas is not None:
+            canvas.set_elements(self.custom_elements)
+            canvas.set_background_color(self.custom_background_color)
+            canvas.update()
+        if self._active_target == "custom":
+            element_list = getattr(self, "element_list", None)
+            if element_list is not None:
+                element_list.set_elements(self.custom_elements)
+                element_list.refresh_list()
+            if getattr(self, "properties_panel", None) is not None:
+                self.properties_panel.set_element(None)
+            if getattr(self, "bg_color_btn", None) is not None:
+                self.bg_color_btn.setStyleSheet(
+                    f"background-color: {self.custom_background_color};"
+                    f" border: 1px solid {BORDER}; border-radius: 5px;")
+        self._sync_custom_screen_props()
+        self._rebuild_custom_screens_bar()
+
+    def _sync_custom_screen_props(self):
+        if not self.custom_screens:
+            return
+        self.custom_active_screen = max(0, min(self.custom_active_screen, len(self.custom_screens) - 1))
+        screen = self.custom_screens[self.custom_active_screen]
+        self.custom_transitions_switch.blockSignals(True)
+        self.custom_transitions_switch.setChecked(bool(self.custom_transitions_enabled))
+        self.custom_transitions_switch.blockSignals(False)
+        if self._active_target == "custom":
+            self.properties_panel.set_screen_settings(
+                index=self.custom_active_screen, total=len(self.custom_screens),
+                name=screen.name, duration=screen.duration_s,
+                transition=screen.transition, transition_ms=screen.transition_ms)
+
+
+
+    def add_custom_screen(self):
+        if len(self.custom_screens) >= MAX_SCREENS:
+            return
+        screen = Screen(
+            name=f"Screen {len(self.custom_screens) + 1}",
+            duration_s=self.custom_default_duration_s,
+            transition=self.custom_default_transition,
+            transition_ms=self.custom_default_transition_ms)
+        self.custom_screens.append(screen)
+        self._activate_custom_screen(len(self.custom_screens) - 1)
+
+    def duplicate_custom_screen(self, index):
+        if len(self.custom_screens) >= MAX_SCREENS:
+            return
+        source = self.custom_screens[index]
+        copy = Screen.from_dict(source.to_dict())
+        copy.name = f"{source.name} copy"
+        self.custom_screens.insert(index + 1, copy)
+        self._activate_custom_screen(index + 1)
+
+    def delete_custom_screen(self, index):
+        if len(self.custom_screens) <= 1:
+            return
+        del self.custom_screens[index]
+        self._activate_custom_screen(min(index, len(self.custom_screens) - 1))
+
+    def delete_active_custom_screen(self):
+        self.delete_custom_screen(self.custom_active_screen)
+
+    def rename_custom_screen(self, index):
+        from PySide6.QtWidgets import QInputDialog
+        screen = self.custom_screens[index]
+        name, ok = QInputDialog.getText(self, "Rename screen", "Name:", text=screen.name)
+        if ok and name.strip():
+            screen.name = name.strip()
+            self._rebuild_custom_screens_bar()
+
+    def move_custom_screen(self, index, delta):
+        target = index + delta
+        if 0 <= target < len(self.custom_screens):
+            self.custom_screens[index], self.custom_screens[target] = (
+                self.custom_screens[target], self.custom_screens[index])
+            self._activate_custom_screen(target)
+
+    def _custom_screen_menu(self, index, pos):
+        menu = QMenu(self)
+        menu.addAction("Duplicate", lambda: self.duplicate_custom_screen(index))
+        menu.addAction("Rename...", lambda: self.rename_custom_screen(index))
+        menu.addAction("Move left", lambda: self.move_custom_screen(index, -1))
+        menu.addAction("Move right", lambda: self.move_custom_screen(index, 1))
+        menu.addSeparator()
+        delete_action = menu.addAction("Delete", lambda: self.delete_custom_screen(index))
+        delete_action.setEnabled(len(self.custom_screens) > 1)
+        sender = self.sender()
+        if sender is not None:
+            menu.exec(sender.mapToGlobal(pos))
+
+    def set_custom_transitions_enabled(self, enabled):
+        self.custom_transitions_enabled = bool(enabled)
+        self._sync_custom_screen_props()
+
+    def render_custom_image(self):
+        """Frame del canvas Custom (pantalla activa) como imagen PIL RGB."""
+        from dmd_transitions import qimage_to_rgb_array
+
+        canvas = getattr(self, "custom_canvas", None)
+        if canvas is None:
+            return Image.new("RGB", (1280, 800), "black")
+        rgb = qimage_to_rgb_array(canvas.get_frame_rgb888())
+        return Image.fromarray(rgb, "RGB")
 
     def _set_device_status(self, connected):
         if not hasattr(self, "device_status_dot") or self.device_status_dot is None:
@@ -1645,8 +3013,7 @@ class ThemeEditorWindow(QMainWindow):
                 return
             if scale:
                 self._scale_hdmi_elements(old_w, old_h, width, height)
-            if self.hdmi_canvas is not None:
-                self.hdmi_canvas.set_hdmi_size(width, height)
+            self._sync_hdmi_canvas_size(width, height)
             if self._active_target == "hdmi":
                 self.properties_panel.set_hdmi_mode(width, height)
                 QTimer.singleShot(10, self.fit_canvas)
@@ -1719,10 +3086,33 @@ class ThemeEditorWindow(QMainWindow):
 
     def _scale_hdmi_elements(self, old_w, old_h, new_w, new_h):
         """Escala los elementos HDMI y refresca el canvas."""
-        self._scale_elements(self.hdmi_elements, old_w, old_h, new_w, new_h)
+        self._scale_hdmi_all_screens(old_w, old_h, new_w, new_h)
         if self.hdmi_canvas is not None:
             self.hdmi_canvas.set_elements(self.hdmi_elements)
             self.hdmi_canvas.update()
+        self._hdmi_last_signature = None
+
+    def _scale_hdmi_all_screens(self, old_w, old_h, new_w, new_h):
+        """Escala los elementos de TODAS las pantallas HDMI al cambiar resolución."""
+        if old_w == new_w and old_h == new_h:
+            return
+        for screen in self.hdmi_screens:
+            self._scale_elements(screen.elements, old_w, old_h, new_w, new_h)
+        self._hdmi_last_signature = None
+
+    def _sync_hdmi_canvas_size(self, width, height):
+        """Mantiene el canvas de edición y el offscreen de salida al mismo tamaño.
+
+        El frame HDMI se genera con ``hdmi_output_canvas``; si su tamaño no
+        coincide con la resolución del monitor (y con el canvas de edición) la
+        imagen aparece letterboxed/escalada y se recorta.
+        """
+        width = int(width)
+        height = int(height)
+        if self.hdmi_canvas is not None:
+            self.hdmi_canvas.set_hdmi_size(width, height)
+        if self.hdmi_output_canvas is not None:
+            self.hdmi_output_canvas.set_hdmi_size(width, height)
         self._hdmi_last_signature = None
 
     def _revert_hdmi_combo(self):
@@ -1755,6 +3145,12 @@ class ThemeEditorWindow(QMainWindow):
             self.hdmi_output.set_monitor(monitor)
         else:
             self.hdmi_output.show_on_monitor(monitor)
+        # El canvas offscreen de salida debe medir lo mismo que el monitor
+        # antes del primer frame (si no, se letterboxea/recorta).
+        mw = int(monitor.get("width") or 0)
+        mh = int(monitor.get("height") or 0)
+        if mw > 0 and mh > 0:
+            self._sync_hdmi_canvas_size(mw, mh)
         self._start_hdmi_loop()
         self._hdmi_last_signature = None
         self._tick_hdmi_send()
@@ -1782,6 +3178,48 @@ class ThemeEditorWindow(QMainWindow):
         if index < 0:
             return
         element = self.hdmi_elements[index]
+
+        # Widget de navegación táctil: resuelve el item tocado (sub-región).
+        if getattr(element, "type", None) == "touch_nav":
+            from touch_nav import item_at
+
+            item_index = item_at(element, cx, cy)
+            if item_index is None:
+                return
+            items = list(getattr(element, "nav_items", []) or [])
+            if not (0 <= item_index < len(items)):
+                return
+            target = items[item_index].get("target")
+            if isinstance(target, str) and target in ("next", "prev"):
+                count = len(self.hdmi_screens)
+                if count > 1:
+                    current = self._hdmi_play_index % count
+                    delta = -1 if target == "prev" else 1
+                    self._goto_hdmi_screen((current + delta) % count)
+            else:
+                try:
+                    self._goto_hdmi_screen(int(target))
+                except (TypeError, ValueError):
+                    pass
+            return
+
+        # Interacción "screen transition": salta a otra pantalla (sin gate de
+        # comandos; no ejecuta nada externo).
+        if (getattr(element, "tap_action", "none") or "none") == "transition":
+            target = getattr(element, "tap_screen", 0)
+            if isinstance(target, str) and target in ("next", "prev"):
+                count = len(self.hdmi_screens)
+                if count > 1:
+                    current = self._hdmi_play_index % count
+                    delta = -1 if target == "prev" else 1
+                    self._goto_hdmi_screen((current + delta) % count)
+            else:
+                try:
+                    self._goto_hdmi_screen(int(target or 0))
+                except (TypeError, ValueError):
+                    pass
+            return
+
         action = actions.parse_action(element)
         if action is None:
             return
@@ -1907,36 +3345,43 @@ class ThemeEditorWindow(QMainWindow):
         if isinstance(monitor, dict):
             mw = int(monitor.get("width") or 0)
             mh = int(monitor.get("height") or 0)
-            if mw > 0 and mh > 0 and \
-                    (self.hdmi_canvas.hdmi_width, self.hdmi_canvas.hdmi_height) != (mw, mh):
-                old_w = self.hdmi_canvas.hdmi_width
-                old_h = self.hdmi_canvas.hdmi_height
-                self._scale_elements(self.hdmi_elements, old_w, old_h, mw, mh)
+            if mw > 0 and mh > 0:
+                if (self.hdmi_canvas.hdmi_width, self.hdmi_canvas.hdmi_height) != (mw, mh):
+                    old_w = self.hdmi_canvas.hdmi_width
+                    old_h = self.hdmi_canvas.hdmi_height
+                    self._scale_hdmi_all_screens(old_w, old_h, mw, mh)
+                    if self._active_target == "hdmi":
+                        self.properties_panel.set_hdmi_mode(mw, mh)
+                    self.project_hdmi_config = dict(self.project_hdmi_config or {})
+                    self.project_hdmi_config.update(
+                        {"width": mw, "height": mh, "screen_id": monitor.get("id")})
+                    settings.set_setting("hdmi_config", self.project_hdmi_config)
+                # Autocorrección: el canvas offscreen de salida debe medir lo
+                # mismo que el monitor aunque el de edición ya coincida.
+                if (self.hdmi_output_canvas is not None
+                        and (self.hdmi_output_canvas.hdmi_width,
+                             self.hdmi_output_canvas.hdmi_height) != (mw, mh)):
+                    self.hdmi_output_canvas.set_hdmi_size(mw, mh)
+                    self._hdmi_last_signature = None
                 self.hdmi_canvas.set_hdmi_size(mw, mh)
-                if self._active_target == "hdmi":
-                    self.properties_panel.set_hdmi_mode(mw, mh)
-                self._hdmi_last_signature = None
-                self.project_hdmi_config = dict(self.project_hdmi_config or {})
-                self.project_hdmi_config.update(
-                    {"width": mw, "height": mh, "screen_id": monitor.get("id")})
-                settings.set_setting("hdmi_config", self.project_hdmi_config)
 
         sensor_data = self.get_sensor_data()
-        for element in self.hdmi_elements:
-            if element.source != "static" and element.source in sensor_data:
-                element.value = sensor_data[element.source]
+        self._sync_element_values(self.hdmi_elements, sensor_data)
 
         try:
             signature = self._hdmi_frame_signature()
-            # Los elementos animados por tiempo (line_chart, reloj, GIF...) deben
-            # repintarse en cada tick: su historial avanza al dibujarse, no al
-            # cambiar el valor del sensor.
-            if self._hdmi_has_animated_elements() \
-                    or signature != self._hdmi_last_signature:
-                image = self.hdmi_canvas.get_frame_rgb888()
-                self.hdmi_output.render_frame(image)
-                self._hdmi_last_signature = signature
-                self.record_hdmi_frame_time()
+            # Con varias pantallas hay que repintar cada tick (transiciones por
+            # tiempo o por toque); con una sola se mantiene la optimización por
+            # firma. Los elementos animados por tiempo (line_chart, reloj...)
+            # también fuerzan repintado.
+            multi_screen = len(self.hdmi_screens) > 1
+            if (multi_screen or self._hdmi_has_animated_elements()
+                    or signature != self._hdmi_last_signature):
+                rgb = self._hdmi_next_frame(sensor_data)
+                if rgb is not None:
+                    self.hdmi_output.render_frame(self._dmd_rgb_to_qimage(rgb))
+                    self._hdmi_last_signature = signature
+                    self.record_hdmi_frame_time()
 
             # Refrescar el preview del editor de forma espaciada
             self._canvas_update_counter += 1
@@ -2232,6 +3677,180 @@ class ThemeEditorWindow(QMainWindow):
         if idx >= 0 and idx < len(self.elements):
             self.properties_panel.set_element(self.elements[idx])
 
+    def insert_widget(self, recipe_name):
+        """Inserta un widget (grupo de elementos) en el canvas activo."""
+        recipe = RECIPES.get(recipe_name)
+        if recipe is None:
+            return
+        if self._active_target == "dmd":
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Widgets are only available for LCD/HDMI targets")
+            return
+        canvas_w, canvas_h = self._effective_canvas_dims()
+        self.save_undo_state()
+        new_elements = instantiate_widget(recipe, self.elements, canvas_w, canvas_h)
+        start = len(self.elements)
+        self.elements.extend(new_elements)
+        indices = list(range(start, len(self.elements)))
+        self.element_list.refresh_list()
+        self._do_refresh_canvas()
+        self.element_list.select_elements(indices)
+        self.canvas.set_selected_indices(indices, group_selection=True)
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(
+                f"Widget '{recipe.title}' added ({len(new_elements)} elements)")
+
+    def insert_icon(self, icon_name):
+        """Inserta un elemento `icon` (de la carpeta icons/) en el canvas activo."""
+        path = resolve_icon_path(icon_name)
+        if path is None:
+            return
+        if self._active_target == "dmd":
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Icons are only available for LCD/HDMI targets")
+            return
+        try:
+            with Image.open(path) as im:
+                icon_w, icon_h = im.size
+        except Exception:  # noqa: BLE001
+            icon_w, icon_h = 128, 128
+        icon_w = max(1, int(icon_w))
+        icon_h = max(1, int(icon_h))
+        canvas_w, canvas_h = self._effective_canvas_dims()
+        target_h = max(24, int(canvas_h * 0.30))
+        scale = target_h / icon_h
+        width = max(16, int(icon_w * scale))
+        height = max(16, int(icon_h * scale))
+        from widgets import find_free_position
+
+        px, py = find_free_position(self.elements, width, height, canvas_w, canvas_h)
+        self.save_undo_state()
+        element = ThemeElement(
+            "icon", name=f"icon_{len(self.elements) + 1}", x=px, y=py,
+            width=width, height=height, icon_name=icon_name,
+            aspect_ratio=(icon_w / icon_h if icon_h else 1.0))
+        start = len(self.elements)
+        self.elements.append(element)
+        self.element_list.refresh_list()
+        self._do_refresh_canvas()
+        self.element_list.select_elements([start])
+        self.canvas.set_selected_indices([start])
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(f"Icon '{icon_name}' added")
+
+    def _allowed_types_for_target(self, target):
+        """Tipos de elemento válidos en el canvas destino (para pegar)."""
+        from constants import DMD_ELEMENT_TYPES, ELEMENT_TYPES, HDMI_ONLY_TYPES
+
+        if target == "dmd":
+            return set(DMD_ELEMENT_TYPES)
+        if target == "hdmi":
+            return set(ELEMENT_TYPES)
+        return set(ELEMENT_TYPES) - set(HDMI_ONLY_TYPES)
+
+    def _selected_element_indices(self):
+        indices = list(getattr(self.canvas, "selected_indices", []) or [])
+        if not indices:
+            indices = self.element_list.get_selected_element_indices()
+        return indices
+
+    def copy_selected_elements(self):
+        """Copia la selección actual al portapapeles interno."""
+        elements = self.elements
+        picked = [elements[i] for i in self._selected_element_indices()
+                  if 0 <= i < len(elements)]
+        if not picked:
+            self.status_bar.showMessage("Nothing selected to copy", 2500)
+            return
+        self._element_clipboard = [e.to_dict() for e in picked]
+        self._paste_count = 0
+        self.status_bar.showMessage(f"Copied {len(picked)} element(s)", 2500)
+
+    def paste_elements(self):
+        """Pega el portapapeles en el canvas activo (mismo u otro)."""
+        if not self._element_clipboard:
+            return
+        allowed = self._allowed_types_for_target(self._active_target)
+        self._paste_count += 1
+        offset = 24 * self._paste_count
+        self.save_undo_state()
+        start = len(self.elements)
+        skipped = 0
+        for data in self._element_clipboard:
+            if data.get("type") not in allowed:
+                skipped += 1
+                continue
+            element = ThemeElement.from_dict(data)
+            element.x = int(getattr(element, "x", 0) + offset)
+            element.y = int(getattr(element, "y", 0) + offset)
+            element.name = f"{element.type}_{len(self.elements) + 1}"
+            self.elements.append(element)
+        new_indices = list(range(start, len(self.elements)))
+        if not new_indices:
+            self.status_bar.showMessage(
+                "Nothing pasted: element types are not valid on this canvas", 3000)
+            return
+        self.element_list.refresh_list()
+        self._do_refresh_canvas()
+        self.element_list.select_elements(new_indices)
+        self.canvas.set_selected_indices(new_indices)
+        message = f"Pasted {len(new_indices)} element(s)"
+        if skipped:
+            message += f" ({skipped} skipped)"
+        self.status_bar.showMessage(message, 3000)
+
+    def duplicate_selected_elements(self):
+        self.copy_selected_elements()
+        if self._element_clipboard:
+            self.paste_elements()
+
+    def delete_selected_elements(self):
+        indices = self._selected_element_indices()
+        if not indices:
+            return
+        self.save_undo_state()
+        for i in sorted(set(indices), reverse=True):
+            if 0 <= i < len(self.elements):
+                del self.elements[i]
+        self.element_list.refresh_list()
+        self._do_refresh_canvas()
+        self.canvas.set_selected_indices([])
+
+    def _show_canvas_context_menu(self, index, global_pos):
+        """Menú contextual del canvas: copiar/duplicar/borrar/pegar."""
+        self.canvas.setFocus()
+        if 0 <= index < len(self.elements) and \
+                index not in (self.canvas.selected_indices or []):
+            self.canvas.set_selected_indices([index])
+            self.element_list.select_elements([index])
+        menu = QMenu(self)
+        has_selection = bool(self._selected_element_indices())
+        copy_action = menu.addAction("Copy", self.copy_selected_elements)
+        copy_action.setEnabled(has_selection)
+        duplicate_action = menu.addAction("Duplicate", self.duplicate_selected_elements)
+        duplicate_action.setEnabled(has_selection)
+        delete_action = menu.addAction("Delete", self.delete_selected_elements)
+        delete_action.setEnabled(has_selection)
+        menu.addSeparator()
+        paste_action = menu.addAction("Paste", self.paste_elements)
+        paste_action.setEnabled(bool(self._element_clipboard))
+        menu.exec(global_pos)
+
+    def _install_canvas_shortcuts(self, widget):
+        """Ctrl+C/V (y Shift+Ctrl+C/V) acotados al widget (no roban a los textos)."""
+        for sequence, slot in (
+            ("Ctrl+C", self.copy_selected_elements),
+            ("Ctrl+V", self.paste_elements),
+            ("Ctrl+Shift+C", self.copy_selected_elements),
+            ("Ctrl+Shift+V", self.paste_elements),
+        ):
+            shortcut = QShortcut(QKeySequence(sequence), widget)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(slot)
+            self._canvas_shortcuts.append(shortcut)
+
     def refresh_canvas(self):
         """Refresh canvas - debounced to prevent rapid successive updates."""
         # Use a short timer to batch multiple rapid changes into one update
@@ -2242,6 +3861,8 @@ class ThemeEditorWindow(QMainWindow):
 
         # Restart timer - this batches rapid changes
         self._refresh_timer.start(16)  # ~60fps max update rate
+        # Refrescar (debounced) la miniatura de la pantalla activa.
+        self._schedule_screen_thumb_refresh()
 
     def _do_refresh_canvas(self):
         """Actualmente pasa por el canvas activo y fuerza re-render HDMI."""
@@ -2339,18 +3960,13 @@ class ThemeEditorWindow(QMainWindow):
         self.elements = [
             ThemeElement.from_dict(e) for e in preset_data.get("elements", [])
         ]
+        # Migración: el vídeo de fondo antiguo pasa a ser un elemento "video".
+        self._migrate_video_background(preset_data.get("video_background"),
+                                       self.elements, DISPLAY_WIDTH, DISPLAY_HEIGHT)
         self.element_list.set_elements(self.elements)
         self.canvas.set_elements(self.elements)
         self.properties_panel.set_element(None)
         self.canvas.set_selected_indices([])
-
-        # Load video background settings if present
-        video_data = preset_data.get("video_background", {})
-        if video_data:
-            video_background.from_dict(video_data)
-        else:
-            video_background.clear_video()
-        self._update_video_ui()
 
         self.fit_canvas()
         self.status_bar.showMessage(f"Loaded template: {self.theme_name}")
@@ -2386,132 +4002,35 @@ class ThemeEditorWindow(QMainWindow):
             self.bg_color_btn.setStyleSheet(f"background-color: {color.name()};")
             self.canvas.set_background_color(color.name())
 
-    def choose_video_background(self):
-        """Select a video file for background."""
-        if not HAS_CV2:
-            QMessageBox.warning(
-                self, "OpenCV Required",
-                "Video backgrounds require OpenCV.\nRun: pip install opencv-python"
-            )
+
+    def _migrate_video_background(self, video_data, elements, width, height):
+        """Convierte el antiguo fondo de vídeo en un elemento ``video`` a tamaño completo."""
+        if not video_data or not video_data.get("enabled"):
             return
-
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Video Background", "",
-            "Video Files (*.mp4 *.avi *.mkv *.mov *.webm);;All Files (*)"
-        )
-        if path:
-            # Update UI immediately
-            filename = os.path.basename(path)
-            if len(filename) > 12:
-                filename = filename[:10] + "..."
-            self.video_btn.setText(filename)
-            self.video_btn.setToolTip(path)
-            self.video_fit_combo.setEnabled(True)
-
-            # Start loading with progress callback
-            self.status_bar.showMessage(f"Loading video: {os.path.basename(path)}...")
-
-            # Start a timer to update canvas during loading
-            self._video_load_timer = QTimer(self)
-            self._video_load_timer.timeout.connect(self._on_video_load_tick)
-            self._video_load_timer.start(100)  # Update every 100ms
-
-            if not video_background.load_video(path, callback=self._on_video_load_progress):
-                self._video_load_timer.stop()
-                QMessageBox.warning(self, "Error", f"Failed to load video:\n{path}")
-                self.clear_video_background()
-
-    def _on_video_load_tick(self):
-        """Timer callback during video loading."""
-        self.canvas.update()
-        if not video_background.is_loading:
-            self._video_load_timer.stop()
-
-    def _on_video_load_progress(self, progress, done, error):
-        """Callback for video loading progress."""
-        if error:
-            # Use QTimer to show message box from main thread
-            QTimer.singleShot(0, lambda: self._show_video_error(error))
+        path = video_data.get("video_path")
+        if not path:
             return
-
-        if done and not error:
-            mem_mb = video_background.memory_usage_mb
-            frames = video_background.frame_count
-            fps = video_background.fps
-            QTimer.singleShot(0, lambda: self.status_bar.showMessage(
-                f"Video loaded: {frames} frames @ {fps:.1f}fps ({mem_mb:.1f} MB in memory)"
-            ))
-
-    def _show_video_error(self, error):
-        """Show video load error (called from main thread)."""
-        QMessageBox.warning(self, "Video Load Error", str(error))
-        self.clear_video_background()
-
-    def on_video_fit_changed(self, index):
-        """Handle video fit mode change."""
-        fit_mode = self.video_fit_combo.currentData()
-        if fit_mode and fit_mode != video_background.fit_mode:
-            self.status_bar.showMessage("Reloading video with new fit mode...")
-            # Start timer to show loading progress
-            if not hasattr(self, '_video_load_timer'):
-                self._video_load_timer = QTimer(self)
-                self._video_load_timer.timeout.connect(self._on_video_load_tick)
-            self._video_load_timer.start(100)
-            video_background.set_fit_mode(fit_mode)
-        self.canvas.update()
-
-    def clear_video_background(self):
-        """Clear the video background."""
-        # Stop load timer if running
-        if hasattr(self, '_video_load_timer') and self._video_load_timer.isActive():
-            self._video_load_timer.stop()
-        video_background.clear_video()
-        self.video_btn.setText("None")
-        self.video_btn.setToolTip("")
-        self.video_fit_combo.setEnabled(False)
-        self.canvas.update()
-        self.status_bar.showMessage("Video background cleared")
-
-    def _update_video_ui(self):
-        """Update video UI controls to match current video_background state."""
-        if video_background.enabled:
-            filename = os.path.basename(video_background.video_path)
-            if len(filename) > 12:
-                filename = filename[:10] + "..."
-            self.video_btn.setText(filename)
-            self.video_btn.setToolTip(video_background.video_path)
-            self.video_fit_combo.setEnabled(True)
-            # Set fit mode in combo
-            idx = self.video_fit_combo.findData(video_background.fit_mode)
-            if idx >= 0:
-                self.video_fit_combo.setCurrentIndex(idx)
-        else:
-            self.video_btn.setText("None")
-            self.video_btn.setToolTip("")
-            self.video_fit_combo.setEnabled(False)
+        elements.append(ThemeElement(
+            "video", x=0, y=0, width=int(width), height=int(height),
+            video_path=path,
+            video_fit_mode=video_data.get("fit_mode", "fit_height"),
+            name="video_bg"))
 
     # --------------------------------------------------- target Web / LCD ---
     def apply_targets(self, targets, lcd_model=None, dmd_config=None,
-                      hdmi_config=None):
-        """Aplica el destino del proyecto activo (Web / LCD / DMD / HDMI).
-
-        - Web  -> levanta el webserver + el caché JPEG que lo alimenta.
-        - !Web -> lo detiene (ahorro de recursos con proyectos solo LCD).
-        - LCD  -> recuerda el modelo; el perfil de entrega (tasas del menú
-          Frame Rate) se resuelve con la capacidad del panel y el estado del
-          benchmark persistido.
-        - DMD  -> conmuta el editor al canvas 128×32 y arranca el envío TCP.
-        - HDMI -> conmuta al canvas a la resolución del monitor y abre la
-          ventana fullscreen en el monitor seleccionado.
-        """
+                      hdmi_config=None, custom_config=None):
+        """Aplica el destino del proyecto activo (Web / LCD / DMD / HDMI / Custom)."""
         targets = {
             "web": bool(targets.get("web", True)),
             "lcd": bool(targets.get("lcd", True)),
             "dmd": bool(targets.get("dmd", False)),
             "hdmi": bool(targets.get("hdmi", False)),
+            "custom": bool(targets.get("custom", False)),
         }
-        prev = dict(self.project_targets)
         self.project_targets = targets
+        # Persistir los targets: así `settings` refleja el proyecto real y no se
+        # confunde un target ya existente con uno recién añadido.
+        settings.set_setting("project_targets", dict(targets))
         if lcd_model:
             self.project_lcd_id = lcd_model
             settings.set_setting("lcd_model", lcd_model)
@@ -2521,10 +4040,20 @@ class ThemeEditorWindow(QMainWindow):
         if hdmi_config:
             self.project_hdmi_config = dict(hdmi_config)
             settings.set_setting("hdmi_config", hdmi_config)
+        if custom_config:
+            self.project_custom_config = dict(custom_config)
+            settings.set_setting("custom_config", custom_config)
+
+        # En un proyecto Lite las salidas las gestiona el equipo remoto: aqui
+        # solo ajustamos las pestanas/canvas y el preview remoto.
+        if self._lite_project:
+            return self._apply_targets_lite(targets, dmd_config, hdmi_config,
+                                             custom_config)
 
         self._set_webserver_state(targets["web"])
         # Pestaña WEB: preview en vivo de la imagen servida por el webserver
         self.target_tabs.setTabVisible(self._web_tab_index, bool(targets["web"]))
+        self._refresh_web_source_combo()
         # Pestaña LCD: solo si el proyecto tiene target LCD. El wizard obliga a
         # elegir al menos un dispositivo, así que nunca queda un editor vacío.
         self.target_tabs.setTabVisible(self._lcd_tab_index, bool(targets["lcd"]))
@@ -2543,53 +4072,54 @@ class ThemeEditorWindow(QMainWindow):
             w = int(config.get("width", 128))
             h = int(config.get("height", 32))
             self.dmd_canvas.set_dmd_size(w, h)
+            if self.dmd_output_canvas is not None:
+                self.dmd_output_canvas.set_dmd_size(w, h)
             if self._active_target == "dmd":
                 self.properties_panel.set_dmd_mode(True, w, h)
             self.target_tabs.setTabVisible(self._dmd_tab_index, True)
             self._configure_dmd_sender(config, restart=True)
-            if not prev.get("dmd"):
-                self._dmd_output_enabled = True
             self.dmd_toggle_btn.blockSignals(True)
             self.dmd_toggle_btn.setChecked(self._dmd_output_enabled)
             self.dmd_toggle_btn.blockSignals(False)
-            self.dmd_toggle_btn.setVisible(True)
-            if self._dmd_output_enabled:
-                self._start_dmd_loop()
         else:
             self.target_tabs.setTabVisible(self._dmd_tab_index, False)
-            self.dmd_toggle_btn.setVisible(False)
             self._dmd_output_enabled = False
             self._shutdown_dmd_sender()
 
         if targets["hdmi"]:
             self.target_tabs.setTabVisible(self._hdmi_tab_index, True)
+            self._rebuild_hdmi_screens_bar()
+            self._sync_hdmi_screen_props()
             self._refresh_hdmi_monitor_combo(prompt=False)
-            if not prev.get("hdmi"):
-                self._hdmi_output_enabled = True
             self.hdmi_toggle_btn.blockSignals(True)
             self.hdmi_toggle_btn.setChecked(self._hdmi_output_enabled)
             self.hdmi_toggle_btn.blockSignals(False)
-            self.hdmi_toggle_btn.setVisible(True)
-            if self._hdmi_output_enabled and self._selected_hdmi_monitor() is not None:
-                self._start_hdmi_output()
             if self._active_target == "hdmi":
                 self.properties_panel.set_hdmi_mode(
                     self.hdmi_canvas.hdmi_width,
                     self.hdmi_canvas.hdmi_height)
         else:
             self.target_tabs.setTabVisible(self._hdmi_tab_index, False)
-            self.hdmi_toggle_btn.setVisible(False)
             self._hdmi_output_enabled = False
             self._shutdown_hdmi_output()
 
-        # Reserva: si ningún target queda visible, mostrar LCD para no dejar el
-        # editor vacío (el wizard lo impide, pero un tema externo podría).
-        if not any(self.target_tabs.isTabVisible(i)
-                   for i in range(self.target_tabs.count())):
-            self.target_tabs.setTabVisible(self._lcd_tab_index, True)
+        if targets["custom"]:
+            self.target_tabs.setTabVisible(self._custom_tab_index, True)
+            cfg = self.project_custom_config or {}
+            self.set_custom_canvas_size(int(cfg.get("width") or 1280),
+                                        int(cfg.get("height") or 800))
+        else:
+            self.target_tabs.setTabVisible(self._custom_tab_index, False)
+
+        # Reserva: si ningún target de EDICIÓN (LCD/DMD/HDMI/Custom) queda
+        # visible, mostrar el canvas LCD para no dejar el editor vacío.
+        # Web es solo preview (read-only), así que no cuenta como editor.
+        self._reserve_editor_canvas()
+
+        self._update_output_toggles()
 
         # Mensaje de estado
-        active = [name for name in ("web", "lcd", "dmd", "hdmi")
+        active = [name for name in ("web", "lcd", "dmd", "hdmi", "custom")
                   if targets.get(name)]
         if not active:
             self.status_bar.showMessage("Proyecto sin targets activos")
@@ -2612,6 +4142,155 @@ class ThemeEditorWindow(QMainWindow):
             tab_bar.relayout()
             QTimer.singleShot(0, tab_bar.relayout)
         self._on_target_tab_changed(self.target_tabs.currentIndex())
+        self._update_web_publish_visibility()
+        return targets
+
+    # ------------------------------------------------------------ Lite -----
+    def setup_lite_source(self, lite, token=None, name=None):
+        """Activa el plugin Lite (sensores/preview de un ThermalEngineLite)."""
+        self.clear_lite_source()
+        lite = lite or {}
+        url = normalize_lite_url(lite.get("url", ""), lite.get("port"))
+        if not url:
+            return
+        self._lite_project = True
+        self._lite_url = url
+        self._lite_name = name or lite.get("name") or url
+        self._lite_token = (token or "").strip()
+
+        module = plugins.get_plugin("lite")
+        if module is not None:
+            module.set_config(url, self._lite_token, self._lite_name)
+            if plugins.is_enabled("lite"):
+                plugins.stop_plugin("lite")
+            plugins.start_plugin("lite")
+            plugins.refresh_sources("lite")
+            self._lite_client = module.get_client()
+        enabled = set(settings.get_setting("plugins_enabled", []) or [])
+        enabled.add("lite")
+        settings.set_setting("plugins_enabled", sorted(enabled))
+
+        if self._lite_status_timer is not None:
+            self._lite_status_timer.start(1000)
+        self._refresh_source_combo()
+        self._update_lite_indicator()
+        self._update_web_publish_visibility()
+
+    def clear_lite_source(self):
+        """Desactiva el plugin Lite y vuelve a sensores locales."""
+        if plugins.is_enabled("lite"):
+            plugins.stop_plugin("lite")
+        enabled = set(settings.get_setting("plugins_enabled", []) or [])
+        enabled.discard("lite")
+        settings.set_setting("plugins_enabled", sorted(enabled))
+        self._lite_client = None
+        self._lite_project = False
+        self._lite_url = ""
+        self._lite_name = ""
+        self._lite_token = ""
+        if getattr(self, "_lite_status_timer", None) is not None:
+            self._lite_status_timer.stop()
+        self._refresh_source_combo()
+        self._update_lite_indicator()
+        self._update_web_publish_visibility()
+
+    def _update_lite_indicator(self):
+        label = getattr(self, "lite_status_label", None)
+        if label is None:
+            return
+        if not self._lite_project or self._lite_client is None:
+            label.setText("")
+            return
+        online = self._lite_client.online
+        color = DOT_ON if online else DOT_OFF
+        state = "conectado" if online else "offline"
+        host = self._lite_name or self._lite_url
+        label.setText(
+            f"<span style='color:{color};'>&#9679;</span> Lite {host} · {state}")
+
+    def _update_web_publish_visibility(self):
+        """El botón Publish to Lite solo tiene sentido en proyectos Lite."""
+        button = getattr(self, "web_publish_btn", None)
+        if button is not None:
+            button.setVisible(bool(self._lite_project))
+
+    def _apply_targets_lite(self, targets, dmd_config, hdmi_config,
+                            custom_config=None):
+        """Configura el editor para un proyecto Lite sin arrancar salidas locales.
+
+        Ajusta pestanas y canvas a las dimensiones del equipo remoto; el envio a
+        LCD/DMD/HDMI y el webserver los gestiona el propio Lite. La pestana WEB
+        muestra la imagen remota.
+        """
+        # Asegurar que no queda ninguna salida local activa (por si venimos de
+        # un proyecto Studio).
+        self._set_webserver_state(False)
+        self._shutdown_dmd_sender()
+        self._shutdown_hdmi_output()
+        self._dmd_output_enabled = False
+        self._hdmi_output_enabled = False
+        self.disconnect_display()
+
+        if custom_config:
+            self.project_custom_config = dict(custom_config)
+            settings.set_setting("custom_config", custom_config)
+
+        self.target_tabs.setTabVisible(self._web_tab_index, bool(targets["web"]))
+        self.target_tabs.setTabVisible(self._lcd_tab_index, bool(targets["lcd"]))
+        self.target_tabs.setTabVisible(self._dmd_tab_index, bool(targets["dmd"]))
+        self.target_tabs.setTabVisible(self._hdmi_tab_index, bool(targets["hdmi"]))
+        self.target_tabs.setTabVisible(self._custom_tab_index, bool(targets["custom"]))
+
+        if targets["dmd"]:
+            config = dmd_config or self.project_dmd_config or {}
+            w = int(config.get("width", 128))
+            h = int(config.get("height", 32))
+            self.dmd_canvas.set_dmd_size(w, h)
+            if self.dmd_output_canvas is not None:
+                self.dmd_output_canvas.set_dmd_size(w, h)
+            if self._active_target == "dmd":
+                self.properties_panel.set_dmd_mode(True, w, h)
+
+        if targets["hdmi"] and hdmi_config:
+            w = int(hdmi_config.get("width") or 1920)
+            h = int(hdmi_config.get("height") or 1080)
+            self._sync_hdmi_canvas_size(w, h)
+            if self._active_target == "hdmi":
+                self.properties_panel.set_hdmi_mode(w, h)
+
+        if targets["custom"]:
+            cfg = self.project_custom_config or {}
+            self.set_custom_canvas_size(int(cfg.get("width") or 1280),
+                                        int(cfg.get("height") or 800))
+
+        if targets["web"]:
+            if not self._web_preview_timer.isActive():
+                self._web_preview_timer.start(500)
+        else:
+            self._web_preview_timer.stop()
+
+        # Reserva: mostrar el canvas LCD si no hay ningún target de EDICIÓN
+        # (Web es solo preview read-only, no cuenta).
+        self._reserve_editor_canvas()
+
+        self._update_output_toggles()
+        self._update_lite_indicator()
+        self._update_web_publish_visibility()
+        self.status_bar.showMessage(
+            f"Proyecto Lite: {self._lite_name or self._lite_url} "
+            f"(sensores remotos; publica en la pestaña WEB)")
+
+        self._select_initial_target_tab()
+        tab_bar = self.target_tabs.tabBar()
+        if hasattr(tab_bar, "relayout"):
+            tab_bar.relayout()
+            QTimer.singleShot(0, tab_bar.relayout)
+        self._on_target_tab_changed(self.target_tabs.currentIndex())
+        # En modo Lite el selector de fuentes debe mostrar solo los sensores
+        # remotos (proveedor exclusivo); refrescarlo aquí evita arrastrar la
+        # lista previa (local) al entrar/cambiar de proyecto Lite.
+        plugins.refresh_sources("lite")
+        self._refresh_source_combo()
         return targets
 
     def _set_webserver_state(self, web_active):
@@ -2693,18 +4372,34 @@ class ThemeEditorWindow(QMainWindow):
         if dlg.exec():
             data = dlg.data()
             self.new_theme()
+
+            if data.get("project_type") == "lite":
+                self.setup_lite_source(
+                    data.get("lite"), data.get("lite_token"), data.get("name"))
+            else:
+                self.clear_lite_source()
+
             self.apply_targets(
                 data.get("targets", data),
                 lcd_model=data.get("lcd_model"),
                 dmd_config=data.get("dmd_config"),
                 hdmi_config=data.get("hdmi_config"),
+                custom_config=data.get("custom_config"),
             )
+
+            if data.get("web_width") and data.get("web_height"):
+                self.set_web_canvas_size(data["web_width"], data["web_height"])
+                self._refresh_web_source_combo()
 
             name = data.get("name") or "Untitled Project"
             self.theme_name = name
             self.theme_name_edit.setText(name)
-            self.status_bar.showMessage(
-                f"New project created: {name}", 3000)
+            if data.get("project_type") == "lite":
+                self.status_bar.showMessage(
+                    f"Proyecto Lite creado: {name}", 4000)
+            else:
+                self.status_bar.showMessage(
+                    f"New project created: {name}", 3000)
 
     def add_project_target(self):
         """Botón "+" (esquina del tab bar): abre el wizard de New Project con
@@ -2735,6 +4430,8 @@ class ThemeEditorWindow(QMainWindow):
                        or bool(new_targets.get("dmd")),
                 "hdmi": bool(self.project_targets.get("hdmi"))
                         or bool(new_targets.get("hdmi")),
+                "custom": bool(self.project_targets.get("custom"))
+                          or bool(new_targets.get("custom")),
             }
             self.project_targets = merged
             # Solo se actualiza el modelo/config del target recién añadido si
@@ -2743,13 +4440,64 @@ class ThemeEditorWindow(QMainWindow):
                                                   if merged["lcd"] else None)
             dmd_config = data.get("dmd_config") or self.project_dmd_config
             hdmi_config = data.get("hdmi_config") or self.project_hdmi_config
+            custom_config = data.get("custom_config") or self.project_custom_config
             added = [k for k, v in new_targets.items() if v]
             self.apply_targets(merged, lcd_model=lcd_model,
-                               dmd_config=dmd_config, hdmi_config=hdmi_config)
+                               dmd_config=dmd_config, hdmi_config=hdmi_config,
+                               custom_config=custom_config)
             # Saltar a la pestaña del dispositivo recién añadido.
             self._select_initial_target_tab(added=added)
             self.status_bar.showMessage(
                 f"Dispositivo añadido al proyecto: {', '.join(added)}", 3000)
+
+    def _tab_index_to_target(self, index):
+        """Traduce el índice de una pestaña a su target (o None)."""
+        mapping = {
+            getattr(self, "_web_tab_index", -1): "web",
+            getattr(self, "_lcd_tab_index", -1): "lcd",
+            getattr(self, "_dmd_tab_index", -1): "dmd",
+            getattr(self, "_hdmi_tab_index", -1): "hdmi",
+            getattr(self, "_custom_tab_index", -1): "custom",
+        }
+        return mapping.get(index)
+
+    def _on_target_tab_context_menu(self, pos):
+        """Menú contextual sobre una pestaña: eliminar ese canvas/target."""
+        bar = self.target_tabs.tabBar()
+        index = bar.tabAt(pos)
+        target = self._tab_index_to_target(index)
+        if target is None or not self.project_targets.get(target):
+            return
+        labels = {"web": "Web", "lcd": "LCD", "dmd": "DMD", "hdmi": "HDMI",
+                  "custom": "Custom"}
+        menu = QMenu(self)
+        action = menu.addAction(f"Remove {labels.get(target, target)}")
+        action.triggered.connect(lambda: self.remove_project_target(target))
+        menu.exec(bar.mapToGlobal(pos))
+
+    def remove_project_target(self, target):
+        """Elimina un canvas/target del proyecto (conserva su diseño guardado)."""
+        if target not in ("web", "lcd", "dmd", "hdmi", "custom"):
+            return
+        if not self.project_targets.get(target):
+            return
+        new_targets = dict(self.project_targets)
+        new_targets[target] = False
+        self.apply_targets(
+            new_targets,
+            lcd_model=self.project_lcd_id,
+            dmd_config=self.project_dmd_config,
+            hdmi_config=self.project_hdmi_config,
+            custom_config=self.project_custom_config,
+        )
+        # Quitar el target del proyecto persistido.
+        enabled = dict(new_targets)
+        self.project_targets = enabled
+        settings.set_setting("project_targets", enabled)
+        names = {"web": "Web", "lcd": "LCD", "dmd": "DMD", "hdmi": "HDMI",
+                 "custom": "Custom"}
+        self.status_bar.showMessage(
+            f"Canvas eliminado: {names.get(target, target)}", 3000)
 
     def new_theme(self):
         self.theme_path = None
@@ -2759,9 +4507,45 @@ class ThemeEditorWindow(QMainWindow):
         self.dmd_background_color = "#000000"
         self.hdmi_background_color = "#000000"
         self.lcd_elements = []
-        self.dmd_elements = []
+        self.dmd_screens = [DMDScreen(name="Screen 1", elements=[],
+                                      duration_s=self.dmd_default_duration_s,
+                                      transition=self.dmd_default_transition,
+                                      transition_ms=self.dmd_default_transition_ms)]
+        self.dmd_active_screen = 0
+        self.dmd_elements = self.dmd_screens[0].elements
+        self._dmd_play_index = 0
+        self._dmd_play_phase = "show"
+        self._dmd_play_elapsed = 0.0
+        self._dmd_play_progress = 0.0
+        self._dmd_play_last = 0.0
         self.hdmi_elements = []
-        self.lcd_video_data = {}
+        self.hdmi_screens = [Screen(name="Screen 1", elements=self.hdmi_elements,
+                                    duration_s=self.hdmi_default_duration_s,
+                                    transition=self.hdmi_default_transition,
+                                    transition_ms=self.hdmi_default_transition_ms)]
+        self.hdmi_active_screen = 0
+        self._hdmi_play_index = 0
+        self._hdmi_play_phase = "show"
+        self._hdmi_play_elapsed = 0.0
+        self._hdmi_play_progress = 0.0
+        self._hdmi_play_last = 0.0
+        self._hdmi_transition_target = None
+        self._rebuild_hdmi_screens_bar()
+        self._sync_hdmi_screen_props()
+        self.custom_elements = []
+        self.custom_background_color = "#000000"
+        self.custom_screens = [Screen(name="Screen 1", elements=self.custom_elements,
+                                      duration_s=self.custom_default_duration_s,
+                                      transition=self.custom_default_transition,
+                                      transition_ms=self.custom_default_transition_ms)]
+        self.custom_active_screen = 0
+        self._rebuild_custom_screens_bar()
+        self._sync_custom_screen_props()
+        self.web_source = "auto"
+        self._web_jpeg_data = None
+        self._web_jpeg_rotated = False
+        self.clear_web_canvas_size()
+        self._apply_vertical_mode(False)
         self.bg_color_btn.setStyleSheet(
             f"background-color: #0f0f19;"
             f" border: 1px solid {BORDER}; border-radius: 5px;"
@@ -2776,6 +4560,11 @@ class ThemeEditorWindow(QMainWindow):
         if self.dmd_canvas is not None:
             self.dmd_canvas.set_background_color("#000000")
             self.dmd_canvas.set_elements(self.dmd_elements)
+        if self.dmd_output_canvas is not None:
+            self.dmd_output_canvas.set_dmd_size(
+                self.dmd_canvas.dmd_width, self.dmd_canvas.dmd_height)
+        self._rebuild_dmd_screens_bar()
+        self._sync_dmd_screen_props()
         if self.hdmi_canvas is not None:
             self.hdmi_canvas.set_background_color("#000000")
             self.hdmi_canvas.set_elements(self.hdmi_elements)
@@ -2783,12 +4572,13 @@ class ThemeEditorWindow(QMainWindow):
         if self.hdmi_canvas is not None:
             monitor = self._selected_hdmi_monitor()
             if isinstance(monitor, dict):
-                self.hdmi_canvas.set_hdmi_size(monitor.get("width", 1920),
-                                               monitor.get("height", 1080))
+                self._sync_hdmi_canvas_size(monitor.get("width", 1920),
+                                            monitor.get("height", 1080))
+            else:
+                self._sync_hdmi_canvas_size(self.hdmi_canvas.hdmi_width,
+                                            self.hdmi_canvas.hdmi_height)
         self._hdmi_last_signature = None
         self._shutdown_hdmi_output()
-        video_background.clear_video()
-        self._update_video_ui()
         self.status_bar.showMessage("New theme created")
 
     def open_theme(self):
@@ -2827,15 +4617,17 @@ class ThemeEditorWindow(QMainWindow):
         self.theme_name = data.get("name", "Untitled")
         self.theme_name_edit.setText(self.theme_name)
 
+        web_dat = data.get("web") or {}
+        self.web_source = web_dat.get("source", "auto") or "auto"
+
         # --- LCD ---
         self.lcd_background_color = lcd_dat.get("background_color", "#0f0f19")
         self.lcd_elements = [ThemeElement.from_dict(e)
                              for e in lcd_dat.get("elements", [])]
-        self.lcd_video_data = dict(lcd_dat.get("video_background") or {})
-        if self.lcd_video_data and self.lcd_video_data.get("enabled"):
-            video_background.from_dict(self.lcd_video_data)
-        else:
-            video_background.clear_video()
+        lcd_w = int(lcd_dat.get("display_width", DISPLAY_WIDTH) or DISPLAY_WIDTH)
+        lcd_h = int(lcd_dat.get("display_height", DISPLAY_HEIGHT) or DISPLAY_HEIGHT)
+        self._migrate_video_background(lcd_dat.get("video_background"),
+                                       self.lcd_elements, lcd_w, lcd_h)
         self.canvas.set_background_color(self.lcd_background_color)
         self.canvas.set_elements(self.lcd_elements)
         self.bg_color_btn.setStyleSheet(
@@ -2845,26 +4637,65 @@ class ThemeEditorWindow(QMainWindow):
         self.element_list.set_elements(self.lcd_elements)
         self.element_list.refresh_list()
         self.properties_panel.set_element(None)
-        self._update_video_ui()
+
+        # No arrastrar el canvas custom (solo-Web) de un proyecto anterior; el
+        # tema decidirá más abajo si define uno (`web.width/height`).
+        self.clear_web_canvas_size()
 
         # --- DMD ---
-        self.dmd_background_color = dmd_dat.get("background_color", "#000000")
-        self.dmd_elements = [ThemeElement.from_dict(e)
-                             for e in dmd_dat.get("elements", [])]
+        self.dmd_screens = screens_from_dmd(dmd_dat)
+        self.dmd_active_screen = 0
+        self.dmd_transitions_enabled = bool(
+            dmd_dat.get("transitions_enabled", True))
+        defaults = dmd_dat.get("defaults") or {}
+        self.dmd_default_duration_s = float(
+            defaults.get("duration_s", DMD_DEFAULT_DURATION_S) or DMD_DEFAULT_DURATION_S)
+        self.dmd_default_transition = defaults.get(
+            "transition", DMD_DEFAULT_TRANSITION)
+        self.dmd_default_transition_ms = int(
+            defaults.get("transition_ms", DMD_DEFAULT_TRANSITION_MS) or 0)
+        self.dmd_background_color = self.dmd_screens[0].background_color
+        self.dmd_elements = self.dmd_screens[0].elements
+        self._dmd_play_index = 0
+        self._dmd_play_phase = "show"
+        self._dmd_play_elapsed = 0.0
+        self._dmd_play_progress = 0.0
+        self._dmd_play_last = 0.0
         w = int(dmd_dat.get("width", 128))
         h = int(dmd_dat.get("height", 32))
         if self.dmd_canvas is not None:
             self.dmd_canvas.set_dmd_size(w, h)
             self.dmd_canvas.set_background_color(self.dmd_background_color)
             self.dmd_canvas.set_elements(self.dmd_elements)
+            if self.dmd_output_canvas is not None:
+                self.dmd_output_canvas.set_dmd_size(w, h)
             if self._active_target == "dmd":
                 self.properties_panel.set_dmd_mode(True, w, h)
+        self._rebuild_dmd_screens_bar()
+        self._sync_dmd_screen_props()
 
         # --- HDMI ---
         hdmi_dat = data.get("hdmi", {}) or {}
         self.hdmi_background_color = hdmi_dat.get("background_color", "#000000")
-        self.hdmi_elements = [ThemeElement.from_dict(e)
-                              for e in hdmi_dat.get("elements", [])]
+        self.hdmi_screens = screens_from_block(hdmi_dat)
+        self.hdmi_active_screen = 0
+        self.hdmi_elements = self.hdmi_screens[0].elements
+        self.hdmi_transitions_enabled = bool(
+            hdmi_dat.get("transitions_enabled", True))
+        hdmi_defaults = hdmi_dat.get("defaults") or {}
+        self.hdmi_default_duration_s = float(
+            hdmi_defaults.get("duration_s", DMD_DEFAULT_DURATION_S)
+            or DMD_DEFAULT_DURATION_S)
+        self.hdmi_default_transition = hdmi_defaults.get(
+            "transition", DMD_DEFAULT_TRANSITION)
+        self.hdmi_default_transition_ms = int(
+            hdmi_defaults.get("transition_ms", DMD_DEFAULT_TRANSITION_MS) or 0)
+        self._hdmi_play_index = 0
+        self._hdmi_play_phase = "show"
+        self._hdmi_play_elapsed = 0.0
+        self._hdmi_play_progress = 0.0
+        self._hdmi_play_last = 0.0
+        self._hdmi_transition_target = None
         hw = int(hdmi_dat.get("width", 0) or 0)
         hh = int(hdmi_dat.get("height", 0) or 0)
         # El canvas HDMI debe medir la resolución del monitor conectado. Si el
@@ -2880,14 +4711,48 @@ class ThemeEditorWindow(QMainWindow):
             mh = int(monitor.get("height") or 0)
             if mw > 0 and mh > 0:
                 if hw > 0 and hh > 0 and (hw, hh) != (mw, mh):
-                    self._scale_elements(self.hdmi_elements, hw, hh, mw, mh)
+                    self._scale_hdmi_all_screens(hw, hh, mw, mh)
                 hw, hh = mw, mh
         if self.hdmi_canvas is not None:
             if hw > 0 and hh > 0:
-                self.hdmi_canvas.set_hdmi_size(hw, hh)
+                self._sync_hdmi_canvas_size(hw, hh)
             self.hdmi_canvas.set_background_color(self.hdmi_background_color)
             self.hdmi_canvas.set_elements(self.hdmi_elements)
         self._hdmi_last_signature = None
+        self._rebuild_hdmi_screens_bar()
+        self._sync_hdmi_screen_props()
+
+        # --- Custom canvas ---
+        custom_dat = data.get("custom", {}) or {}
+        self.custom_background_color = custom_dat.get("background_color", "#000000")
+        self.custom_screens = screens_from_block(custom_dat)
+        self.custom_active_screen = 0
+        self.custom_elements = self.custom_screens[0].elements
+        self.custom_transitions_enabled = bool(
+            custom_dat.get("transitions_enabled", True))
+        custom_defaults = custom_dat.get("defaults") or {}
+        self.custom_default_duration_s = float(
+            custom_defaults.get("duration_s", DMD_DEFAULT_DURATION_S)
+            or DMD_DEFAULT_DURATION_S)
+        self.custom_default_transition = custom_defaults.get(
+            "transition", DMD_DEFAULT_TRANSITION)
+        self.custom_default_transition_ms = int(
+            custom_defaults.get("transition_ms", DMD_DEFAULT_TRANSITION_MS) or 0)
+        cw = int(custom_dat.get("width", 0) or 0)
+        ch = int(custom_dat.get("height", 0) or 0)
+        if cw <= 0 or ch <= 0:
+            cfg = data.get("custom_config") or {}
+            cw = int(cfg.get("width") or 1280)
+            ch = int(cfg.get("height") or 800)
+        self.project_custom_config = {"width": cw, "height": ch}
+        if self.custom_canvas is not None:
+            self.custom_canvas.set_hdmi_size(cw, ch)
+            self.custom_canvas.set_background_color(self.custom_background_color)
+            self.custom_canvas.set_elements(self.custom_elements)
+        if getattr(self, "custom_resolution_label", None) is not None:
+            self.custom_resolution_label.setText(f"{cw}×{ch}")
+        self._rebuild_custom_screens_bar()
+        self._sync_custom_screen_props()
 
         self.theme_path = path
 
@@ -2897,6 +4762,15 @@ class ThemeEditorWindow(QMainWindow):
         if isinstance(dw, int) and isinstance(dh, int) and dw > 0 and dh > 0:
             self._apply_vertical_mode(dh > dw)
 
+        # --- Origen remoto (proyecto Lite) ---
+        lite_dat = data.get("lite")
+        if isinstance(lite_dat, dict) and lite_dat.get("url"):
+            base = normalize_lite_url(lite_dat.get("url"), lite_dat.get("port"))
+            token = (settings.get_setting("lite_tokens", {}) or {}).get(base, "")
+            self.setup_lite_source(lite_dat, token, lite_dat.get("name"))
+        else:
+            self.clear_lite_source()
+
         # --- Targets ---
         targets = data.get("targets")
         if isinstance(targets, dict):
@@ -2905,6 +4779,7 @@ class ThemeEditorWindow(QMainWindow):
                 "lcd": bool(targets.get("lcd", True)),
                 "dmd": bool(targets.get("dmd", False)),
                 "hdmi": bool(targets.get("hdmi", False)),
+                "custom": bool(targets.get("custom", False)),
             }
         elif isinstance(targets, list):
             target_data = {
@@ -2912,12 +4787,19 @@ class ThemeEditorWindow(QMainWindow):
                 "lcd": "lcd" in targets,
                 "dmd": "dmd" in targets,
                 "hdmi": "hdmi" in targets,
+                "custom": "custom" in targets,
             }
         else:
             target_data = {"web": True, "lcd": True, "dmd": False,
-                           "hdmi": False}
+                           "hdmi": False, "custom": False}
         self.apply_targets(target_data, data.get("lcd_model"),
-                           data.get("dmd_config"), data.get("hdmi_config"))
+                           data.get("dmd_config"), data.get("hdmi_config"),
+                           data.get("custom_config"))
+
+        # Canvas custom del proyecto solo-Web (si el tema lo definió).
+        web_dat = data.get("web") or {}
+        if web_dat.get("width") and web_dat.get("height"):
+            self.set_web_canvas_size(web_dat.get("width"), web_dat.get("height"))
 
         if settings.get_setting("load_at_startup", False):
             settings.set_setting("startup_theme_path", path)
@@ -2938,43 +4820,98 @@ class ThemeEditorWindow(QMainWindow):
         if path:
             self._save_to_path(path)
 
+    def _build_theme_data(self):
+        """Serializa el tema actual al mismo formato que se guarda en disco.
+
+        Lo usa Save/Save As. `Publish to ThermalEngineLite` envía este tema
+        completo (traduciendo las fuentes ``lite.*`` a ids base con
+        :func:`translate_theme_sources_for_lite`) y, como fallback para Lites
+        antiguos, una versión saneada con :func:`build_lite_theme_payload`.
+        """
+        lcd_w = DISPLAY_HEIGHT if self._vertical_mode else DISPLAY_WIDTH
+        lcd_h = DISPLAY_WIDTH if self._vertical_mode else DISPLAY_HEIGHT
+        dmd_w = self.dmd_canvas.dmd_width if self.dmd_canvas else 128
+        dmd_h = self.dmd_canvas.dmd_height if self.dmd_canvas else 32
+        hdmi_w = self.hdmi_canvas.hdmi_width if self.hdmi_canvas else 1920
+        hdmi_h = self.hdmi_canvas.hdmi_height if self.hdmi_canvas else 1080
+        custom_w = self.custom_canvas.hdmi_width if self.custom_canvas else 1280
+        custom_h = self.custom_canvas.hdmi_height if self.custom_canvas else 800
+
+        data = {
+            "name": self.theme_name,
+            "targets": dict(self.project_targets),
+            "lcd_model": self.project_lcd_id,
+            "dmd_config": (self.project_dmd_config
+                           if self.project_targets.get("dmd") else None),
+            "hdmi_config": (self.project_hdmi_config
+                            if self.project_targets.get("hdmi") else None),
+            "custom_config": (self.project_custom_config
+                              if self.project_targets.get("custom") else None),
+            "lcd": {
+                "background_color": self.lcd_background_color,
+                "display_width": lcd_w,
+                "display_height": lcd_h,
+                "elements": [e.to_dict() for e in self.lcd_elements],
+            },
+            "dmd": {
+                "width": dmd_w,
+                "height": dmd_h,
+                "loop": True,
+                "transitions_enabled": bool(self.dmd_transitions_enabled),
+                "defaults": {
+                    "duration_s": self.dmd_default_duration_s,
+                    "transition": self.dmd_default_transition,
+                    "transition_ms": self.dmd_default_transition_ms,
+                },
+                "screens": [s.to_dict() for s in self.dmd_screens],
+            },
+            "hdmi": {
+                "background_color": self.hdmi_background_color,
+                "width": hdmi_w,
+                "height": hdmi_h,
+                "transitions_enabled": bool(self.hdmi_transitions_enabled),
+                "defaults": {
+                    "duration_s": self.hdmi_default_duration_s,
+                    "transition": self.hdmi_default_transition,
+                    "transition_ms": self.hdmi_default_transition_ms,
+                },
+                "screens": [s.to_dict() for s in self.hdmi_screens],
+                # Compatibilidad: elementos de la pantalla activa.
+                "elements": [e.to_dict() for e in self.hdmi_elements],
+            },
+            "custom": {
+                "background_color": self.custom_background_color,
+                "width": custom_w,
+                "height": custom_h,
+                "transitions_enabled": bool(self.custom_transitions_enabled),
+                "defaults": {
+                    "duration_s": self.custom_default_duration_s,
+                    "transition": self.custom_default_transition,
+                    "transition_ms": self.custom_default_transition_ms,
+                },
+                "screens": [s.to_dict() for s in self.custom_screens],
+                "elements": [e.to_dict() for e in self.custom_elements],
+            },
+            "web": {
+                "source": getattr(self, "web_source", "auto"),
+                **({"width": self._web_canvas_size[0],
+                    "height": self._web_canvas_size[1]}
+                   if getattr(self, "_web_canvas_size", None) else {}),
+            },
+        }
+        # Origen remoto del proyecto Lite (URL/nombre; el token no se incrusta
+        # en el tema por seguridad, se guarda en settings.json).
+        if self._lite_project and self._lite_url:
+            data["lite"] = {
+                "url": self._lite_url,
+                "port": port_from_url(self._lite_url),
+                "name": self._lite_name,
+            }
+        return data
+
     def _save_to_path(self, path):
         try:
-            lcd_w = DISPLAY_HEIGHT if self._vertical_mode else DISPLAY_WIDTH
-            lcd_h = DISPLAY_WIDTH if self._vertical_mode else DISPLAY_HEIGHT
-            dmd_w = self.dmd_canvas.dmd_width if self.dmd_canvas else 128
-            dmd_h = self.dmd_canvas.dmd_height if self.dmd_canvas else 32
-            hdmi_w = self.hdmi_canvas.hdmi_width if self.hdmi_canvas else 1920
-            hdmi_h = self.hdmi_canvas.hdmi_height if self.hdmi_canvas else 1080
-
-            data = {
-                "name": self.theme_name,
-                "targets": dict(self.project_targets),
-                "lcd_model": self.project_lcd_id,
-                "dmd_config": (self.project_dmd_config
-                               if self.project_targets.get("dmd") else None),
-                "hdmi_config": (self.project_hdmi_config
-                                if self.project_targets.get("hdmi") else None),
-                "lcd": {
-                    "background_color": self.lcd_background_color,
-                    "display_width": lcd_w,
-                    "display_height": lcd_h,
-                    "elements": [e.to_dict() for e in self.lcd_elements],
-                    "video_background": video_background.to_dict(),
-                },
-                "dmd": {
-                    "background_color": self.dmd_background_color,
-                    "width": dmd_w,
-                    "height": dmd_h,
-                    "elements": [e.to_dict() for e in self.dmd_elements],
-                },
-                "hdmi": {
-                    "background_color": self.hdmi_background_color,
-                    "width": hdmi_w,
-                    "height": hdmi_h,
-                    "elements": [e.to_dict() for e in self.hdmi_elements],
-                },
-            }
+            data = self._build_theme_data()
 
             with open(path, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -2986,6 +4923,107 @@ class ThemeEditorWindow(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save theme:\n{e}")
+
+    def publish_to_lite(self):
+        """Publica el tema actual en un ThermalEngineLite remoto (POST /theme)."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Publish to ThermalEngineLite")
+        dialog.setMinimumWidth(480)
+
+        layout = QVBoxLayout(dialog)
+
+        info = QLabel(
+            "Send the current theme to a ThermalEngineLite instance.\n"
+            "The device must expose POST /theme (its webserver)."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QFormLayout()
+        default_url = self._lite_url or settings.get_setting(
+            "lite_publish_url", "") or ""
+        tokens = settings.get_setting("lite_tokens", {}) or {}
+        default_token = tokens.get(self._lite_url, "") if self._lite_url else ""
+        if not default_token:
+            default_token = settings.get_setting("lite_publish_token", "") or ""
+        url_edit = QLineEdit(default_url)
+        url_edit.setPlaceholderText("http://terminal.local:4241")
+        token_edit = QLineEdit(default_token)
+        token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        token_edit.setPlaceholderText("(optional, device web_token)")
+        form.addRow("URL:", url_edit)
+        form.addRow("Token:", token_edit)
+        layout.addLayout(form)
+
+        status_label = QLabel("")
+        status_label.setWordWrap(True)
+        status_label.setStyleSheet("color: #888;")
+        layout.addWidget(status_label)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        publish_btn = QPushButton("Publish")
+        close_btn = QPushButton("Close")
+        buttons.addWidget(publish_btn)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        close_btn.clicked.connect(dialog.reject)
+
+        emitter = _PublishEmitter()
+
+        def on_done(ok, message):
+            status_label.setText(message)
+            status_label.setStyleSheet(
+                "color: #4caf50;" if ok else "color: #ff6b6b;")
+            publish_btn.setEnabled(True)
+            if ok:
+                settings.set_setting("lite_publish_url", url_edit.text().strip())
+                settings.set_setting("lite_publish_token", token_edit.text().strip())
+
+        emitter.done.connect(on_done)
+
+        def do_publish():
+            url = url_edit.text().strip()
+            if not url:
+                status_label.setStyleSheet("color: #ff6b6b;")
+                status_label.setText("Enter the Lite URL first.")
+                return
+            publish_btn.setEnabled(False)
+            status_label.setStyleSheet("color: #888;")
+            status_label.setText("Publishing...")
+            # Tema completo (traduciendo fuentes lite.* -> ids base) y, por si el
+            # servidor es un Lite antiguo, una versión saneada de fallback.
+            data = translate_theme_sources_for_lite(self._build_theme_data())
+            fallback = build_lite_theme_payload(data)
+            threading.Thread(
+                target=_publish_theme_http,
+                args=(emitter, url, token_edit.text().strip(), data, fallback),
+                daemon=True,
+            ).start()
+
+        publish_btn.clicked.connect(do_publish)
+        url_edit.returnPressed.connect(do_publish)
+
+        dialog.exec()
+
+    def _sync_element_values(self, elements, sensor_data):
+        """Actualiza los valores de los elementos desde ``sensor_data``.
+
+        Además de ``element.value`` (fuente principal), rellena
+        ``element.panel_values`` para los elementos multi-fuente (``sources``),
+        como el Disk Element.
+        """
+        for element in elements:
+            source = getattr(element, "source", "static")
+            if source != "static" and source in sensor_data:
+                element.value = sensor_data[source]
+            sources = getattr(element, "sources", None)
+            if sources:
+                current = getattr(element, "panel_values", None) or {}
+                element.panel_values = {
+                    s: sensor_data.get(s, current.get(s, 0)) for s in sources
+                }
 
     def get_sensor_data(self):
         """Get sensor data from background threads (non-blocking)."""
@@ -3005,7 +5043,10 @@ class ThemeEditorWindow(QMainWindow):
             'gpu_clock': 0,
             'gpu_memory_percent': 0,
             'gpu_memory_clock': 0,
+            'gpu_memory_used': 0,
             'gpu_power': 0,
+            'gpu_fan': 0,
+            'gpu_fan_percent': 0,
             # RAM
             'ram_percent': psutil_data['ram_percent'],
             'ram_used': psutil_data['ram_used'],
@@ -3013,6 +5054,17 @@ class ThemeEditorWindow(QMainWindow):
             # Network
             'net_upload': psutil_data['net_upload'],
             'net_download': psutil_data['net_download'],
+            # Storage
+            'disk_read': psutil_data['disk_read'],
+            'disk_write': psutil_data['disk_write'],
+            # Fans / FPS / System
+            'cpu_fan': 0,
+            'sys_fan': 0,
+            'pump': 0,
+            'game_fps': 0,
+            'nvme_temp': 0,
+            'mainboard_temp': 0,
+            'uptime': psutil_data['uptime'],
         }
 
         # Get HWiNFO sensor data from background thread (non-blocking)
@@ -3040,8 +5092,22 @@ class ThemeEditorWindow(QMainWindow):
                         data['gpu_memory_clock'] = hwinfo_data['gpu_memory_clock']
                     if hwinfo_data.get('gpu_power', 0) > 0:
                         data['gpu_power'] = hwinfo_data['gpu_power']
+                    # Ventiladores, FPS, VRAM usada y temperaturas auxiliares
+                    for key in ('gpu_memory_used', 'gpu_fan', 'gpu_fan_percent',
+                                'cpu_fan', 'sys_fan', 'pump', 'game_fps',
+                                'nvme_temp', 'mainboard_temp'):
+                        value = hwinfo_data.get(key, 0)
+                        if value:
+                            data[key] = value
             except Exception as e:
                 print(f"HWiNFO sensor read error: {e}")
+
+        # Fuentes de los plugins activos (Lite, Home Assistant, ...). Fusion por
+        # `update` con ids propios (lite.*, ha.*): nunca pisa las claves del PC.
+        data.update(plugins.merged_values())
+
+        # Discos (espacio y E/S) por montaje: sensor por defecto, sin configurar.
+        data.update(disks.disk_values())
 
         return data
 
@@ -3248,15 +5314,13 @@ class ThemeEditorWindow(QMainWindow):
         if fps == 60 and not settings.get_setting("suppress_60fps_warning", False):
             if not self._show_60fps_warning():
                 # User declined - revert to previous FPS selection
-                for action in self.fps_actions:
-                    action.setChecked(action.text() == f"{self.target_fps} FPS")
+                self._sync_lcd_fps_actions()
                 return
 
         self.target_fps = fps
         settings.set_setting("target_fps", fps)  # Persist across relaunches
 
-        for action in self.fps_actions:
-            action.setChecked(action.text() == f"{fps} FPS")
+        self._sync_lcd_fps_actions()
 
         if self.live_preview_timer and self.live_preview_timer.isActive():
             interval = 1000 // self.target_fps
@@ -3264,6 +5328,10 @@ class ThemeEditorWindow(QMainWindow):
 
         self._update_delivery_state()
         self.status_bar.showMessage(f"Frame rate set to {fps} FPS")
+
+    def _sync_lcd_fps_actions(self):
+        for action in getattr(self, "lcd_fps_actions", []):
+            action.setChecked(action.text() == f"{self.target_fps} FPS")
 
     def _show_60fps_warning(self):
         """Show warning dialog for 60 FPS mode. Returns True if user accepts."""
@@ -3327,7 +5395,7 @@ class ThemeEditorWindow(QMainWindow):
         Se llama al conectar y al desconectar; con self.device None restaura el
         comportamiento legado.
         """
-        if not hasattr(self, "fps_menu"):
+        if not hasattr(self, "display_menu"):
             return
 
         # Clamp: si el target_fps persistido no existe en este device (p.ej. 20 y
@@ -3339,28 +5407,101 @@ class ThemeEditorWindow(QMainWindow):
                     resolved = min(options, key=lambda f: abs(f - self.target_fps))
                     self.set_target_fps(resolved)
 
-        self._rebuild_frame_rate_menu()
+        self._rebuild_display_menu()
         self._update_delivery_state()
 
-    def _rebuild_frame_rate_menu(self):
-        """Reconstruye las opciones del submenú Frame Rate a partir de las
-        capacidades del device conectado (legado 10/20/30/60 sin device)."""
-        fps_menu = self.fps_menu
-        fps_menu.clear()
-        self.fps_actions = []
-        if self.device is not None:
-            options = getattr(self.device, "frame_rate_options", None)
-        else:
+    def _rebuild_display_menu(self):
+        """Reconstruye los submenús de dispositivos activos (LCD/DMD/HDMI) con su
+        frame rate específico."""
+        display_menu = getattr(self, "display_menu", None)
+        if display_menu is None:
+            return
+
+        # Quitar submenús previos.
+        for menu in self.device_menus:
+            display_menu.removeAction(menu.menuAction())
+            menu.deleteLater()
+        self.device_menus = []
+        self.lcd_fps_actions = []
+
+        targets = getattr(self, "project_targets", {}) or {}
+
+        # --- LCD ---
+        if targets.get("lcd"):
+            submenu = QMenu("LCD", self)
             options = None
-        for fps in options or [10, 20, 30, 60]:
-            action = QAction(f"{fps} FPS", self)
-            action.setCheckable(True)
-            action.setChecked(fps == self.target_fps)
-            action.triggered.connect(lambda checked, f=fps: self.set_target_fps(f))
-            fps_menu.addAction(action)
-            self.fps_actions.append(action)
-        fps_menu.addSeparator()
-        fps_menu.addAction(self.overdrive_action)
+            if self.device is not None:
+                options = getattr(self.device, "frame_rate_options", None)
+            for fps in options or [10, 20, 30, 60]:
+                action = QAction(f"{fps} FPS", self)
+                action.setCheckable(True)
+                action.setChecked(fps == self.target_fps)
+                action.triggered.connect(lambda checked=False, f=fps: self.set_target_fps(f))
+                submenu.addAction(action)
+                self.lcd_fps_actions.append(action)
+            submenu.addSeparator()
+            submenu.addAction(self.overdrive_action)
+            display_menu.insertMenu(self._display_sep, submenu)
+            self.device_menus.append(submenu)
+        else:
+            # Overdrive no tiene cabida en LCD; se ofrece en el menú raíz.
+            display_menu.insertAction(self._display_sep, self.overdrive_action)
+
+        # --- DMD ---
+        if targets.get("dmd"):
+            config = self.project_dmd_config or {}
+            options = [12]
+            model = get_dmd(config.get("model_id"))
+            if model is not None:
+                options = model.base_rates or [model.fps]
+            current = int(config.get("fps", 12))
+            submenu = QMenu("DMD", self)
+            for fps in options:
+                action = QAction(f"{fps} FPS", self)
+                action.setCheckable(True)
+                action.setChecked(fps == current)
+                action.triggered.connect(lambda checked=False, f=fps: self.set_dmd_fps(f))
+                submenu.addAction(action)
+            display_menu.insertMenu(self._display_sep, submenu)
+            self.device_menus.append(submenu)
+
+        # --- HDMI ---
+        if targets.get("hdmi"):
+            current = int((self.project_hdmi_config or {}).get("fps", 30) or 30)
+            submenu = QMenu("HDMI", self)
+            for fps in (24, 30, 60):
+                action = QAction(f"{fps} FPS", self)
+                action.setCheckable(True)
+                action.setChecked(fps == current)
+                action.triggered.connect(lambda checked=False, f=fps: self.set_hdmi_fps(f))
+                submenu.addAction(action)
+            display_menu.insertMenu(self._display_sep, submenu)
+            self.device_menus.append(submenu)
+
+    def set_dmd_fps(self, fps):
+        """Cambia el frame rate del stream DMD (reinicia el sender)."""
+        self.project_dmd_config = dict(self.project_dmd_config or {})
+        self.project_dmd_config["fps"] = int(fps)
+        settings.set_setting("dmd_config", self.project_dmd_config)
+        if self.dmd_sender is not None:
+            self._stop_dmd_loop()
+            self._configure_dmd_sender(self.project_dmd_config, restart=True)
+            if self._dmd_output_enabled:
+                self._start_dmd_loop()
+        self._rebuild_display_menu()
+        self.status_bar.showMessage(f"DMD frame rate: {fps} FPS")
+
+    def set_hdmi_fps(self, fps):
+        """Cambia el frame rate de la salida HDMI."""
+        self.project_hdmi_config = dict(self.project_hdmi_config or {})
+        self.project_hdmi_config["fps"] = int(fps)
+        settings.set_setting("hdmi_config", self.project_hdmi_config)
+        if self.hdmi_send_timer is not None:
+            self._stop_hdmi_loop()
+            if self._hdmi_output_enabled:
+                self._start_hdmi_loop()
+        self._rebuild_display_menu()
+        self.status_bar.showMessage(f"HDMI frame rate: {fps} FPS")
 
     def _update_delivery_state(self):
         """Decide si la ruta de envío es la 'alta' (hilo dedicado) y el
@@ -3539,15 +5680,7 @@ class ThemeEditorWindow(QMainWindow):
 
             def tick():
                 try:
-                    # Update sensor-driven values first
-                    sensor_data = self.get_sensor_data()
-                    for element in self.lcd_elements:
-                        if element.source != 'static' and element.source in sensor_data:
-                            element.value = sensor_data[element.source]
-
-                    img = self.render_theme_image()
-                    jpeg = self.image_to_jpeg(img, quality=80)
-                    self._last_jpeg_data = jpeg
+                    self._update_web_jpeg_cache()
                 except Exception:
                     # Don't let cache timer exceptions crash the GUI
                     pass
@@ -3581,9 +5714,7 @@ class ThemeEditorWindow(QMainWindow):
                 if self.device and (self._overdrive_mode or self._fast_delivery):
                     # Update sensor values
                     sensor_data = self.get_sensor_data()
-                    for element in self.lcd_elements:
-                        if element.source != "static" and element.source in sensor_data:
-                            element.value = sensor_data[element.source]
+                    self._sync_element_values(self.lcd_elements, sensor_data)
 
                     # Skip re-render/re-encode entirely if nothing that affects the
                     # frame has actually changed since the last one (big CPU saver).
@@ -3705,9 +5836,7 @@ class ThemeEditorWindow(QMainWindow):
                 else:
                     # Fallback to direct render if buffer empty
                     sensor_data = self.get_sensor_data()
-                    for element in self.lcd_elements:
-                        if element.source != "static" and element.source in sensor_data:
-                            element.value = sensor_data[element.source]
+                    self._sync_element_values(self.lcd_elements, sensor_data)
                     img = self.render_theme_image()
                     jpeg_data = self.image_to_jpeg(img)
                     self.send_jpeg_frame(jpeg_data)
@@ -3717,10 +5846,7 @@ class ThemeEditorWindow(QMainWindow):
             else:
                 # Standard mode - direct render and send
                 sensor_data = self.get_sensor_data()
-
-                for element in self.lcd_elements:
-                    if element.source != "static" and element.source in sensor_data:
-                        element.value = sensor_data[element.source]
+                self._sync_element_values(self.lcd_elements, sensor_data)
 
                 # Skip re-render/re-encode if nothing changed since the last frame
                 signature = self._compute_frame_signature(sensor_data)
@@ -3752,26 +5878,7 @@ class ThemeEditorWindow(QMainWindow):
                 self.status_bar.showMessage(f"Error: {e}")
 
     # ── Fuentes DMD ─────────────────────────────────────────────────────
-    DMD_FONT_PATHS = [
-        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
-                      "MatrixSansPrint-Regular.ttf"),
-        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
-                      "MatrixSansScreen-Regular.ttf"),
-        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
-                      "MatrixSans-Regular.ttf"),
-        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
-                      "PixelOperator.ttf"),
-        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
-                      "Tiny5-Regular.ttf"),
-        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
-                      "Silkscreen-Regular.ttf"),
-        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
-                      "PressStart2P-Regular.ttf"),
-        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
-                      "Micro5-Regular.ttf"),
-        os.path.join(os.path.dirname(__file__), "assets", "fonts", "ttf",
-                      "VT323-Regular.ttf"),
-    ]
+    DMD_FONT_PATHS = _bundled_font_paths()
 
     def _load_dmd_fonts(self):
         from PySide6.QtGui import QFontDatabase
@@ -3808,6 +5915,7 @@ class ThemeEditorWindow(QMainWindow):
             ]
         else:  # Linux
             return [
+                _BUNDLED_FONT_DIR,             # fuentes empaquetadas
                 '/usr/share/fonts',            # Fedora/Bazzite: fuentes en subcarpetas
                 '/usr/share/fonts/truetype',   # Debian/Ubuntu
                 '/usr/share/fonts/TTF',        # Arch
@@ -3875,6 +5983,10 @@ class ThemeEditorWindow(QMainWindow):
 
     def _get_default_font_path(self):
         """Get a default fallback font path for the current platform."""
+        for name in ("LiberationMono-Regular.ttf", "LiberationSans-Regular.ttf"):
+            candidate = os.path.join(_BUNDLED_FONT_DIR, name)
+            if os.path.exists(candidate):
+                return candidate
         if sys.platform == "win32":
             font_dir = os.path.join(os.environ.get('WINDIR', 'C:\\Windows'), 'Fonts')
             for name in ['arial.ttf', 'segoeui.ttf', 'tahoma.ttf']:
@@ -3903,8 +6015,15 @@ class ThemeEditorWindow(QMainWindow):
         return None
 
     def get_font_path(self, font_family, bold=False, italic=False):
+        # 1) Fuentes empaquetadas (portables): mapa familia -> TTF.
+        bundled = _resolve_bundled_font(font_family, bold, italic)
+        if bundled:
+            return bundled
+        # 2) Fuentes del sistema (con alias).
         font_dirs = self._get_font_dirs()
         font_cache = self._build_font_cache()
+        font_family = _FONT_FAMILY_ALIASES.get(
+            (font_family or "").strip().lower().replace(" ", ""), font_family)
 
         if bold and italic:
             variants = [
@@ -3998,8 +6117,9 @@ class ThemeEditorWindow(QMainWindow):
         rendered frame's pixels. If the signature is unchanged since the last frame,
         we can skip re-rendering and re-encoding the JPEG entirely, which is the main
         source of avoidable CPU usage when sensor values are not actively changing."""
-        parts = [self._vertical_mode, video_background.enabled,
+        parts = [self._vertical_mode,
                  self._lcd_brightness, self._lcd_contrast, self._lcd_saturation]
+        has_video = False
         for element in self.lcd_elements:
             value = element.value
             # Round floats to 1 decimal so tiny sensor jitter doesn't force re-renders
@@ -4007,30 +6127,61 @@ class ThemeEditorWindow(QMainWindow):
                 value = round(value, 1)
             parts.append((element.source, value, getattr(element, "x", None),
                           getattr(element, "y", None), getattr(element, "visible", True)))
-        # Video backgrounds change every frame by nature, so never cache while active
-        if video_background.enabled:
+            if element.type == "video":
+                has_video = True
+        # A video element changes every frame by nature, so never cache while present
+        if has_video:
             parts.append(time.perf_counter())
         return tuple(parts)
+
+    def _lcd_design_size(self):
+        """Tamaño lógico del canvas LCD/Web: custom, o 1920×480 (rotado en vertical)."""
+        custom = getattr(self, "_web_canvas_size", None)
+        if custom:
+            return int(custom[0]), int(custom[1])
+        if getattr(self, "_vertical_mode", False):
+            return DISPLAY_HEIGHT, DISPLAY_WIDTH
+        return DISPLAY_WIDTH, DISPLAY_HEIGHT
+
+    def set_web_canvas_size(self, width, height):
+        """Canvas custom para un proyecto solo-Web.
+
+        El tamaño se aplica SIEMPRE al lienzo LCD/Web (``lcd_canvas``), no al
+        canvas activo: en un proyecto Lite el target activo puede ser DMD/HDMI.
+        """
+        self._web_canvas_size = (max(16, int(width)), max(16, int(height)))
+        if getattr(self, "lcd_canvas", None) is not None:
+            self.lcd_canvas.set_canvas_size(*self._web_canvas_size)
+            self.lcd_canvas.set_elements(self.lcd_elements)
+            if self._active_target == "lcd":
+                self.lcd_canvas.update()
+        self.properties_panel.set_lcd_canvas_size(*self._web_canvas_size)
+        self._web_jpeg_data = None
+
+    def clear_web_canvas_size(self):
+        """Vuelve al canvas LCD estándar (incondicional).
+
+        Se usa al cargar un tema para no arrastrar el tamaño custom de un
+        proyecto anterior (solo-Web); el tema decidirá luego si define uno.
+        """
+        self._web_canvas_size = None
+        if getattr(self, "lcd_canvas", None) is not None:
+            self.lcd_canvas.clear_canvas_size()
+            self.lcd_canvas.set_elements(self.lcd_elements)
+            if self._active_target == "lcd":
+                self.lcd_canvas.update()
+        if getattr(self, "properties_panel", None) is not None:
+            self.properties_panel.set_lcd_canvas_size(None)
+        self._web_jpeg_data = None
 
     def render_theme_image(self):
         # When vertical mode is enabled, the design is laid out on a logical
         # portrait canvas (DISPLAY_HEIGHT x DISPLAY_WIDTH, e.g. 480x1920) matching
         # how the physically-rotated panel will be viewed. This canvas is rotated
         # back to the panel's fixed physical buffer size in image_to_jpeg().
-        if getattr(self, "_vertical_mode", False):
-            canvas_w, canvas_h = DISPLAY_HEIGHT, DISPLAY_WIDTH
-        else:
-            canvas_w, canvas_h = DISPLAY_WIDTH, DISPLAY_HEIGHT
+        canvas_w, canvas_h = self._lcd_design_size()
 
-        # Use video frame as background if enabled, otherwise solid color
-        if video_background.enabled:
-            video_frame = video_background.get_frame_pil_resized((canvas_w, canvas_h))
-            if video_frame:
-                img = video_frame.copy()
-            else:
-                img = Image.new('RGBA', (canvas_w, canvas_h), color=self.lcd_background_color)
-        else:
-            img = Image.new('RGBA', (canvas_w, canvas_h), color=self.lcd_background_color)
+        img = Image.new('RGBA', (canvas_w, canvas_h), color=self.lcd_background_color)
 
         # Render in reverse order so elements at top of list appear in front
         for element in reversed(self.lcd_elements):
@@ -4038,6 +6189,60 @@ class ThemeEditorWindow(QMainWindow):
 
         # Convert back to RGB for output
         return img.convert('RGB')
+
+    def _effective_web_source(self):
+        """Fuente efectiva del webserver: "lcd", "hdmi" o "custom".
+
+        "auto" usa HDMI si el proyecto lo tiene añadido, si no Custom si existe,
+        si no LCD. Una elección explícita sin target cae a la mejor disponible.
+        """
+        source = getattr(self, "web_source", "auto") or "auto"
+        has_hdmi = bool(self.project_targets.get("hdmi"))
+        has_custom = bool(self.project_targets.get("custom"))
+        if source == "hdmi":
+            return "hdmi" if has_hdmi else ("custom" if has_custom else "lcd")
+        if source == "custom":
+            return "custom" if has_custom else ("hdmi" if has_hdmi else "lcd")
+        if source == "lcd":
+            return "lcd"
+        if has_hdmi:
+            return "hdmi"
+        return "custom" if has_custom else "lcd"
+
+    def render_hdmi_image(self):
+        """Frame del canvas HDMI a resolución nativa como imagen PIL RGB."""
+        from dmd_transitions import qimage_to_rgb_array
+
+        canvas = getattr(self, "hdmi_canvas", None)
+        if canvas is None:
+            return Image.new("RGB", (1920, 1080), "black")
+        rgb = qimage_to_rgb_array(canvas.get_frame_rgb888())
+        return Image.fromarray(rgb, "RGB")
+
+    def _update_web_jpeg_cache(self):
+        """Regenera el JPEG que sirve el webserver según la fuente configurada."""
+        source = self._effective_web_source()
+        sensor_data = self.get_sensor_data()
+        if source == "hdmi":
+            self._sync_element_values(self.hdmi_elements, sensor_data)
+            img = self.render_hdmi_image()
+            # Calidad del preview/webserver: 90 y 4:4:4 (mas nitido que 80).
+            self._web_jpeg_data = self.image_to_jpeg(
+                img, quality=90, subsampling=0,
+                apply_rotation=False, apply_tuning=False)
+            self._web_jpeg_rotated = False
+        elif source == "custom":
+            self._sync_element_values(self.custom_elements, sensor_data)
+            img = self.render_custom_image()
+            self._web_jpeg_data = self.image_to_jpeg(
+                img, quality=90, subsampling=0,
+                apply_rotation=False, apply_tuning=False)
+            self._web_jpeg_rotated = False
+        else:
+            self._sync_element_values(self.lcd_elements, sensor_data)
+            img = self.render_theme_image()
+            self._web_jpeg_data = self.image_to_jpeg(img, quality=90, subsampling=0)
+            self._web_jpeg_rotated = bool(getattr(self, "_vertical_mode", False))
 
     def render_element_with_opacity(self, img, element):
         """Render an element with opacity support using alpha compositing."""
@@ -4092,6 +6297,16 @@ class ThemeEditorWindow(QMainWindow):
             self.render_segmented_bar_rgba(img, element, color_opacity, bg_opacity)
         elif element.type == "bar_chart":
             self.render_bar_chart_rgba(img, element, color_opacity, bg_opacity)
+        elif element.type in DMD_WIDGET_TYPES:
+            self.render_dmd_widget(img, element, color_opacity)
+        elif element.type in LCD_WIDGET_TYPES:
+            self.render_lcd_widget(img, element, color_opacity)
+        elif element.type == "touch_nav":
+            self.render_touch_nav_rgba(img, element, color_opacity)
+        elif element.type == "video":
+            self.render_video_rgba(img, element)
+        elif element.type == "icon":
+            self.render_icon_rgba(img, element, color_opacity)
         elif element.type == "image":
             if element.image_path:
                 # Validate image path is safe
@@ -4924,14 +7139,106 @@ class ThemeEditorWindow(QMainWindow):
 
         img.alpha_composite(overlay)
 
-    def image_to_jpeg(self, img, quality=80, subsampling=None):
-        """Convert image to JPEG bytes with optimized settings."""
+    def render_dmd_widget(self, img, element, color_opacity):
+        """Render one of the HWMON·32 DMD widgets (PIL path)."""
+        from dmd_widgets import render_widget
+
+        width = max(1, int(element.width))
+        height = max(1, int(element.height))
+        pixels = render_widget(element.type, element, width, height)
+        if pixels.size == 0:
+            return
+        overlay = Image.fromarray(pixels, "RGBA")
+        if color_opacity < 100:
+            alpha = overlay.split()[3].point(lambda a: int(a * color_opacity / 100))
+            overlay.putalpha(alpha)
+        img.alpha_composite(overlay, (int(element.x), int(element.y)))
+
+    def render_lcd_widget(self, img, element, color_opacity):
+        """Render one of the high-resolution LCD elements (PIL path)."""
+        from lcd_widgets import render_element
+
+        width = max(1, int(element.width))
+        height = max(1, int(element.height))
+        pixels = render_element(element.type, element, width, height)
+        if pixels.size == 0:
+            return
+        overlay = Image.fromarray(pixels, "RGBA")
+        if color_opacity < 100:
+            alpha = overlay.split()[3].point(lambda a: int(a * color_opacity / 100))
+            overlay.putalpha(alpha)
+        img.alpha_composite(overlay, (int(element.x), int(element.y)))
+
+    def render_touch_nav_rgba(self, img, element, color_opacity):
+        """Render the HDMI touch-navigation widget (PIL path)."""
+        from touch_nav import render
+
+        width = max(1, int(element.width))
+        height = max(1, int(element.height))
+        pixels = render(element, width, height)
+        if pixels.size == 0:
+            return
+        overlay = Image.fromarray(pixels, "RGBA")
+        if color_opacity < 100:
+            alpha = overlay.split()[3].point(lambda a: int(a * color_opacity / 100))
+            overlay.putalpha(alpha)
+        img.alpha_composite(overlay, (int(element.x), int(element.y)))
+
+    def render_icon_rgba(self, img, element, color_opacity):
+        """Render an Icon element (PIL path) loaded from the icons/ folder."""
+        path = resolve_icon_path(getattr(element, "icon_name", ""))
+        if not path:
+            return
+        try:
+            with open(path, "rb") as handle:
+                with Image.open(handle) as opened:
+                    overlay = opened.convert("RGBA").copy()
+            if getattr(element, "tint", False):
+                r, g, b, _a = hex_to_rgba(element.color, 100)
+                solid = Image.new("RGBA", overlay.size, (r, g, b, 0))
+                solid.putalpha(overlay.split()[3])
+                overlay = solid
+            width = max(1, int(element.width))
+            height = max(1, int(element.height))
+            if element.scale_proportionally:
+                overlay.thumbnail((width, height), Image.Resampling.LANCZOS)
+            else:
+                overlay = overlay.resize((width, height), Image.Resampling.LANCZOS)
+            if color_opacity < 100:
+                alpha = overlay.split()[3].point(lambda a: int(a * color_opacity / 100))
+                overlay.putalpha(alpha)
+            img.alpha_composite(overlay, (int(element.x), int(element.y)))
+        except Exception as e:  # noqa: BLE001
+            print(f"Icon load error: {e}")
+
+    def render_video_rgba(self, img, element):
+        """Render a ``video`` element frame fitted to its rectangle."""
+        from video_background import get_video_frame
+
+        path = getattr(element, "video_path", "")
+        if not path or not os.path.exists(path):
+            return
+        frame = get_video_frame(
+            path, (max(1, int(element.width)), max(1, int(element.height))),
+            getattr(element, "video_fit_mode", "fit_height"))
+        if frame is None:
+            return
+        img.paste(frame, (int(element.x), int(element.y)), frame)
+
+    def image_to_jpeg(self, img, quality=80, subsampling=None,
+                      apply_rotation=True, apply_tuning=True):
+        """Convert image to JPEG bytes with optimized settings.
+
+        ``apply_rotation``/``apply_tuning`` permiten saltarse el giro de modo
+        vertical y la corrección de color del panel LCD cuando la imagen no va
+        destinada al panel (p. ej. la fuente HDMI del webserver).
+        """
         # Si vertical mode está activo, img se renderiza en espacio lógico
         # retrato (DISPLAY_HEIGHT x DISPLAY_WIDTH). Rótalo 90 grados para que el
         # buffer físico enviado al panel sea SIEMPRE exactamente
         # DISPLAY_WIDTH x DISPLAY_HEIGHT (resolución nativa fija del panel) - nunca
         # otro tamaño, o el firmware estira/comprime el frame y distorsiona.
-        if getattr(self, "_vertical_mode", False):
+        if apply_rotation and getattr(self, "_vertical_mode", False):
             img = img.transpose(Image.ROTATE_270)
             if img.size != (DISPLAY_WIDTH, DISPLAY_HEIGHT):
                 img = img.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT))
@@ -4939,9 +7246,9 @@ class ThemeEditorWindow(QMainWindow):
         # Color correction (brightness/contrast/saturation) to compensate for LCD
         # panels that render colors washed-out/dim compared to the design preview.
         # Values of 1.0 are a no-op, so this is skipped entirely when unused.
-        brightness = getattr(self, "_lcd_brightness", 1.0)
-        contrast = getattr(self, "_lcd_contrast", 1.0)
-        saturation = getattr(self, "_lcd_saturation", 1.0)
+        brightness = getattr(self, "_lcd_brightness", 1.0) if apply_tuning else 1.0
+        contrast = getattr(self, "_lcd_contrast", 1.0) if apply_tuning else 1.0
+        saturation = getattr(self, "_lcd_saturation", 1.0) if apply_tuning else 1.0
         if brightness != 1.0:
             img = ImageEnhance.Brightness(img).enhance(brightness)
         if contrast != 1.0:
@@ -5166,6 +7473,9 @@ class ThemeEditorWindow(QMainWindow):
         # Apagar el webserver y su caché JPEG si están activos
         self._set_webserver_state(False)
 
+        # Detener el cliente de sensores remoto (proyecto Lite)
+        self.clear_lite_source()
+
         # Cerrar la salida HDMI si estaba activa
         self._shutdown_hdmi_output()
 
@@ -5181,7 +7491,7 @@ class ThemeEditorWindow(QMainWindow):
         self._stop_render_thread()
         stop_psutil_thread()
         stop_sensors()
-        video_background.close()
+        close_all_videos()
 
     def force_quit(self):
         """Force quit the application, bypassing minimize-to-tray."""

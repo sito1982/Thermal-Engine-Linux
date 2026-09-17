@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "lcds.py"
-source_sha256: 2bccc9c0262de714e0baaa80a1f221d4801e183c30956068e7e552d928952e72
-source_bytes: 10160
-source_lines: 289
+source_sha256: 709a3f87481a1456e4a2c0822aeb5b0d9c9e30466e0e13af74f6578f1434b001
+source_bytes: 10441
+source_lines: 297
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -336,6 +336,14 @@ DEVICE_TYPES = [
                 "Se envía por TCP como RGB565.",
         badge="TCP · RGB565",
         resolutions=["128×32"],
+    ),
+    DeviceType(
+        id="custom",
+        label="Custom Canvas",
+        tagline="Lienzo libre a la resolución que elijas (sin salida física). "
+                "Útil para publicar en Lite o servir por Web.",
+        badge="Free · Free size",
+        resolutions=[],
     ),
 ]
 

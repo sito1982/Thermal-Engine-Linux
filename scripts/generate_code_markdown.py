@@ -15,7 +15,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CODE_DOCS_DIR = PROJECT_ROOT / "docs" / "codigo"
 GENERAL_INDEX = PROJECT_ROOT / "docs" / "00 - Índice.md"
-EXPECTED_SOURCE_COUNT = 30
+EXPECTED_SOURCE_COUNT = 46
 
 EXCLUDED_DIR_NAMES = {
     ".claude",

@@ -1,0 +1,12 @@
+{
+  "plugins": [
+    {
+      "id": "home_assistant",
+      "name": "Home Assistant",
+      "version": "1.0.0",
+      "description": "Expone entidades numéricas de Home Assistant como fuentes de datos (ha.*).",
+      "download_url": "https://raw.githubusercontent.com/sito1982/Thermal-Engine-Linux/main/plugins/home_assistant.py",
+      "sha256": "eea1036182c043c38c79a662f926094e940bbfe95d165b292025f434abb41fd9"
+    }
+  ]
+}

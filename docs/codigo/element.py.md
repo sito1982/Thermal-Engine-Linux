@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "element.py"
-source_sha256: 7ec490aa8788219506a584723e6e7e4fa7b021ee678565fdd272493625bc0f3f
-source_bytes: 10372
-source_lines: 200
+source_sha256: d2e3837c51c3d631f0d8fba2db85924670760bd31adead896f5ef82946d10a05
+source_bytes: 13179
+source_lines: 251
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -26,7 +26,7 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 ### Imports directos
 
-Ninguna declaración de importación directa de primer nivel.
+- `from constants import DEFAULT_FONT_FAMILY`
 
 ### Clases directas
 
@@ -42,6 +42,8 @@ Ninguna función declarada directamente en el módulo.
 """
 ThemeElement - Data model for theme elements.
 """
+
+from constants import DEFAULT_FONT_FAMILY
 
 
 class ThemeElement:
@@ -67,7 +69,7 @@ class ThemeElement:
         self.text_color_opacity = kwargs.get("text_color_opacity", 100)  # 0-100
         self.text = kwargs.get("text", "Label")
         self.font_size = kwargs.get("font_size", 32)
-        self.font_family = kwargs.get("font_family", "Arial")
+        self.font_family = kwargs.get("font_family", DEFAULT_FONT_FAMILY)
         self.font_bold = kwargs.get("font_bold", False)
         self.font_italic = kwargs.get("font_italic", False)
         self.text_align = kwargs.get("text_align", "center")
@@ -82,9 +84,17 @@ class ThemeElement:
         self.segments = kwargs.get("segments", 8)
         self.gap = kwargs.get("gap", 1)
         self.color_empty = kwargs.get("color_empty", "#1a1a2e")
+        self.target = float(kwargs.get("target", 0) or 0)
+        self.sources = list(kwargs.get("sources", []) or [])
+        # Runtime values for the DMD combined panel (source id -> value); not
+        # persisted, refreshed from sensors on every DMD tick.
+        self.panel_values = dict(kwargs.get("panel_values", {}) or {})
         self.image_path = kwargs.get("image_path", "")
         self.scale_proportionally = kwargs.get("scale_proportionally", True)
         self.aspect_ratio = kwargs.get("aspect_ratio", 1.0)
+        # Elemento Icon: se carga de la carpeta icons/ (sin selector de fichero).
+        self.icon_name = kwargs.get("icon_name", "")
+        self.tint = kwargs.get("tint", False)  # Recolorea el icono con `color`
         self.name = kwargs.get("name", f"{element_type}_{id(self)}")
 
         # Visibility: hidden elements are not rendered to the LCD/preview but can
@@ -120,11 +130,22 @@ class ThemeElement:
         self.animation_speed = kwargs.get("animation_speed", 0.05)  # Animation interpolation speed (0.02-0.15, lower=smoother)
         self.gauge_rounded_ends = kwargs.get("gauge_rounded_ends", False)  # Circle gauge: pill-shaped arc ends
 
+        # High-resolution LCD elements (ring_gauge, zone_bar, segment_bar...)
+        self.arc_span = float(kwargs.get("arc_span", 270) or 270)  # ring_gauge: degrees drawn
+        self.start_angle = float(kwargs.get("start_angle", -135) or 0)  # ring_gauge: 0 = top, clockwise
+        self.show_ticks = kwargs.get("show_ticks", False)  # ring_gauge: radial tick marks
+        self.thresholds = list(kwargs.get("thresholds", [70, 90]) or [])  # zone_bar: warn/crit
+        self.orientation = kwargs.get("orientation", "horizontal")  # "horizontal" | "vertical"
+
+        # Disk element (LCD/HDMI/Custom): barra vertical y sparklines opcionales.
+        self.bar_mode = kwargs.get("bar_mode", "free")  # "free" | "used" | "none"
+        self.show_sparklines = kwargs.get("show_sparklines", True)
+
         # Gauge label options (separate from value text)
         # Default label size: 24 for gauges, 16 for others
         default_label_font_size = 24 if element_type in ["circle_gauge", "bar_gauge"] else 16
         self.label_font_size = kwargs.get("label_font_size", default_label_font_size)
-        self.label_font_family = kwargs.get("label_font_family", "Arial")
+        self.label_font_family = kwargs.get("label_font_family", DEFAULT_FONT_FAMILY)
         self.label_font_bold = kwargs.get("label_font_bold", False)
         self.label_font_italic = kwargs.get("label_font_italic", False)
         self.label_text_color = kwargs.get("label_text_color", self.color)  # Label text color
@@ -132,6 +153,10 @@ class ThemeElement:
         # GIF options
         self.gif_path = kwargs.get("gif_path", "")
         self.scale_mode = kwargs.get("scale_mode", "fit")  # fit, fill, stretch
+
+        # Video element options
+        self.video_path = kwargs.get("video_path", "")
+        self.video_fit_mode = kwargs.get("video_fit_mode", "fit_height")
 
         # Clock time format options (for digital clock)
         self.time_format = kwargs.get("time_format", "24h")  # "24h", "12h"
@@ -151,10 +176,20 @@ class ThemeElement:
         # Interaction (HDMI touch): action executed when this element is tapped
         # on the HDMI output window. Off by default and validated/approved by the
         # app before running anything (see actions.py / security.py).
-        self.tap_action = kwargs.get("tap_action", "none")  # "none" | "command"
+        self.tap_action = kwargs.get("tap_action", "none")  # "none" | "command" | "transition"
         self.tap_command = kwargs.get("tap_command", "")
         self.tap_args = list(kwargs.get("tap_args", []) or [])
         self.tap_workdir = kwargs.get("tap_workdir", "")
+        # "screen transition": índice de pantalla destino, o "next"/"prev".
+        tap_screen = kwargs.get("tap_screen", 0)
+        if isinstance(tap_screen, str) and tap_screen in ("next", "prev"):
+            self.tap_screen = tap_screen
+        else:
+            self.tap_screen = int(tap_screen or 0)
+
+        # Widget de navegación táctil (HDMI): barra anclada a un borde con items.
+        self.nav_position = kwargs.get("nav_position", "bottom")  # bottom|top|left|right
+        self.nav_items = list(kwargs.get("nav_items", []) or [])
 
     def to_dict(self):
         return {
@@ -190,9 +225,13 @@ class ThemeElement:
             "segments": self.segments,
             "gap": self.gap,
             "color_empty": self.color_empty,
+            "target": self.target,
+            "sources": self.sources,
             "image_path": self.image_path,
             "scale_proportionally": self.scale_proportionally,
             "aspect_ratio": self.aspect_ratio,
+            "icon_name": self.icon_name,
+            "tint": self.tint,
             "show_background": self.show_background,
             "show_label": self.show_label,
             "show_gradient": self.show_gradient,
@@ -212,6 +251,13 @@ class ThemeElement:
             "animate_gauge": self.animate_gauge,
             "animation_speed": self.animation_speed,
             "gauge_rounded_ends": self.gauge_rounded_ends,
+            "arc_span": self.arc_span,
+            "start_angle": self.start_angle,
+            "show_ticks": self.show_ticks,
+            "thresholds": self.thresholds,
+            "orientation": self.orientation,
+            "bar_mode": self.bar_mode,
+            "show_sparklines": self.show_sparklines,
             "label_font_size": self.label_font_size,
             "label_font_family": self.label_font_family,
             "label_font_bold": self.label_font_bold,
@@ -219,6 +265,8 @@ class ThemeElement:
             "label_text_color": self.label_text_color,
             "gif_path": self.gif_path,
             "scale_mode": self.scale_mode,
+            "video_path": self.video_path,
+            "video_fit_mode": self.video_fit_mode,
             "time_format": self.time_format,
             "show_am_pm": self.show_am_pm,
             "show_seconds": self.show_seconds,
@@ -231,6 +279,9 @@ class ThemeElement:
             "tap_command": self.tap_command,
             "tap_args": self.tap_args,
             "tap_workdir": self.tap_workdir,
+            "tap_screen": self.tap_screen,
+            "nav_position": self.nav_position,
+            "nav_items": self.nav_items,
         }
 
     @classmethod

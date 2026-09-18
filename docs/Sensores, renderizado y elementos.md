@@ -4,12 +4,14 @@
 
 ## Sensores por plataforma
 
-[`sensors.py`](../sensors.py) es la capa de compatibilidad que selecciona el lector de sensores según plataforma:
+[`sensors.py`](../sensors.py) es la capa de compatibilidad que selecciona el lector de sensores según plataforma y preferencia, en tiempo de ejecución (`reload_backend()`):
 
-- En Windows importa el backend de [`hwinfo_reader.py`](../hwinfo_reader.py), que lee la memoria compartida de HWiNFO.
-- En otros sistemas usa [`linux_sensors.py`](../linux_sensors.py), que reúne lecturas con `psutil`, RAPL y backends para GPU NVIDIA y AMD.
+- En Windows, modo *auto*: si `hwinfo_enabled` está activo (Preferencias → Sensors) y HWiNFO está disponible, usa [`hwinfo_reader.py`](../hwinfo_reader.py) (memoria compartida, más métricas: ventiladores, consumo, placa, NVMe). Si no, usa [`windows_sensors.py`](../windows_sensors.py), el backend nativo sin privilegios (NVML para GPU, `psutil`/WMI para CPU y RTSS para FPS).
+- En Linux usa [`linux_sensors.py`](../linux_sensors.py), que reúne lecturas con `psutil`, RAPL y backends para GPU NVIDIA y AMD.
 
-La API pública de `sensors.py` mantiene nombres compatibles con HWiNFO aunque el backend activo sea Linux. `main_window.py` consume esos datos para resolver las fuentes de los elementos del tema.
+La lectura de la GPU NVIDIA se comparte entre ambos backends mediante [`nvml_backend.py`](../nvml_backend.py) (NVML, con `nvidia-smi` de reserva). [`sensor_deps.py`](../sensor_deps.py) instala en segundo plano las dependencias opcionales de Windows (`WMI`, `nvidia-ml-py`) si faltan.
+
+La API pública de `sensors.py` mantiene nombres compatibles con HWiNFO aunque el backend activo sea Linux o el nativo de Windows. `main_window.py` consume esos datos para resolver las fuentes de los elementos del tema.
 
 Las fuentes disponibles y sus propiedades predeterminadas se declaran en [`constants.py`](../constants.py). Los presets muestran fuentes tales como `cpu_temp`, `cpu_percent`, `gpu_temp`, `gpu_percent`, `ram_percent`, frecuencias y valores estáticos. Consulte [[Temas, presets y recursos]] para ejemplos almacenados.
 
@@ -44,6 +46,9 @@ La carpeta [`elements/`](../elements/) añade extensiones cargables:
 
 - `sensors.py`
 - `linux_sensors.py`
+- `windows_sensors.py`
+- `nvml_backend.py`
+- `sensor_deps.py`
 - `hwinfo_reader.py`
 - `constants.py`
 - `main_window.py`

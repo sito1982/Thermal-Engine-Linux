@@ -4593,11 +4593,17 @@ class ThemeEditorWindow(QMainWindow):
             "Theme Files (*.json);;All Files (*)"
         )
         if path:
-            try:
-                self._load_theme_file(path)
-                self.status_bar.showMessage(f"Opened: {path}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to open theme:\n{e}")
+            self.open_theme_path(path)
+
+    def open_theme_path(self, path):
+        """Carga un theme desde una ruta conocida (asociación, CLI, drag&drop)."""
+        try:
+            self._load_theme_file(path)
+            self.status_bar.showMessage(f"Opened: {path}")
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open theme:\n{e}")
+            return False
 
     def _load_theme_file(self, path):
         """Carga un theme file (formato dual lcd/dmd o legacy → solo LCD)."""
@@ -5175,18 +5181,20 @@ class ThemeEditorWindow(QMainWindow):
             except Exception as e:
                 info.append(f"  Error: {e}")
         elif sys.platform == "win32":
-            info.append("HWiNFO not connected!")
+            info.append("Sensores nativos no disponibles.")
             info.append("")
-            info.append("To enable sensor monitoring:")
-            info.append("  1. Download HWiNFO from: https://www.hwinfo.com/")
-            info.append("  2. Install and run HWiNFO")
-            info.append("  3. Go to Settings (gear icon)")
-            info.append("  4. Enable 'Shared Memory Support'")
-            info.append("  5. Click OK and run sensors")
-            info.append("  6. Restart Thermal Engine Studio")
+            info.append("El backend nativo de Windows usa NVML (GPU NVIDIA) y")
+            info.append("psutil/WMI (CPU) sin privilegios de administrador.")
+            info.append("Comprueba que:")
+            info.append("  - Hay driver NVIDIA instalado (nvidia-smi en el PATH)")
+            info.append("  - psutil está instalado (pip install psutil)")
             info.append("")
-            info.append("HWiNFO provides reliable sensor data without")
-            info.append("driver blocklist issues from Windows Defender.")
+            info.append("Para más métricas (ventiladores, consumo de CPU, placa,")
+            info.append("NVMe) activa HWiNFO en Preferencias → Sensors:")
+            info.append("  1. Descarga HWiNFO desde https://www.hwinfo.com/")
+            info.append("  2. Ejecútalo en modo 'Sensors-only'")
+            info.append("  3. Ajustes → 'Shared Memory Support' → OK")
+            info.append("  4. Míralo a la bandeja y marca 'Usar HWiNFO' en Preferencias")
         else:
             info.append("Sensores del sistema no disponibles.")
             info.append("")
@@ -7382,6 +7390,49 @@ class ThemeEditorWindow(QMainWindow):
             self.approved_actions_label.setText("Approved commands: 0")
         self.status_bar.showMessage("Approved commands cleared", 3000)
 
+    def _update_sensor_status_label(self):
+        """Refresca el estado del backend de sensores en Preferencias."""
+        label = getattr(self, "sensor_status_label", None)
+        if label is None:
+            return
+        try:
+            backend = getattr(sensors, "SENSOR_BACKEND_NAME", "?")
+            connected = bool(getattr(sensors, "HAS_HWINFO", False))
+        except Exception:
+            backend, connected = "?", False
+        try:
+            from hwinfo_reader import is_hwinfo_available
+            hwinfo = is_hwinfo_available()
+        except Exception:
+            hwinfo = False
+        label.setText(
+            f"Backend activo: {backend} "
+            f"({'conectado' if connected else 'desconectado'})\n"
+            f"HWiNFO: {'detectado' if hwinfo else 'no detectado'}"
+        )
+
+    def _check_hwinfo_from_settings(self):
+        """Comprueba si HWiNFO está disponible desde Preferencias."""
+        if sys.platform != "win32":
+            QMessageBox.information(
+                self, "HWiNFO",
+                "HWiNFO solo es necesario en Windows. En este sistema los "
+                "sensores se leen directamente del hardware.")
+            self._update_sensor_status_label()
+            return
+        from hwinfo_reader import is_hwinfo_available
+        if is_hwinfo_available():
+            QMessageBox.information(
+                self, "HWiNFO",
+                "HWiNFO detectado. Al guardar se usará como fuente de sensores.")
+        else:
+            QMessageBox.warning(
+                self, "HWiNFO",
+                "No se detectó HWiNFO.\n\n"
+                "Comprueba que está en ejecución con 'Shared Memory Support'\n"
+                "activado. El backend nativo seguirá funcionando igualmente.")
+        self._update_sensor_status_label()
+
     def show_settings(self):
         """Show the settings dialog."""
         dialog = QDialog(self)
@@ -7477,6 +7528,29 @@ class ThemeEditorWindow(QMainWindow):
 
         layout.addWidget(touch_group)
 
+        # Sensors group (preferencia de HWiNFO en Windows + estado del backend)
+        sensors_group = QGroupBox("Sensors")
+        sensors_layout = QVBoxLayout(sensors_group)
+
+        self.hwinfo_enabled_cb = QCheckBox(
+            "Usar HWiNFO si está disponible (auto)")
+        self.hwinfo_enabled_cb.setChecked(
+            settings.get_setting("hwinfo_enabled", True))
+        self.hwinfo_enabled_cb.setEnabled(sys.platform == "win32")
+        sensors_layout.addWidget(self.hwinfo_enabled_cb)
+
+        self.sensor_status_label = QLabel()
+        self.sensor_status_label.setWordWrap(True)
+        self.sensor_status_label.setStyleSheet("color: #aaa;")
+        sensors_layout.addWidget(self.sensor_status_label)
+
+        check_hwinfo_btn = QPushButton("Comprobar HWiNFO")
+        check_hwinfo_btn.clicked.connect(self._check_hwinfo_from_settings)
+        sensors_layout.addWidget(check_hwinfo_btn)
+
+        self._update_sensor_status_label()
+        layout.addWidget(sensors_group)
+
         # Buttons
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -7493,6 +7567,17 @@ class ThemeEditorWindow(QMainWindow):
             settings.set_setting("close_to_tray", self.close_to_tray_cb.isChecked())
             settings.set_setting("allow_element_actions",
                                  self.allow_actions_cb.isChecked())
+
+            # Sensor backend preference (Windows): re-seleccionar en caliente.
+            if sys.platform == "win32":
+                settings.set_setting("hwinfo_enabled",
+                                     self.hwinfo_enabled_cb.isChecked())
+                try:
+                    # init_sensors vuelve a seleccionar el backend tras parar
+                    # el hilo y desconectar el lector anterior.
+                    sensors.init_sensors()
+                except Exception as exc:
+                    print(f"[Settings] No se pudo recargar el backend de sensores: {exc}")
 
             # LCD color correction
             self._lcd_brightness = self.lcd_brightness_slider.value() / 100.0

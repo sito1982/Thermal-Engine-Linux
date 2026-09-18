@@ -5,12 +5,41 @@ Resolución configurada: 1920x480
 """
 
 import struct
+import sys
 
 import usb.core
 import usb.util
 
 LY_VID = 0x0416
 LY_PID = 0x5408
+
+IS_WINDOWS = sys.platform == "win32"
+
+
+def hid_present(vid=LY_VID, pid=LY_PID):
+    """True si el dispositivo aparece en la enumeración HID (hidapi).
+
+    En Windows el panel suele exponerse como HID; sirve para *detectarlo*
+    aunque el protocolo bulk no sea utilizable sin un driver WinUSB.
+    """
+    try:
+        import hid
+    except ImportError:
+        return False
+    try:
+        return bool(hid.enumerate(vid, pid))
+    except Exception:
+        return False
+
+
+def bulk_supported():
+    """True si el protocolo LY (USB bulk) puede usarse en esta plataforma.
+
+    En Linux funciona con pyusb/libusb. En Windows pyusb necesita un driver
+    WinUSB/libusbK que el dispositivo no trae por defecto, por lo que el modo
+    bulk no está soportado y el panel no se puede controlar por esa vía.
+    """
+    return not IS_WINDOWS
 
 HANDSHAKE_TIMEOUT_MS = 5000
 WRITE_TIMEOUT_MS = 5000
@@ -70,7 +99,14 @@ class LYDevice:
         return self.dev is not None and self.ep_out is not None
 
     def is_available(self):
-        return usb.core.find(idVendor=LY_VID, idProduct=LY_PID) is not None
+        try:
+            if usb.core.find(idVendor=LY_VID, idProduct=LY_PID) is not None:
+                return True
+        except Exception:
+            pass
+        # En Windows el panel puede aparecer como HID aunque el bulk no sea
+        # usable: al menos se detecta su presencia.
+        return IS_WINDOWS and hid_present()
 
     def open(self):
         """Abre el dispositivo y ejecuta el handshake obligatorio."""

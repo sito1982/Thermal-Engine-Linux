@@ -27,14 +27,16 @@ La guía específica de [Bazzite](../README.Bazzite.md) contiene requisitos, ins
 
 ## Windows
 
-El [README principal](../README.md) remite a:
+El [README principal](../README.md) ofrece tres vías: el **instalador** (`ThermalEngine-*-Setup.exe`, por usuario en `%LOCALAPPDATA%`), el **ZIP** portable y la instalación **desde el código** con:
 
 ```bat
 scripts\install.bat
 scripts\run.bat
 ```
 
-[`scripts/install.bat`](../scripts/install.bat) prepara un entorno virtual, instala `requirements.txt` y menciona HWiNFO con soporte de memoria compartida para datos de sensores. [`scripts/run.bat`](../scripts/run.bat) activa el entorno si está disponible y ejecuta [`main.py`](../main.py).
+El instalador se genera con Inno Setup ([`installer.iss`](../installer.iss)) a partir del *standalone* de Nuitka, tanto en CI ([`.github/workflows/release.yml`](../.github/workflows/release.yml)) como en local ([`scripts/build-local.ps1`](../scripts/build-local.ps1), con firma Authenticode opcional vía `-CertPfx`). Instala accesos directos, desinstalador, la opción de **“Abrir con Thermal Engine Studio”** en el menú contextual de los `.json` (que `main.py` atiende como argumento posicional) y, opcionalmente, una regla de Firewall para el servidor web. Conserva `presets/`, `elements/`, `icons/` y `settings.json` del usuario al actualizar.
+
+[`scripts/install.bat`](../scripts/install.bat) prepara un entorno virtual e instala `requirements.txt`; los sensores funcionan de forma nativa (NVML + `psutil`/WMI) y HWiNFO queda como opción. [`scripts/run.bat`](../scripts/run.bat) activa el entorno si está disponible y ejecuta [`main.py`](../main.py).
 
 La selección del backend de sensores y el comportamiento de autoinicio se describen en [[Sensores, renderizado y elementos]] y [[Configuración, seguridad y mantenimiento]].
 
@@ -56,5 +58,8 @@ La comunicación con la pantalla depende del dispositivo y de sus permisos. Ante
 - `scripts/run-linux.sh`
 - `scripts/install.bat`
 - `scripts/run.bat`
+- `scripts/build-local.ps1`
+- `installer.iss`
+- `.github/workflows/release.yml`
 - `diag_ly.py`
 - `main.py`

@@ -26,17 +26,18 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+import settings
 from app_path import get_app_dir
 from main_window import ThemeEditorWindow
 from sensors import HAS_HWINFO, init_sensors
 
 
 class HWiNFOSetupDialog(QDialog):
-    """Dialog to help users set up HWiNFO for sensor monitoring."""
+    """Optional dialog to enable HWiNFO for extra sensor data on Windows."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Sensor Setup Required")
+        self.setWindowTitle("Sensores (opcional)")
         self.setMinimumWidth(500)
         self.setup_ui()
 
@@ -45,7 +46,7 @@ class HWiNFOSetupDialog(QDialog):
         layout.setSpacing(15)
 
         # Title
-        title = QLabel("HWiNFO Required for Sensor Data")
+        title = QLabel("HWiNFO (opcional) para sensores adicionales")
         title_font = QFont()
         title_font.setPointSize(14)
         title_font.setBold(True)
@@ -54,21 +55,22 @@ class HWiNFOSetupDialog(QDialog):
 
         # Explanation
         explanation = QLabel(
-            "Thermal Engine Studio uses HWiNFO to read CPU and GPU sensor data.\n"
-            "HWiNFO is a free, trusted hardware monitoring tool used by\n"
-            "millions of users worldwide."
+            "Thermal Engine Studio lee la GPU (NVML) y la CPU (psutil/WMI) de\n"
+            "forma nativa, sin necesidad de HWiNFO. Si además instalas HWiNFO\n"
+            "obtendrás ventiladores, consumo de CPU, placa base y NVMe.\n"
+            "HWiNFO es gratuito y se usa sin privilegios de administrador."
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
 
         # Download button
-        download_btn = QPushButton("Download HWiNFO (Free)")
+        download_btn = QPushButton("Descargar HWiNFO (gratis)")
         download_btn.setMinimumHeight(40)
         download_btn.clicked.connect(self.open_download_page)
         layout.addWidget(download_btn)
 
         # Setup instructions
-        instructions_title = QLabel("After installing HWiNFO:")
+        instructions_title = QLabel("Tras instalar HWiNFO:")
         instructions_title.setStyleSheet("font-weight: bold; margin-top: 10px;")
         layout.addWidget(instructions_title)
 
@@ -84,8 +86,8 @@ class HWiNFOSetupDialog(QDialog):
 
         # Tip
         tip = QLabel(
-            "Tip: Configure HWiNFO to start with Windows and minimize to tray\n"
-            "for a seamless experience."
+            "Consejo: activa HWiNFO al arrancar Windows y minimízalo a la\n"
+            "bandeja para que los sensores estén siempre disponibles."
         )
         tip.setStyleSheet("color: #888; font-style: italic; margin-top: 10px;")
         tip.setWordWrap(True)
@@ -94,11 +96,11 @@ class HWiNFOSetupDialog(QDialog):
         # Buttons
         button_layout = QHBoxLayout()
 
-        check_again_btn = QPushButton("Check Again")
+        check_again_btn = QPushButton("Comprobar de nuevo")
         check_again_btn.clicked.connect(self.check_again)
         button_layout.addWidget(check_again_btn)
 
-        continue_btn = QPushButton("Continue Without Sensors")
+        continue_btn = QPushButton("Continuar con sensores nativos")
         continue_btn.clicked.connect(self.accept)
         button_layout.addWidget(continue_btn)
 
@@ -115,17 +117,17 @@ class HWiNFOSetupDialog(QDialog):
         if is_hwinfo_available():
             QMessageBox.information(
                 self,
-                "HWiNFO Detected",
-                "HWiNFO is now connected! Sensor data will be available."
+                "HWiNFO detectado",
+                "HWiNFO está conectado: se usarán sus sensores (más métricas)."
             )
             self.accept()
         else:
             QMessageBox.warning(
                 self,
-                "HWiNFO Not Found",
-                "HWiNFO shared memory not detected.\n\n"
-                "Make sure HWiNFO is running and 'Shared Memory Support'\n"
-                "is enabled in Settings."
+                "HWiNFO no encontrado",
+                "No se detectó la memoria compartida de HWiNFO.\n\n"
+                "Comprueba que HWiNFO está en ejecución y que 'Shared Memory\n"
+                "Support' está activado en sus ajustes."
             )
 
 
@@ -161,6 +163,8 @@ def main():
     parser = argparse.ArgumentParser(description='Thermal Engine Studio')
     parser.add_argument('--minimized', action='store_true', help='Start minimized to system tray')
     parser.add_argument('--port', type=int, default=4241, help='Port for the web server (default: 4241)')
+    parser.add_argument('theme', nargs='?',
+                        help='Ruta a un theme .json a abrir (asociación "Abrir con")')
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
@@ -184,13 +188,14 @@ def main():
     palette.setColor(palette.ColorRole.HighlightedText, QColor(255, 255, 255))
     app.setPalette(palette)
 
-    # Initialize sensors (uses HWiNFO shared memory)
+    # Initialize sensors (auto: HWiNFO si está disponible, si no backend nativo).
     init_sensors()
 
-    # Show HWiNFO setup dialog if not connected (skip if minimized/auto-start).
-    # HWiNFO only exists on Windows; on Linux los sensores se leen directamente
-    # del sistema (psutil + NVML), así que no se muestra este diálogo.
-    if sys.platform == "win32" and not HAS_HWINFO and not args.minimized:
+    # En Windows, si HWiNFO está activado en Preferencias pero no disponible,
+    # se ofrece activarlo (opcional: el backend nativo ya funciona sin él).
+    if (sys.platform == "win32" and not HAS_HWINFO
+            and settings.get_setting("hwinfo_enabled", True)
+            and not args.minimized):
         dialog = HWiNFOSetupDialog()
         dialog.exec()
         # Re-initialize sensors in case user set up HWiNFO
@@ -198,6 +203,10 @@ def main():
 
     # Create main window
     window = ThemeEditorWindow(port=args.port)
+
+    # "Abrir con" / arrastrar sobre el ejecutable: abrir el theme indicado.
+    if args.theme and os.path.exists(args.theme):
+        window.open_theme_path(args.theme)
 
     # NOTA: el webserver ya no se arranca aquí de forma incondicional. Se
     # levanta bajo demanda desde la ventana cuando el proyecto activo tiene

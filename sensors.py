@@ -1,13 +1,17 @@
 """
 Monitorización de sensores multiplataforma.
 
-- En Windows: usa la memoria compartida de HWiNFO (hwinfo_reader).
 - En Linux (p. ej. Bazzite): lee los sensores del sistema (linux_sensors):
   psutil + RAPL para la CPU y NVML/nvidia-smi para la GPU NVIDIA.
+- En Windows: modo *auto*. Si el usuario tiene HWiNFO activado en Preferencias
+  y está disponible (memoria compartida), se usa ``hwinfo_reader`` porque
+  ofrece más métricas (ventiladores, consumo, placa). Si no, se usa el backend
+  nativo sin privilegios ``windows_sensors`` (NVML + psutil + WMI, best-effort).
 
 El resto de la aplicación usa siempre las mismas funciones
 (`is_hwinfo_available`, `get_hwinfo_sensors`, `HAS_HWINFO`, ...), sin importar
-el sistema operativo, por lo que este módulo elige el backend adecuado.
+el sistema operativo ni el backend elegido: este módulo los abstrae y permite
+re-seleccionar el backend en caliente con ``reload_backend()``.
 """
 
 import sys
@@ -15,30 +19,105 @@ import threading
 import time
 
 IS_WINDOWS = sys.platform == "win32"
+IS_LINUX = sys.platform.startswith("linux")
 
-# Selección del backend de sensores según el sistema operativo.
-if IS_WINDOWS:
-    from hwinfo_reader import (
-        get_hwinfo_reader as _get_reader,
-    )
-    from hwinfo_reader import (
-        get_hwinfo_sensors as _backend_sensors,
-    )
-    from hwinfo_reader import (
-        is_hwinfo_available as _backend_available,
-    )
-    SENSOR_BACKEND_NAME = "HWiNFO"
-else:
-    from linux_sensors import (
-        get_linux_reader as _get_reader,
-    )
-    from linux_sensors import (
-        get_linux_sensors as _backend_sensors,
-    )
-    from linux_sensors import (
-        is_linux_sensors_available as _backend_available,
-    )
-    SENSOR_BACKEND_NAME = "Sensores de Linux"
+# Estado del backend activo (se inicializa al importar y puede cambiar en
+# caliente). Los nombres se conservan por retrocompatibilidad.
+SENSOR_BACKEND_NAME = "HWiNFO" if IS_WINDOWS else "Sensores de Linux"
+
+_get_reader = None
+_backend_sensors = None
+_backend_available = None
+_backend_kind = None
+
+
+def _hwinfo_preferred():
+    """True si el usuario mantiene HWiNFO activado en Preferencias."""
+    try:
+        import settings
+        return bool(settings.get_setting("hwinfo_enabled", True))
+    except Exception:
+        return True
+
+
+def _load_backend(kind):
+    """Carga los cómplices del backend indicado y actualiza el estado global."""
+    global _get_reader, _backend_sensors, _backend_available
+    global _backend_kind, SENSOR_BACKEND_NAME
+
+    if kind == "hwinfo":
+        from hwinfo_reader import (
+            get_hwinfo_reader as _gr,
+        )
+        from hwinfo_reader import (
+            get_hwinfo_sensors as _gs,
+        )
+        from hwinfo_reader import (
+            is_hwinfo_available as _ga,
+        )
+        SENSOR_BACKEND_NAME = "HWiNFO"
+    elif kind == "windows":
+        from windows_sensors import (
+            get_windows_reader as _gr,
+        )
+        from windows_sensors import (
+            get_windows_sensors as _gs,
+        )
+        from windows_sensors import (
+            is_windows_sensors_available as _ga,
+        )
+        SENSOR_BACKEND_NAME = "Sensores de Windows"
+    else:
+        from linux_sensors import (
+            get_linux_reader as _gr,
+        )
+        from linux_sensors import (
+            get_linux_sensors as _gs,
+        )
+        from linux_sensors import (
+            is_linux_sensors_available as _ga,
+        )
+        SENSOR_BACKEND_NAME = "Sensores de Linux"
+
+    _get_reader = _gr
+    _backend_sensors = _gs
+    _backend_available = _ga
+    _backend_kind = kind
+
+
+def _select_backend():
+    """Elige backend según la plataforma y la preferencia de HWiNFO.
+
+    En Windows (auto): HWiNFO si está activado y disponible, si no nativo.
+    """
+    if IS_WINDOWS:
+        if _hwinfo_preferred():
+            try:
+                from hwinfo_reader import is_hwinfo_available
+                if is_hwinfo_available():
+                    _load_backend("hwinfo")
+                    return "hwinfo"
+            except Exception:
+                pass
+        _load_backend("windows")
+        return "windows"
+    _load_backend("linux")
+    return "linux"
+
+
+def reload_backend():
+    """Vuelve a seleccionar el backend (tras cambiar preferencias)."""
+    return _select_backend()
+
+
+def get_backend_kind():
+    """Identificador del backend activo: ``hwinfo``, ``windows`` o ``linux``."""
+    return _backend_kind
+
+
+def hwinfo_preference_enabled():
+    """Expone la preferencia de HWiNFO para la UI de Preferencias."""
+    return _hwinfo_preferred()
 
 
 # Alias retrocompatibles usados en el resto del código base.
@@ -57,12 +136,17 @@ def get_hwinfo_reader():
     return _get_reader()
 
 
+# Selección inicial (equivalente al antiguo import condicional).
+_select_backend()
+
+
 # Configuration
 _SENSOR_UPDATE_INTERVAL = 0.5
 
 # Track initialization state
-# NOTA: HAS_HWINFO conserva su nombre por retrocompatibilidad, pero en Linux
-# significa "el backend de sensores nativo está conectado".
+# NOTA: HAS_HWINFO conserva su nombre por retrocompatibilidad, pero en Linux y
+# en el backend nativo de Windows significa "el backend de sensores está
+# conectado".
 HAS_HWINFO = False
 HWINFO_ERROR = None
 
@@ -114,7 +198,7 @@ def _apply_smoothing(raw_data):
 
 
 def _sensor_polling_thread():
-    """Background thread that continuously polls sensors from HWiNFO."""
+    """Background thread that continuously polls sensors from the active backend."""
     global _latest_sensor_data, _sensor_thread_running, HAS_HWINFO
 
     while _sensor_thread_running:
@@ -133,6 +217,13 @@ def _sensor_polling_thread():
                 if HAS_HWINFO:
                     HAS_HWINFO = False
                     print(f"[Sensors] Lost connection to {SENSOR_BACKEND_NAME}")
+                    # En Windows, si se pierde HWiNFO se cae al backend nativo.
+                    if IS_WINDOWS and _backend_kind == "hwinfo":
+                        try:
+                            get_hwinfo_reader().disconnect()
+                        except Exception:
+                            pass
+                        reload_backend()
 
         except Exception as e:
             print(f"[Sensors] Poll error: {e}")
@@ -141,13 +232,16 @@ def _sensor_polling_thread():
 
 
 def init_sensors(app_dir=None):
-    """Initialize the sensor system using HWiNFO shared memory."""
+    """Initialize the sensor system using the active backend."""
     global HAS_HWINFO, HWINFO_ERROR
     global _sensor_thread, _sensor_thread_running, _latest_sensor_data
 
     # Stop any existing thread first
     if _sensor_thread_running:
         stop_sensors()
+
+    # Re-seleccionar el backend (por si cambió la preferencia de HWiNFO).
+    reload_backend()
 
     # Check if the sensor backend is available
     if is_hwinfo_available():
@@ -162,9 +256,9 @@ def init_sensors(app_dir=None):
     else:
         HAS_HWINFO = False
         if IS_WINDOWS:
-            HWINFO_ERROR = "HWiNFO not running or shared memory not enabled"
-            print("[Sensors] HWiNFO not available")
-            print("[Sensors] Please start HWiNFO with 'Shared Memory Support' enabled")
+            HWINFO_ERROR = "No se pudieron leer los sensores del sistema en Windows"
+            print("[Sensors] Backend de sensores de Windows no disponible")
+            print("[Sensors] Se puede activar HWiNFO en Preferencias para más métricas")
         else:
             HWINFO_ERROR = "No se pudieron leer los sensores del sistema (¿falta psutil?)"
             print("[Sensors] Backend de sensores de Linux no disponible")
@@ -190,7 +284,7 @@ def get_cached_sensors():
 
 
 def get_sensors_sync():
-    """Get sensor data synchronously from HWiNFO."""
+    """Get sensor data synchronously from the active backend."""
     if is_hwinfo_available():
         return get_hwinfo_sensors()
     return None
@@ -212,11 +306,11 @@ def stop_sensors():
         _sensor_thread.join(timeout=3.0)
     _sensor_thread = None
 
-    # Disconnect HWiNFO
+    # Disconnect the active backend
     try:
         reader = get_hwinfo_reader()
         reader.disconnect()
-    except:
+    except Exception:
         pass
 
     HAS_HWINFO = False
@@ -225,7 +319,7 @@ def stop_sensors():
 
 def get_sensor_source():
     """Get the current sensor source name."""
-    return ("hwinfo" if IS_WINDOWS else "linux") if HAS_HWINFO else None
+    return _backend_kind if HAS_HWINFO else None
 
 
 def get_sensor_source_display():

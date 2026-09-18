@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "linux_sensors.py"
-source_sha256: aa1883377ce56d0eb16366271d5776681ee7c98d0e1cde8b5fdd6aa92f9845c8
-source_bytes: 21452
-source_lines: 618
+source_sha256: a626faa72dfc3a8b6ab1d05c8113009fd14c3e851290409495b1d79fb0b79774
+source_bytes: 16869
+source_lines: 481
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -43,14 +43,12 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 
 - `import glob`
 - `import os`
-- `import shutil`
-- `import subprocess`
 - `import sys`
 - `import time`
+- `from nvml_backend import NvidiaBackend`
 
 ### Clases directas
 
-- `_NvidiaBackend`
 - `_AmdGpuBackend`
 - `_RaplPowerReader`
 - `LinuxSensorReader`
@@ -88,10 +86,10 @@ Probado en Bazzite (Fedora Silverblue / Universal Blue) con GPU NVIDIA.
 
 import glob
 import os
-import shutil
-import subprocess
 import sys
 import time
+
+from nvml_backend import NvidiaBackend
 
 try:
     import psutil
@@ -105,146 +103,9 @@ IS_LINUX = sys.platform.startswith("linux")
 # ---------------------------------------------------------------------------
 # Backend NVIDIA (NVML preferido, nvidia-smi como alternativa)
 # ---------------------------------------------------------------------------
-class _NvidiaBackend:
-    """Lee sensores de la GPU NVIDIA usando NVML o nvidia-smi."""
-
-    def __init__(self):
-        self._nvml = None
-        self._handle = None
-        self._smi_path = None
-        self._init_nvml()
-        if self._nvml is None:
-            # Alternativa: binario nvidia-smi (siempre presente con el driver)
-            self._smi_path = shutil.which("nvidia-smi")
-
-    def _init_nvml(self):
-        """Intenta inicializar NVML (biblioteca de gestión de NVIDIA)."""
-        try:
-            import pynvml  # proporcionado por el paquete `nvidia-ml-py`
-        except ImportError:
-            return
-        try:
-            pynvml.nvmlInit()
-            self._handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            self._nvml = pynvml
-        except Exception:
-            self._nvml = None
-            self._handle = None
-
-    @property
-    def available(self):
-        return self._nvml is not None or self._smi_path is not None
-
-    def read(self):
-        """Devuelve un dict con las lecturas de GPU (0 si no se pueden leer)."""
-        if self._nvml is not None:
-            data = self._read_nvml()
-            if data is not None:
-                return data
-        if self._smi_path is not None:
-            data = self._read_smi()
-            if data is not None:
-                return data
-        return {}
-
-    def _read_nvml(self):
-        nv = self._nvml
-        h = self._handle
-        result = {}
-        try:
-            result["gpu_temp"] = float(nv.nvmlDeviceGetTemperature(h, nv.NVML_TEMPERATURE_GPU))
-        except Exception:
-            pass
-        try:
-            util = nv.nvmlDeviceGetUtilizationRates(h)
-            result["gpu_percent"] = float(util.gpu)
-            result["gpu_memory_percent"] = float(util.memory)
-        except Exception:
-            pass
-        try:
-            result["gpu_clock"] = int(nv.nvmlDeviceGetClockInfo(h, nv.NVML_CLOCK_GRAPHICS))
-        except Exception:
-            pass
-        try:
-            result["gpu_memory_clock"] = int(nv.nvmlDeviceGetClockInfo(h, nv.NVML_CLOCK_MEM))
-        except Exception:
-            pass
-        try:
-            # NVML devuelve el consumo en milivatios
-            result["gpu_power"] = float(nv.nvmlDeviceGetPowerUsage(h)) / 1000.0
-        except Exception:
-            pass
-        try:
-            mem = nv.nvmlDeviceGetMemoryInfo(h)
-            if mem.total > 0 and "gpu_memory_percent" not in result:
-                result["gpu_memory_percent"] = float(mem.used) / float(mem.total) * 100.0
-            if mem.total > 0:
-                result["gpu_memory_used"] = float(mem.used) / (1024 ** 3)
-        except Exception:
-            pass
-        try:
-            result["gpu_fan_percent"] = float(nv.nvmlDeviceGetFanSpeed(h))
-        except Exception:
-            pass
-        return result or None
-
-    def _read_smi(self):
-        """Alternativa usando nvidia-smi con salida CSV."""
-        query = (
-            "temperature.gpu,utilization.gpu,utilization.memory,"
-            "clocks.current.graphics,clocks.current.memory,power.draw,"
-            "fan.speed,memory.used"
-        )
-        try:
-            out = subprocess.check_output(
-                [self._smi_path, f"--query-gpu={query}",
-                 "--format=csv,noheader,nounits"],
-                stderr=subprocess.DEVNULL, timeout=2.0,
-            ).decode("utf-8", errors="ignore").strip()
-        except Exception:
-            return None
-        if not out:
-            return None
-        # Primera GPU
-        line = out.splitlines()[0]
-        parts = [p.strip() for p in line.split(",")]
-
-        def _num(idx, cast=float):
-            try:
-                val = parts[idx]
-                if val.lower() in ("", "n/a", "[n/a]", "[not supported]"):
-                    return None
-                return cast(float(val))
-            except (IndexError, ValueError):
-                return None
-
-        result = {}
-        mapping = [
-            ("gpu_temp", 0, float),
-            ("gpu_percent", 1, float),
-            ("gpu_memory_percent", 2, float),
-            ("gpu_clock", 3, int),
-            ("gpu_memory_clock", 4, int),
-            ("gpu_power", 5, float),
-            ("gpu_fan_percent", 6, float),
-        ]
-        for key, idx, cast in mapping:
-            val = _num(idx, cast)
-            if val is not None:
-                result[key] = val
-        mem_used = _num(7, float)
-        if mem_used is not None:
-            result["gpu_memory_used"] = mem_used / 1024.0  # MiB -> GiB
-        return result or None
-
-    def close(self):
-        if self._nvml is not None:
-            try:
-                self._nvml.nvmlShutdown()
-            except Exception:
-                pass
-            self._nvml = None
-            self._handle = None
+# La implementación vive en `nvml_backend.NvidiaBackend` para compartirla con el
+# backend nativo de Windows. Se conserva el nombre privado histórico.
+_NvidiaBackend = NvidiaBackend
 
 
 # ---------------------------------------------------------------------------

@@ -23,8 +23,12 @@ pyusb>=1.2.1
 opencv-python>=4.8.0
 numpy>=1.24.0
 
-# --- Solo Linux (opcional) -------------------------------------------------
-# Lectura de sensores de la GPU NVIDIA vía NVML. Si no está instalado, en
-# Linux se recurre automáticamente a 'nvidia-smi'. En Windows los sensores
-# provienen de HWiNFO, por lo que este paquete no es necesario.
-nvidia-ml-py>=12.0.0 ; sys_platform == "linux"
+# --- Sensores GPU NVIDIA (opcional en Linux y Windows) ---------------------
+# Lectura de la GPU vía NVML. Si no está instalado se recurre a 'nvidia-smi'.
+# En Windows el backend nativo lo usa sin privilegios de administrador.
+nvidia-ml-py>=12.0.0 ; sys_platform == "linux" or sys_platform == "win32"
+
+# --- Sensores de CPU en Windows (opcional) ---------------------------------
+# 'WMI' (que instala pywin32) permite leer la frecuencia y la temperatura de
+# CPU vía ACPI. El backend nativo lo carga en segundo plano si falta.
+WMI>=1.5.1 ; sys_platform == "win32"

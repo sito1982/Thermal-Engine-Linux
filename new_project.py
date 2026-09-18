@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 
 import settings
 from benchmark import run_display_benchmark
+from device_ly import bulk_supported as _ly_bulk_supported
 from lcds import LCD_CATALOG, get_lcd
 from ui_style import (
     BORDER_LIGHT,
@@ -1118,12 +1119,18 @@ class NewProjectDialog(QDialog):
             f"QPushButton:disabled {{ color: {TEXT_FAINT}; "
             f"border-color: {BORDER_LIGHT}; }}")
         self.test_btn.clicked.connect(self._run_test)
+        if not _ly_bulk_supported():
+            self.test_btn.setEnabled(False)
         test_row.addWidget(self.test_btn)
         self.test_status = QLabel("")
         self.test_status.setWordWrap(True)
         self.test_status.setStyleSheet(
             f"color: {TEXT_DIM}; font-size: 11px; "
             f"background: transparent; border: none;")
+        if not _ly_bulk_supported():
+            self.test_status.setText(
+                "El test del panel requiere USB bulk (solo Linux). En Windows "
+                "se usará la vía HID si el dispositivo la soporta.")
         test_row.addWidget(self.test_status, 1)
         ex.addLayout(test_row)
         v.addWidget(self.lcd_extra)
@@ -1842,6 +1849,12 @@ class NewProjectDialog(QDialog):
     def _run_test(self):
         model = self.current_model()
         if model is None:
+            return
+        if not _ly_bulk_supported():
+            self.test_status.setStyleSheet(f"color: {WARN}; font-size: 11px;")
+            self.test_status.setText(
+                "El test del panel no está disponible en esta plataforma "
+                "(requiere USB bulk).")
             return
         self.test_btn.setEnabled(False)
         self.test_status.setStyleSheet(f"color: {WARN}; font-size: 11px;")

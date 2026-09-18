@@ -34,6 +34,7 @@ exclude = [
 ]
 
 [[tool.mypy.overrides]]
-# Optional Windows / OpenCV fallbacks assign None to modules on purpose.
-module = ["video_background", "hwinfo_reader"]
-disable_error_code = ["assignment", "attr-defined"]
+# Optional Windows / OpenCV fallbacks assign None to modules on purpose, and
+# the Windows-only ctypes/lazy imports are guarded at runtime.
+module = ["video_background", "hwinfo_reader", "windows_sensors", "monitors"]
+disable_error_code = ["assignment", "attr-defined", "union-attr", "arg-type"]

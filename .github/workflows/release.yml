@@ -51,8 +51,17 @@ jobs:
             --include-package=PIL `
             --include-package=psutil `
             --include-package=hid `
+            --include-package=usb `
+            --include-package=pynvml `
+            --include-package=wmi `
+            --include-package=win32com `
+            --include-package=pythoncom `
             --include-package=elements `
             --include-data-dir=presets=presets `
+            --include-data-dir=assets=assets `
+            --include-data-dir=icons=icons `
+            --include-data-dir=templates=templates `
+            --include-data-dir=plugins=plugins `
             --include-data-files=elements/*.py=elements/ `
             --include-data-files=assets/icon.ico=icon.ico `
             --include-data-files=assets/icon.png=icon.png `
@@ -97,11 +106,23 @@ jobs:
       - name: Build Installer with Inno Setup
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$version" "installer.iss"
+          $versionNum = $version.TrimStart('v').Split('-')[0]
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DMyAppVersion=$version" `
+            "/DMyAppVersionNum=$versionNum" `
+            "installer.iss"
 
           Write-Host "=== Installer output ==="
           Get-ChildItem -Filter "*.exe" | Where-Object { $_.Name -like "*Setup*" } | ForEach-Object { Write-Host $_.Name }
         shell: pwsh
+
+      # Firma Authenticode opcional (evita SmartScreen). Para activarla:
+      #   1. Crea el secreto WINDOWS_CERT_PFX_BASE64 con el .pfx en base64.
+      #   2. Crea el secreto WINDOWS_CERT_PASSWORD con su contraseña.
+      #   3. Añade aquí pasos que decodifiquen el .pfx y ejecuten:
+      #        signtool sign /f cert.pfx /p <pass> /fd SHA256 /tr <timestamp> /td SHA256 <archivo>
+      #      firmando dist\ThermalEngine\ThermalEngine.exe (antes del ZIP) y el
+      #      *-Setup.exe resultante (antes del release).
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1

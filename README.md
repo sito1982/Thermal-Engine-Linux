@@ -146,14 +146,14 @@ tema (bloque `lite`) y el token en `settings.json` (`lite_tokens`), nunca dentro
 
 | Plataforma | Backend |
 |---|---|
-| **Windows** | HWiNFO (memoria compartida). |
+| **Windows** | **Nativo sin privilegios**: GPU NVIDIA vía NVML, CPU con `psutil`/WMI (frecuencia y temperatura ACPI *best-effort*) y FPS vía RTSS. **HWiNFO es opcional** (Preferencias → Sensors): si está activo y disponible, se usa su memoria compartida para añadir ventiladores, consumo, placa base y NVMe. |
 | **Linux** | `psutil` (CPU/RAM/red), temperaturas/frecuencias y **RAPL**; GPU **NVIDIA** vía NVML (`nvidia-ml-py`) con *fallback* a `nvidia-smi`, y soporte **AMD**. |
 
 La lista de fuentes disponibles se declara en `constants.py` y se agrupa en el selector:
 - **CPU / GPU**: uso, temperatura, frecuencia, potencia, VRAM usada.
 - **Memoria / Red**: uso/ocupada/disponible y subida/bajada.
-- **Ventiladores**: CPU, GPU, sistema y bomba (RPM o %).
-- **Rendimiento**: **FPS de juego** (MangoHud en Linux, RTSS vía HWiNFO en Windows).
+- **Ventiladores**: CPU, GPU, sistema y bomba (RPM o %); en Windows requieren HWiNFO.
+- **Rendimiento**: **FPS de juego** (MangoHud en Linux, RTSS en Windows).
 - **Almacenamiento**: lectura/escritura de disco (MB/s).
 - **Sistema**: uptime y temperaturas NVMe/placa base.
 
@@ -202,17 +202,25 @@ Ejecutar:
 
 #### Windows
 
+Opción 1 — **instalador** (recomendado): descarga `ThermalEngine-*-Setup.exe` desde Releases. Es una instalación **por usuario** (en `%LOCALAPPDATA%`, sin administrador) que incluye accesos directos, desinstalador, la opción de añadir **“Abrir con Thermal Engine Studio”** al menú contextual de los `.json` y, si lo marcas, una regla de Firewall para el servidor web. Los `presets/`, `elements/`, `icons/` y `settings.json` del usuario se conservan al actualizar.
+
+Opción 2 — **ZIP**: descomprime `ThermalEngine-*.zip` y ejecuta `ThermalEngine.exe`.
+
+Opción 3 — **desde el código**:
+
 ```bat
 scripts\install.bat
 scripts\run.bat
 ```
+
+Los sensores funcionan **nativamente** en Windows (GPU vía NVML, CPU vía `psutil`/WMI) sin administrador; **HWiNFO es opcional** (Preferencias → Sensors) para métricas extra.
 
 ### Hardware compatible
 
 - **Thermalright Trofeo Vision 9.16** — USB `0416:5408`, protocolo LY (*bulk*)/HID, 1920×480.
 - **Paneles DMD / ESP32** con el firmware [RetroPixelLED-ThermalEngine](https://github.com/sito1982/RetroPixelLED-ThermalEngine) (imagen externa RGB565 por TCP :8889).
 - **Monitores HDMI** (cualquiera, a resolución nativa).
-- **Sensores**: HWiNFO en Windows; `psutil`/RAPL y GPU NVIDIA/AMD en Linux.
+- **Sensores**: nativos en Windows (NVML + `psutil`/WMI, HWiNFO opcional) y `psutil`/RAPL + GPU NVIDIA/AMD en Linux.
 
 ### Configuración (`settings.json`)
 
@@ -222,6 +230,7 @@ scripts\run.bat
 | `launch_minimized` | bool | `true` | Al iniciar sola, arranca minimizada en la bandeja. |
 | `minimize_to_tray` | bool | `true` | Minimizar envía a la bandeja en lugar de a la barra de tareas. |
 | `close_to_tray` | bool | `true` | Cerrar la ventana la deja en la bandeja en lugar de salir. |
+| `hwinfo_enabled` | bool | `true` | Windows: usar HWiNFO si está disponible (auto); si no, backend nativo. |
 | `target_fps` | int | `30` | FPS objetivo enviados al panel. |
 | `default_preset` | string \| `null` | `null` | Preset que se carga al iniciar. |
 | `overdrive_mode` | bool | `false` | Hilo de renderizado en segundo plano para una entrega más fluida. |
@@ -403,14 +412,14 @@ theme (`lite` block) and the token in `settings.json` (`lite_tokens`), never ins
 
 | Platform | Backend |
 |---|---|
-| **Windows** | HWiNFO (shared memory). |
+| **Windows** | **Native, no privileges**: NVIDIA GPU via NVML, CPU with `psutil`/WMI (clock and best-effort ACPI temperature) and FPS via RTSS. **HWiNFO is optional** (Preferences → Sensors): when enabled and available, its shared memory adds fans, CPU power, mainboard and NVMe. |
 | **Linux** | `psutil` (CPU/RAM/network), temperatures/frequencies and **RAPL**; **NVIDIA** GPU via NVML (`nvidia-ml-py`) with `nvidia-smi` fallback, and **AMD** support. |
 
 Available sources are declared in `constants.py` and grouped in the selector:
 - **CPU / GPU**: usage, temperature, clock, power, used VRAM.
 - **Memory / Network**: usage/used/available and upload/download.
-- **Fans**: CPU, GPU, system and pump (RPM or %).
-- **Performance**: **game FPS** (MangoHud on Linux, RTSS via HWiNFO on Windows).
+- **Fans**: CPU, GPU, system and pump (RPM or %); on Windows they require HWiNFO.
+- **Performance**: **game FPS** (MangoHud on Linux, RTSS on Windows).
 - **Storage**: disk read/write (MB/s).
 - **System**: uptime and NVMe/mainboard temperatures.
 
@@ -459,17 +468,25 @@ Run:
 
 #### Windows
 
+Option 1 — **installer** (recommended): download `ThermalEngine-*-Setup.exe` from Releases. It is a **per-user** install (under `%LOCALAPPDATA%`, no admin) with shortcuts, an uninstaller, the option to add **“Open with Thermal Engine Studio”** to the `.json` context menu, and (if selected) a Firewall rule for the web server. User `presets/`, `elements/`, `icons/` and `settings.json` are preserved across updates.
+
+Option 2 — **ZIP**: extract `ThermalEngine-*.zip` and run `ThermalEngine.exe`.
+
+Option 3 — **from source**:
+
 ```bat
 scripts\install.bat
 scripts\run.bat
 ```
+
+Sensors work **natively** on Windows (GPU via NVML, CPU via `psutil`/WMI) with no admin; **HWiNFO is optional** (Preferences → Sensors) for extra metrics.
 
 ### Supported hardware
 
 - **Thermalright Trofeo Vision 9.16** — USB `0416:5408`, LY (*bulk*)/HID protocol, 1920×480.
 - **DMD / ESP32 panels** running the [RetroPixelLED-ThermalEngine](https://github.com/sito1982/RetroPixelLED-ThermalEngine) firmware (external RGB565 image over TCP :8889).
 - **HDMI monitors** (any, at native resolution).
-- **Sensors**: HWiNFO on Windows; `psutil`/RAPL and NVIDIA/AMD GPUs on Linux.
+- **Sensors**: native on Windows (NVML + `psutil`/WMI, HWiNFO optional) and `psutil`/RAPL + NVIDIA/AMD GPUs on Linux.
 
 ### Configuration (`settings.json`)
 
@@ -479,6 +496,7 @@ scripts\run.bat
 | `launch_minimized` | bool | `true` | When autostarted, begin minimized in the tray. |
 | `minimize_to_tray` | bool | `true` | Minimizing sends it to the tray instead of the taskbar. |
 | `close_to_tray` | bool | `true` | Closing the window keeps it in the tray instead of quitting. |
+| `hwinfo_enabled` | bool | `true` | Windows: use HWiNFO when available (auto), otherwise the native backend. |
 | `target_fps` | int | `30` | Target FPS sent to the panel. |
 | `default_preset` | string \| `null` | `null` | Preset loaded on startup. |
 | `overdrive_mode` | bool | `false` | Background render thread for smoother delivery. |

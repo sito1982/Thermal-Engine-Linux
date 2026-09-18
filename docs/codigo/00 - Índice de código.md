@@ -1,6 +1,6 @@
 ---
 generated: true
-source_count: 46
+source_count: 49
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -44,11 +44,13 @@ python3 scripts/verify_code_markdown.py
 - [[main_window.py|`main_window.py`]]
 - [[monitors.py|`monitors.py`]]
 - [[new_project.py|`new_project.py`]]
+- [[nvml_backend.py|`nvml_backend.py`]]
 - [[plugins_dialog.py|`plugins_dialog.py`]]
 - [[presets.py|`presets.py`]]
 - [[properties.py|`properties.py`]]
 - [[screens.py|`screens.py`]]
 - [[security.py|`security.py`]]
+- [[sensor_deps.py|`sensor_deps.py`]]
 - [[sensors.py|`sensors.py`]]
 - [[settings.py|`settings.py`]]
 - [[touch_nav.py|`touch_nav.py`]]
@@ -57,6 +59,7 @@ python3 scripts/verify_code_markdown.py
 - [[webserver.py|`webserver.py`]]
 - [[widgets.py|`widgets.py`]]
 - [[widgets_panel.py|`widgets_panel.py`]]
+- [[windows_sensors.py|`windows_sensors.py`]]
 
 ## Elementos extensibles
 

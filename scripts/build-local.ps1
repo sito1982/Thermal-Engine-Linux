@@ -5,7 +5,10 @@
 param(
     [string]$Version = "local-dev",
     [switch]$SkipInstaller,
-    [switch]$Clean
+    [switch]$Clean,
+    # Firma Authenticode opcional: ruta al .pfx y su contraseña.
+    [string]$CertPfx = "",
+    [string]$CertPassword = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +24,21 @@ if (Test-Path "$ProjectRoot\main.py") {
 }
 
 $BuildDir = "dist"
+
+# Firma Authenticode opcional (solo si se pasa -CertPfx).
+function Invoke-Sign([string]$File) {
+    if (-not $CertPfx) { return }
+    $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" `
+        -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1
+    if (-not $signtool) {
+        Write-Host "  signtool no encontrado; se omite la firma de $File" -ForegroundColor Yellow
+        return
+    }
+    & $signtool.FullName sign /f $CertPfx /p $CertPassword /fd SHA256 `
+        /tr "http://timestamp.digicert.com" /td SHA256 $File
+    if ($LASTEXITCODE -ne 0) { throw "Firma fallida: $File" }
+    Write-Host "  Firmado: $File" -ForegroundColor Green
+}
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  ThermalEngine Local Build" -ForegroundColor Cyan
@@ -60,8 +78,17 @@ python -m nuitka `
     --include-package=PIL `
     --include-package=psutil `
     --include-package=hid `
+    --include-package=usb `
+    --include-package=pynvml `
+    --include-package=wmi `
+    --include-package=win32com `
+    --include-package=pythoncom `
     --include-package=elements `
     --include-data-dir=presets=presets `
+    --include-data-dir=assets=assets `
+    --include-data-dir=icons=icons `
+    --include-data-dir=templates=templates `
+    --include-data-dir=plugins=plugins `
     --include-data-files=elements/*.py=elements/ `
     --include-data-files=assets/icon.ico=icon.ico `
     --include-data-files=assets/icon.png=icon.png `
@@ -89,6 +116,9 @@ if (Test-Path "dist\main.dist") {
 }
 Write-Host "  Nuitka build complete"
 
+# Optional Authenticode signing of the main executable.
+Invoke-Sign "dist\ThermalEngine\ThermalEngine.exe"
+
 # Create ZIP archive
 Write-Host "`n[4/5] Creating ZIP archive..." -ForegroundColor Yellow
 $zipName = "ThermalEngine-$Version.zip"
@@ -101,8 +131,13 @@ if (-not $SkipInstaller) {
     Write-Host "`n[5/5] Building installer with Inno Setup..." -ForegroundColor Yellow
     $innoPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
     if (Test-Path $innoPath) {
-        & $innoPath "/DMyAppVersion=$Version" "installer.iss"
+        $versionNum = $Version.TrimStart('v').Split('-')[0]
+        if ($versionNum -notmatch '^\d+\.\d+\.\d+') { $versionNum = "1.0.0" }
+        & $innoPath "/DMyAppVersion=$Version" "/DMyAppVersionNum=$versionNum" "installer.iss"
         Write-Host "  Installer built successfully"
+        $setupExe = Get-ChildItem -Filter "ThermalEngine-*-Setup.exe" |
+            Sort-Object LastWriteTime | Select-Object -Last 1
+        if ($setupExe) { Invoke-Sign $setupExe.FullName }
     } else {
         Write-Host "  Inno Setup not found, skipping installer (install with: choco install innosetup)" -ForegroundColor Gray
     }
@@ -117,6 +152,6 @@ Write-Host "Output: dist\ThermalEngine\" -ForegroundColor White
 Write-Host "ZIP:    $zipName" -ForegroundColor White
 Write-Host "Run:    dist\ThermalEngine\ThermalEngine.exe" -ForegroundColor White
 Write-Host ""
-Write-Host "NOTE: ThermalEngine requires HWiNFO for sensor data." -ForegroundColor Yellow
-Write-Host "      Download HWiNFO from: https://www.hwinfo.com/" -ForegroundColor Yellow
+Write-Host "NOTE: Sensors work natively on Windows (NVML + psutil/WMI), no admin needed." -ForegroundColor Yellow
+Write-Host "      HWiNFO is OPTIONAL (Preferences > Sensors) for extra metrics." -ForegroundColor Yellow
 Write-Host ""

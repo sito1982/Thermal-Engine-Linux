@@ -25,6 +25,10 @@ DEFAULT_SETTINGS = {
     "launch_minimized": True,
     "minimize_to_tray": True,
     "close_to_tray": True,
+    # Sensores en Windows: en modo auto, si está activado y HWiNFO está
+    # disponible se usa HWiNFO (más métricas); si no, el backend nativo sin
+    # privilegios (NVML + psutil + WMI). Desactivado = forzar backend nativo.
+    "hwinfo_enabled": True,
     "target_fps": 30,  # 30 FPS is smooth for most PCs
     "default_preset": None,  # Name of preset to load on startup
     "overdrive_mode": False,

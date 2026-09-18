@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "settings.py"
-source_sha256: 22c3e687467894561b812511f339a50557583d5ceaafffa161317d4221c5fd0a
-source_bytes: 8810
-source_lines: 255
+source_sha256: ebef28d63ec9d1358f290629baab5b661b8567749391ae51c2770e28d575ba7f
+source_bytes: 9068
+source_lines: 259
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -81,6 +81,10 @@ DEFAULT_SETTINGS = {
     "launch_minimized": True,
     "minimize_to_tray": True,
     "close_to_tray": True,
+    # Sensores en Windows: en modo auto, si está activado y HWiNFO está
+    # disponible se usa HWiNFO (más métricas); si no, el backend nativo sin
+    # privilegios (NVML + psutil + WMI). Desactivado = forzar backend nativo.
+    "hwinfo_enabled": True,
     "target_fps": 30,  # 30 FPS is smooth for most PCs
     "default_preset": None,  # Name of preset to load on startup
     "overdrive_mode": False,

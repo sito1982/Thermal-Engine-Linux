@@ -79,7 +79,8 @@ if exist "venv\Scripts\activate.bat" (
     echo   Run: python main.py
 )
 echo.
-echo NOTE: For CPU/GPU sensor data, install HWiNFO from https://www.hwinfo.com/
-echo       and enable "Shared Memory Support" in HWiNFO settings.
+echo NOTE: Sensors work natively on Windows (NVML + psutil/WMI), no admin needed.
+echo       HWiNFO is OPTIONAL: install it from https://www.hwinfo.com/ and enable
+echo       "Shared Memory Support" for extra metrics (fans, CPU power, NVMe).
 echo.
 pause

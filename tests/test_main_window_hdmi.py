@@ -330,6 +330,9 @@ def test_hdmi_toggle_disconnects_and_reconnects(win, monkeypatch):
                         lambda: calls.append("start") or True)
     monkeypatch.setattr(win, "_shutdown_hdmi_output",
                         lambda: calls.append("stop"))
+    monkeypatch.setattr(win, "_selected_hdmi_monitor",
+                        lambda: {"id": "test", "name": "Test",
+                                 "width": 320, "height": 180})
     win.project_targets = {"web": False, "lcd": True, "dmd": False, "hdmi": True}
 
     win.hdmi_toggle_btn.blockSignals(True)

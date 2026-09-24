@@ -267,6 +267,49 @@ def test_switching_to_hdmi_respects_toggle(win, monkeypatch):
     assert calls == [True]
 
 
+def test_selected_hdmi_monitor_without_match_returns_none(win):
+    original = win.project_hdmi_config
+    try:
+        win.project_hdmi_config = {"screen_id": "definitely-not-a-real-monitor"}
+        assert win._selected_hdmi_monitor() is None
+        win.project_hdmi_config = {"screen_id": "x", "screen_name": "Ghost"}
+        win._refresh_hdmi_monitor_info(prompt=False)
+        assert "no disponible" in win.hdmi_monitor_label.text().lower()
+    finally:
+        win.project_hdmi_config = original
+
+
+def test_sync_hdmi_output_requires_toggle_and_monitor(win, monkeypatch):
+    calls = []
+    monkeypatch.setattr(win, "_start_hdmi_output",
+                        lambda: calls.append("start") or True)
+    monkeypatch.setattr(win, "_shutdown_hdmi_output",
+                        lambda: calls.append("stop"))
+    original_enabled = win._hdmi_output_enabled
+    original_targets = dict(win.project_targets)
+    try:
+        win.project_targets["hdmi"] = True
+
+        win._hdmi_output_enabled = False
+        monkeypatch.setattr(win, "_selected_hdmi_monitor", lambda: {"id": 1})
+        win._sync_hdmi_output_state()
+        assert calls == ["stop"]
+
+        calls.clear()
+        win._hdmi_output_enabled = True
+        monkeypatch.setattr(win, "_selected_hdmi_monitor", lambda: None)
+        win._sync_hdmi_output_state()
+        assert calls == ["stop"]
+
+        calls.clear()
+        monkeypatch.setattr(win, "_selected_hdmi_monitor", lambda: {"id": 1})
+        win._sync_hdmi_output_state()
+        assert calls == ["start"]
+    finally:
+        win._hdmi_output_enabled = original_enabled
+        win.project_targets = original_targets
+
+
 def test_activating_hdmi_screen_mirrors_to_output(win):
     win.hdmi_screens = [Screen(name="A"), Screen(name="B")]
     win.hdmi_elements = win.hdmi_screens[0].elements

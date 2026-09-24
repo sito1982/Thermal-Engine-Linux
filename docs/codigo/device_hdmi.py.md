@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "device_hdmi.py"
-source_sha256: 53e73950ec4ebf97c2bf68ed84c0de63a9c11cf7ae33d278e911f0e2b5d627e5
-source_bytes: 12261
-source_lines: 318
+source_sha256: fb0d2e6308f1fd3d4cdbbd2cffe8d24af96ba108dacfb57e0d133e5e6194e36d
+source_bytes: 12778
+source_lines: 329
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -105,7 +105,9 @@ class HDMIOutputWindow(QWidget):
         # Sin WindowDoesNotAcceptFocus: en Wayland KWin entrega el toque a la
         # ventana bajo el dedo, pero algunas configuraciones no lo hacen si la
         # ventana declara que no acepta foco. WA_ShowWithoutActivating evita
-        # robar el foco al mostrarse.
+        # robar el foco al mostrarse. Para que las acciones abran sus ventanas
+        # en la pantalla principal (y no en el panel), la ventana principal
+        # recupera el foco justo antes de lanzarlas (ver _on_hdmi_tap).
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -133,10 +135,15 @@ class HDMIOutputWindow(QWidget):
         """
         self._monitor = monitor
         screen = self._resolve_screen(monitor)
-        if screen is not None:
-            self._apply_screen(self, screen)
+        if screen is None:
+            # Monitor no disponible: no mostrar en ninguna otra pantalla.
+            self._active = False
+            self.hide()
+            return False
+        self._apply_screen(self, screen)
         self.showFullScreen()
         self._active = True
+        return True
 
     def set_monitor(self, monitor):
         """Cambia de monitor en caliente (oculta, recoloca y vuelve a fullscreen)."""
@@ -144,13 +151,17 @@ class HDMIOutputWindow(QWidget):
         self._monitor = monitor
         screen = self._resolve_screen(monitor)
         if screen is None:
-            return
+            # Monitor no disponible: ocultar y no reubicar en otra pantalla.
+            self.hide()
+            self._active = False
+            return False
         if was_visible:
             self.hide()
         self._apply_screen(self, screen)
         if was_visible:
             self.showFullScreen()
         self._active = was_visible
+        return True
 
     def render_frame(self, image: QImage):
         """Guarda el frame actual y solicita repintado."""

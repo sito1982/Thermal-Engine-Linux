@@ -58,3 +58,13 @@ def test_widget_to_canvas_mapping(qapp):
     window.resize(200, 100)
     assert window.widget_to_canvas(100, 50) == (50.0, 50.0)
     window.close_output()
+
+
+def test_show_on_missing_monitor_does_not_show(qapp):
+    """Si el monitor no se resuelve, no se muestra en ninguna otra pantalla."""
+    window = HDMIOutputWindow()
+    ok = window.show_on_monitor({"index": 9999, "name": "DOES-NOT-EXIST"})
+    assert ok is False
+    assert window.is_active is False
+    assert not window.isVisible()
+    window.close_output()

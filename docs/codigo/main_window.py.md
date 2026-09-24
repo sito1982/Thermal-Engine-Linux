@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "main_window.py"
-source_sha256: bb97d6a8f47f568415d82681edc262706d324e0a08e1a24c16a13ffbcf16cd24
-source_bytes: 339015
-source_lines: 7664
+source_sha256: 27c70055b2cbbadbcf851425e6ae7e250f5409e86970906b832e85e3e5b2231b
+source_bytes: 340550
+source_lines: 7695
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -1568,15 +1568,12 @@ class ThemeEditorWindow(QMainWindow):
         hdmi_lbl.setStyleSheet(f"color: {TEXT_DIM};")
         hdmi_head.addWidget(hdmi_lbl)
 
-        self.hdmi_monitor_combo = QComboBox()
-        self.hdmi_monitor_combo.setMinimumWidth(320)
-        self.hdmi_monitor_combo.currentIndexChanged.connect(
-            self._on_hdmi_monitor_combo_changed)
-        hdmi_head.addWidget(self.hdmi_monitor_combo)
-
-        self.hdmi_resolution_label = QLabel("")
-        self.hdmi_resolution_label.setStyleSheet(f"color: {TEXT_DIM};")
-        hdmi_head.addWidget(self.hdmi_resolution_label)
+        # El monitor de salida se elige en el asistente (New Project). Aquí solo
+        # se muestra como etiqueta de solo lectura. Si el monitor configurado no
+        # está disponible, la salida se apaga (no se muestra en otro monitor).
+        self.hdmi_monitor_label = QLabel("Sin monitor")
+        self.hdmi_monitor_label.setStyleSheet(f"color: {TEXT};")
+        hdmi_head.addWidget(self.hdmi_monitor_label)
         hdmi_head.addStretch(1)
         hdmi_layout.addLayout(hdmi_head)
 
@@ -2257,10 +2254,8 @@ class ThemeEditorWindow(QMainWindow):
             f"background-color: {self.background_color};"
             f" border: 1px solid {BORDER}; border-radius: 5px;"
         )
-        if (target == "hdmi" and self.project_targets.get("hdmi")
-                and self._hdmi_output_enabled):
-            if self._selected_hdmi_monitor() is not None:
-                self._start_hdmi_output()
+        if target == "hdmi":
+            self._sync_hdmi_output_state()
         QTimer.singleShot(10, self.fit_canvas)
 
     def _configure_dmd_sender(self, config, restart=False):
@@ -3039,73 +3034,64 @@ class ThemeEditorWindow(QMainWindow):
     # ------------------------------------------------------------------
     # HDMI target: canvas propio + ventana fullscreen en el monitor elegido
     # ------------------------------------------------------------------
-    def _refresh_hdmi_monitor_combo(self, prompt=False):
-        """Repuebla el combo de monitores desde ``monitors.list_monitors()``."""
-        from monitors import display_label, list_monitors, resolve_monitor
+    def _refresh_hdmi_monitor_info(self, prompt=False):
+        """Actualiza la etiqueta del monitor configurado y el canvas HDMI.
 
-        combo = getattr(self, "hdmi_monitor_combo", None)
-        if combo is None:
-            return
+        El monitor se elige en el asistente (``project_hdmi_config``); aquí no
+        se puede cambiar. Si el monitor configurado no está conectado, la salida
+        se apaga y no se muestra en ningún otro monitor.
+        """
+        from monitors import list_monitors, resolve_monitor
+
         stored = (self.project_hdmi_config or {}).get("screen_id")
         monitors = list_monitors()
-
-        combo.blockSignals(True)
-        combo.clear()
-        for monitor in monitors:
-            combo.addItem(display_label(monitor), monitor)
-        if not monitors:
-            combo.addItem("No hay monitores conectados", None)
-        combo.blockSignals(False)
-
-        target = resolve_monitor(stored, monitors) if monitors else None
-        if target is None:
-            for monitor in monitors:
-                if monitor.get("is_hdmi"):
-                    target = monitor
-                    break
-        if target is None and monitors:
-            target = monitors[0]
-        if target is not None:
-            for i in range(combo.count()):
-                data = combo.itemData(i)
-                if isinstance(data, dict) and data.get("id") == target.get("id"):
-                    combo.setCurrentIndex(i)
-                    break
-        self._apply_hdmi_monitor(self._selected_hdmi_monitor(), prompt=prompt)
+        monitor = resolve_monitor(stored, monitors) if stored else None
+        self._apply_hdmi_geometry(monitor, prompt=prompt)
 
     def _selected_hdmi_monitor(self):
-        combo = getattr(self, "hdmi_monitor_combo", None)
-        if combo is None:
+        """Monitor configurado, resuelto a la pantalla conectada (o ``None``)."""
+        from monitors import list_monitors, resolve_monitor
+
+        screen_id = (self.project_hdmi_config or {}).get("screen_id")
+        if not screen_id:
             return None
-        data = combo.currentData()
-        return data if isinstance(data, dict) else None
+        return resolve_monitor(screen_id, list_monitors())
 
-    def _on_hdmi_monitor_combo_changed(self, index=None):
-        self._apply_hdmi_monitor(self._selected_hdmi_monitor(), prompt=True)
+    def _update_hdmi_monitor_label(self, monitor):
+        """Etiqueta de solo lectura con el monitor elegido en el asistente."""
+        label = getattr(self, "hdmi_monitor_label", None)
+        if label is None:
+            return
+        if isinstance(monitor, dict):
+            from monitors import display_label
 
-    def _apply_hdmi_monitor(self, monitor, prompt=True):
-        """Aplica el monitor seleccionado al canvas y a la ventana de salida."""
+            label.setText(display_label(monitor))
+            label.setStyleSheet(f"color: {TEXT};")
+        else:
+            name = (self.project_hdmi_config or {}).get("screen_name")
+            label.setText(f"Monitor no disponible ({name})" if name
+                          else "Sin monitor configurado")
+            label.setStyleSheet(f"color: {TEXT_DIM};")
+
+    def _apply_hdmi_geometry(self, monitor, prompt=True):
+        """Aplica el monitor configurado al canvas (no arranca la salida)."""
+        self._update_hdmi_monitor_label(monitor)
+
         if not isinstance(monitor, dict):
-            if hasattr(self, "hdmi_resolution_label"):
-                self.hdmi_resolution_label.setText("Sin monitor")
-            self._shutdown_hdmi_output()
+            # Sin monitor: se conserva la resolución guardada para poder editar,
+            # pero la salida se apaga (no se muestra en ningún otro monitor).
+            self._sync_hdmi_output_state()
             return
 
         width = int(monitor.get("width") or 1920)
         height = int(monitor.get("height") or 1080)
-        if hasattr(self, "hdmi_resolution_label"):
-            hz = monitor.get("refresh") or 0
-            self.hdmi_resolution_label.setText(
-                f"{width}×{height} · {hz:.0f} Hz · {monitor.get('connector', '')}")
 
         old_w = self.hdmi_canvas.hdmi_width if self.hdmi_canvas else width
         old_h = self.hdmi_canvas.hdmi_height if self.hdmi_canvas else height
         if (width, height) != (old_w, old_h):
             scale = self._resolve_hdmi_resize(old_w, old_h, width, height, prompt)
             if scale is None:
-                self._revert_hdmi_combo()
-                self.status_bar.showMessage(
-                    "Cambio de monitor cancelado", 3000)
+                self.status_bar.showMessage("Cambio de monitor cancelado", 3000)
                 return
             if scale:
                 self._scale_hdmi_elements(old_w, old_h, width, height)
@@ -3125,9 +3111,34 @@ class ThemeEditorWindow(QMainWindow):
             "scale_mode": "letterbox",
         })
         settings.set_setting("hdmi_config", self.project_hdmi_config)
+        self._sync_hdmi_output_state()
 
-        if self._active_target == "hdmi" and self.project_targets.get("hdmi"):
+    def _sync_hdmi_output_state(self):
+        """Única fuente de verdad para arrancar/apagar la salida HDMI.
+
+        Arranca solo si el target HDMI está activo, el toggle está encendido y
+        el monitor configurado está conectado. En cualquier otro caso, apaga la
+        salida (sin mostrarla en otro monitor).
+        """
+        enabled = (bool(self.project_targets.get("hdmi"))
+                   and self._hdmi_output_enabled)
+        monitor = self._selected_hdmi_monitor() if enabled else None
+        if enabled and isinstance(monitor, dict):
             self._start_hdmi_output()
+        else:
+            self._shutdown_hdmi_output()
+        self._update_hdmi_toggle_availability()
+
+    def _update_hdmi_toggle_availability(self):
+        """Habilita el toggle HDMI solo si el monitor configurado está presente."""
+        has_monitor = self._selected_hdmi_monitor() is not None
+        for widget in (getattr(self, "hdmi_toggle_btn", None),
+                       getattr(self, "hdmi_toggle_label", None)):
+            if widget is None:
+                continue
+            widget.setEnabled(has_monitor)
+            widget.setToolTip("" if has_monitor
+                              else "No hay monitor HDMI disponible")
 
     def _resolve_hdmi_resize(self, old_w, old_h, new_w, new_h, prompt):
         """Pregunta qué hacer si cambia la resolución y hay elementos.
@@ -3211,20 +3222,6 @@ class ThemeEditorWindow(QMainWindow):
             self.hdmi_output_canvas.set_hdmi_size(width, height)
         self._hdmi_last_signature = None
 
-    def _revert_hdmi_combo(self):
-        """Restaura el combo al monitor persistido (tras cancelar un cambio)."""
-        combo = getattr(self, "hdmi_monitor_combo", None)
-        if combo is None:
-            return
-        stored = (self.project_hdmi_config or {}).get("screen_id")
-        combo.blockSignals(True)
-        for i in range(combo.count()):
-            data = combo.itemData(i)
-            if isinstance(data, dict) and data.get("id") == stored:
-                combo.setCurrentIndex(i)
-                break
-        combo.blockSignals(False)
-
     def _start_hdmi_output(self):
         """Crea/muestra la ventana fullscreen en el monitor seleccionado."""
         monitor = self._selected_hdmi_monitor()
@@ -3238,9 +3235,13 @@ class ThemeEditorWindow(QMainWindow):
         current = self.hdmi_output.monitor
         if self.hdmi_output.is_active and isinstance(current, dict) \
                 and current.get("id") != monitor.get("id"):
-            self.hdmi_output.set_monitor(monitor)
+            shown = self.hdmi_output.set_monitor(monitor)
         else:
-            self.hdmi_output.show_on_monitor(monitor)
+            shown = self.hdmi_output.show_on_monitor(monitor)
+        if not shown:
+            # El monitor no se pudo resolver: no mostrar en otra pantalla.
+            self._shutdown_hdmi_output()
+            return False
         # El canvas offscreen de salida debe medir lo mismo que el monitor
         # antes del primer frame (si no, se letterboxea/recorta).
         mw = int(monitor.get("width") or 0)
@@ -3265,6 +3266,32 @@ class ThemeEditorWindow(QMainWindow):
     # -------------------------------------------------------
     # Interacción táctil (HDMI): hit-test + acción por elemento
     # -------------------------------------------------------
+    def _focus_main_window_for_actions(self):
+        """Recupera el foco del editor antes de lanzar una acción táctil.
+
+        En Wayland la pantalla donde aparece una ventana nueva es la pantalla
+        activa. Al tocar el panel HDMI, su ventana puede pasar a estar activa y
+        entonces la terminal/contenido lanzado se abre en el panel. Devolver el
+        foco a la ventana principal (misma aplicación, permitido por Qt/KWin)
+        hace que las ventanas nuevas se abran en la pantalla principal.
+        """
+        try:
+            win = self.window()
+        except Exception:
+            return
+        if win is None:
+            return
+        try:
+            win.raise_()
+        except Exception:
+            pass
+        handle = win.windowHandle()
+        if handle is not None:
+            try:
+                handle.requestActivate()
+            except Exception:
+                pass
+
     def _on_hdmi_tap(self, cx, cy):
         """Toque en la salida HDMI: resuelve el elemento y ejecuta su acción."""
         if self.hdmi_canvas is None:
@@ -3329,6 +3356,9 @@ class ThemeEditorWindow(QMainWindow):
             self.status_bar.showMessage(
                 "Acciones táctiles deshabilitadas (Settings → Preferences)", 4000)
             return
+        # Antes de lanzar una ventana externa, devolver el foco al editor para
+        # que aparezca en la pantalla principal y no en el panel HDMI.
+        self._focus_main_window_for_actions()
         self._execute_element_action(action)
 
     def _execute_element_action(self, action, always_confirm=False):
@@ -3408,11 +3438,7 @@ class ThemeEditorWindow(QMainWindow):
     def _on_hdmi_output_toggled(self, enabled):
         """Toggle de salida HDMI: conecta/desconecta la ventana fullscreen."""
         self._hdmi_output_enabled = bool(enabled)
-        if enabled:
-            if self.project_targets.get("hdmi"):
-                self._start_hdmi_output()
-        else:
-            self._shutdown_hdmi_output()
+        self._sync_hdmi_output_state()
 
     def _hdmi_frame_signature(self):
         parts = [self.hdmi_background_color]
@@ -3530,22 +3556,23 @@ class ThemeEditorWindow(QMainWindow):
             return
         # Releer la lista de monitores para obtener la nueva resolución y
         # re-aplicarla al canvas/salida.
-        self._refresh_hdmi_monitor_combo(prompt=True)
+        self._refresh_hdmi_monitor_info(prompt=True)
 
     def _on_screen_added(self, screen):
         self._connect_screen_signals([screen])
-        self._refresh_hdmi_monitor_combo(prompt=True)
+        self._refresh_hdmi_monitor_info(prompt=True)
 
     def _on_screen_removed(self, screen):
         connected = self.__dict__.get("_connected_screen_ids")
         if connected is not None:
             connected.discard(id(screen))
-        monitor = self.hdmi_output.monitor if self.hdmi_output is not None else None
-        if isinstance(monitor, dict) and monitor.get("name") == (screen.name() or ""):
+        stored = self._selected_hdmi_monitor()
+        if stored is None and (self.project_hdmi_config or {}).get("screen_id"):
+            # El monitor configurado ya no está: apagar salida (sin reubicar).
             self._shutdown_hdmi_output()
             self.status_bar.showMessage(
                 "El monitor HDMI seleccionado se ha desconectado", 5000)
-        self._refresh_hdmi_monitor_combo(prompt=False)
+        self._refresh_hdmi_monitor_info(prompt=False)
 
     def setup_performance_monitor(self):
         """Setup timer to update performance stats."""
@@ -4191,7 +4218,7 @@ class ThemeEditorWindow(QMainWindow):
             self.target_tabs.setTabVisible(self._hdmi_tab_index, True)
             self._rebuild_hdmi_screens_bar()
             self._sync_hdmi_screen_props()
-            self._refresh_hdmi_monitor_combo(prompt=False)
+            self._refresh_hdmi_monitor_info(prompt=False)
             self.hdmi_toggle_btn.blockSignals(True)
             self.hdmi_toggle_btn.setChecked(self._hdmi_output_enabled)
             self.hdmi_toggle_btn.blockSignals(False)
@@ -4199,10 +4226,12 @@ class ThemeEditorWindow(QMainWindow):
                 self.properties_panel.set_hdmi_mode(
                     self.hdmi_canvas.hdmi_width,
                     self.hdmi_canvas.hdmi_height)
+            self._sync_hdmi_output_state()
         else:
             self.target_tabs.setTabVisible(self._hdmi_tab_index, False)
             self._hdmi_output_enabled = False
             self._shutdown_hdmi_output()
+            self._update_hdmi_toggle_availability()
 
         if targets["custom"]:
             self.target_tabs.setTabVisible(self._custom_tab_index, True)
@@ -4808,11 +4837,13 @@ class ThemeEditorWindow(QMainWindow):
         # El canvas HDMI debe medir la resolución del monitor conectado. Si el
         # tema se diseñó a otra resolución, se escalan los elementos de forma
         # proporcional para conservar el diseño.
-        monitor = self._selected_hdmi_monitor()
-        screen_id = (data.get("hdmi_config") or {}).get("screen_id")
-        if not isinstance(monitor, dict) and screen_id:
+        hdmi_cfg = data.get("hdmi_config") or {}
+        if hdmi_cfg:
+            self.project_hdmi_config = dict(hdmi_cfg)
+        monitor = None
+        if hdmi_cfg.get("screen_id"):
             from monitors import resolve_monitor
-            monitor = resolve_monitor(screen_id)
+            monitor = resolve_monitor(hdmi_cfg.get("screen_id"))
         if isinstance(monitor, dict):
             mw = int(monitor.get("width") or 0)
             mh = int(monitor.get("height") or 0)

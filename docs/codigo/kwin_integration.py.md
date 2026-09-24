@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "kwin_integration.py"
-source_sha256: 8fdc27eb721a619bb257da7c8ef6297e63871e9b68927014b7a3e9a42fd5b904
-source_bytes: 6422
-source_lines: 225
+source_sha256: 17259809615891eb88246574a4c7fadd5d1673d6069ff2325e7dfab42f970cff
+source_bytes: 6635
+source_lines: 232
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -277,10 +277,17 @@ def ensure_script(target_output=None):
 
 
 def remove_script():
-    """Descarga y borra el script KWin (al cerrar la aplicación)."""
+    """Descarga y borra el script KWin (al cerrar la aplicación).
+
+    Si la integración está desactivada (p. ej. un proceso auxiliar con
+    ``THERMALENGINE_NO_KWIN``) no toca nada: así no se elimina el script de
+    otra instancia en ejecución.
+    """
     global _ensured, _target_output
+    if not is_supported():
+        return
     existed = os.path.isdir(_script_dir())
-    if is_supported() and _is_loaded():
+    if _is_loaded():
         _dbus("unloadScript", SCRIPT_ID)
     shutil.rmtree(_script_dir(), ignore_errors=True)
     _ensured = False

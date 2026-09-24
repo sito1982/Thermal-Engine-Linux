@@ -213,10 +213,17 @@ def ensure_script(target_output=None):
 
 
 def remove_script():
-    """Descarga y borra el script KWin (al cerrar la aplicación)."""
+    """Descarga y borra el script KWin (al cerrar la aplicación).
+
+    Si la integración está desactivada (p. ej. un proceso auxiliar con
+    ``THERMALENGINE_NO_KWIN``) no toca nada: así no se elimina el script de
+    otra instancia en ejecución.
+    """
     global _ensured, _target_output
+    if not is_supported():
+        return
     existed = os.path.isdir(_script_dir())
-    if is_supported() and _is_loaded():
+    if _is_loaded():
         _dbus("unloadScript", SCRIPT_ID)
     shutil.rmtree(_script_dir(), ignore_errors=True)
     _ensured = False

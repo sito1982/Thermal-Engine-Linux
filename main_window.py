@@ -2962,6 +2962,18 @@ class ThemeEditorWindow(QMainWindow):
             return None
         return resolve_monitor(screen_id, list_monitors())
 
+    def _primary_output_name(self):
+        """Nombre de la salida principal (priority 1), para el script KWin."""
+        try:
+            from monitors import list_monitors
+
+            for monitor in list_monitors():
+                if monitor.get("primary"):
+                    return monitor.get("name") or ""
+        except Exception:
+            pass
+        return ""
+
     def _update_hdmi_monitor_label(self, monitor):
         """Etiqueta de solo lectura con el monitor elegido en el asistente."""
         label = getattr(self, "hdmi_monitor_label", None)
@@ -3132,12 +3144,12 @@ class ThemeEditorWindow(QMainWindow):
         monitor = self._selected_hdmi_monitor()
         if not isinstance(monitor, dict):
             return False
-        # En KDE/Wayland, ocultar la ventana de salida de la barra de tareas y
-        # del Alt+Tab (gestionado automáticamente; ver kwin_integration).
+        # En KDE/Wayland: ocultar la salida de la barra/Alt+Tab y hacer que las
+        # ventanas lanzadas desde el panel se abran en la pantalla principal.
         try:
             from kwin_integration import ensure_script
 
-            ensure_script()
+            ensure_script(target_output=self._primary_output_name())
         except Exception:
             pass
         from device_hdmi import HDMIOutputWindow
@@ -3269,9 +3281,17 @@ class ThemeEditorWindow(QMainWindow):
             self.status_bar.showMessage(
                 "Acciones táctiles deshabilitadas (Settings → Preferences)", 4000)
             return
-        # Antes de lanzar una ventana externa, devolver el foco al editor para
-        # que aparezca en la pantalla principal y no en el panel HDMI.
-        self._focus_main_window_for_actions()
+        # En KDE, el script de KWin mueve las ventanas lanzadas a la pantalla
+        # principal (el panel debe seguir activo para detectarlo). En otros
+        # entornos, recuperamos el foco del editor como aproximación.
+        try:
+            from kwin_integration import is_supported as _kwin_supported
+
+            kwin = _kwin_supported()
+        except Exception:
+            kwin = False
+        if not kwin:
+            self._focus_main_window_for_actions()
         self._execute_element_action(action)
 
     def _execute_element_action(self, action, always_confirm=False):

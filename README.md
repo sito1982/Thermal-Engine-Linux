@@ -32,17 +32,19 @@ Thermal Engine Studio es una aplicación de escritorio (Python + Qt/PySide6) par
 
 ### Capturas
 
-**LCD** — la imagen exacta que se envía al panel (1920×480):
+**NAS Server** (proyecto Lite, 1280×720):
 
 <p align="center">
-  <img src="assets/screenshots/lcd-theme-horizontal.png" alt="Tema LCD horizontal" width="100%">
+  <img src="assets/screenshots/lcd-nas-server.png" alt="NAS Server (Lite)" width="100%">
 </p>
 
-| Tema LCD | NAS Server (Lite) |
-|---|---|
-| ![Tema LCD](assets/screenshots/lcd-theme.png) | ![NAS Server](assets/screenshots/lcd-nas-server.png) |
+**Panel vertical** (480×1920):
 
-**Datos de sensores en vivo**:
+<p align="center">
+  <img src="assets/screenshots/lcd-theme-vertical.png" alt="Tema LCD vertical" width="230">
+</p>
+
+**Datos de sensores en vivo** (tema horizontal, 1920×480):
 
 <p align="center">
   <img src="assets/screenshots/lcd-demo.gif" alt="Demo animada del LCD con sensores" width="85%">
@@ -320,17 +322,19 @@ Thermal Engine Studio is a desktop application (Python + Qt/PySide6) to build an
 
 ### Screenshots
 
-**LCD** — the exact image sent to the panel (1920×480):
+**NAS Server** (Lite project, 1280×720):
 
 <p align="center">
-  <img src="assets/screenshots/lcd-theme-horizontal.png" alt="Horizontal LCD theme" width="100%">
+  <img src="assets/screenshots/lcd-nas-server.png" alt="NAS Server (Lite)" width="100%">
 </p>
 
-| LCD theme | NAS Server (Lite) |
-|---|---|
-| ![LCD theme](assets/screenshots/lcd-theme.png) | ![NAS Server](assets/screenshots/lcd-nas-server.png) |
+**Vertical panel** (480×1920):
 
-**Live sensor data**:
+<p align="center">
+  <img src="assets/screenshots/lcd-theme-vertical.png" alt="Vertical LCD theme" width="230">
+</p>
+
+**Live sensor data** (horizontal theme, 1920×480):
 
 <p align="center">
   <img src="assets/screenshots/lcd-demo.gif" alt="Animated LCD demo with sensors" width="85%">

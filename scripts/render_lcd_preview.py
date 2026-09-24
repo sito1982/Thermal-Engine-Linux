@@ -75,10 +75,12 @@ def sample_data(phase=0.0):
 
 
 # --- Temas/salidas ----------------------------------------------------------
+# (fichero de tema, PNG de salida, lienzo de diseño). ``None`` usa el tamaño
+# nativo del tema (web/custom o 1920x480).
 THEMES = [
-    ("Theme Horizontal .json", "lcd-theme-horizontal.png"),
-    ("Nas Server.json", "lcd-nas-server.png"),
-    (" Theme.json", "lcd-theme.png"),
+    ("Theme Horizontal .json", "lcd-theme-horizontal.png", None),
+    ("Nas Server.json", "lcd-nas-server.png", (1280, 720)),
+    (" Theme.json", "lcd-theme-vertical.png", (480, 1920)),
 ]
 GIF_THEME = "Theme Horizontal .json"
 GIF_OUT = "lcd-demo.gif"
@@ -127,7 +129,7 @@ def _ensure_units(elements):
                 "name": source, "type": info["type"], "symbol": info["symbol"]}
 
 
-def render_theme(window, path, phase=0.0):
+def render_theme(window, path, canvas=None, phase=0.0):
     import json
 
     from element import ThemeElement
@@ -139,10 +141,13 @@ def render_theme(window, path, phase=0.0):
     _ensure_units(elements)
     window.lcd_elements = elements
     window.lcd_background_color = lcd["background"]
-    window._web_canvas_size = ((lcd["width"], lcd["height"])
-                               if (lcd["width"], lcd["height"]) != (1920, 480)
-                               else None)
-    window._vertical_mode = lcd["height"] > lcd["width"]
+    if canvas:
+        window._web_canvas_size = (int(canvas[0]), int(canvas[1]))
+        window._vertical_mode = canvas[1] > canvas[0]
+    else:
+        native = (lcd["width"], lcd["height"])
+        window._web_canvas_size = native if native != (1920, 480) else None
+        window._vertical_mode = lcd["height"] > lcd["width"]
     window._sync_element_values(elements, sample_data(phase))
     return window.render_theme_image()
 
@@ -165,11 +170,11 @@ def main():
 
     window = ThemeEditorWindow(port=4599)
     try:
-        for path, out_name in THEMES:
+        for path, out_name, canvas in THEMES:
             if not os.path.exists(path):
                 print(f"[render] no existe {path}, se omite")
                 continue
-            image = render_theme(window, path, phase=0.28)
+            image = render_theme(window, path, canvas=canvas, phase=0.28)
             image.save(os.path.join(out_dir, out_name))
             print(f"[render] {out_name}  {image.size}")
 

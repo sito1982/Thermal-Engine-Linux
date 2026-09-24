@@ -29,6 +29,7 @@ EXCLUDED_DIR_NAMES = {
 }
 EXCLUDED_SOURCE_PATHS = {
     Path("scripts/generate_code_markdown.py"),
+    Path("scripts/render_lcd_preview.py"),
     Path("scripts/verify_code_markdown.py"),
 }
 

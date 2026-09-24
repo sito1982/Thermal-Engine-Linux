@@ -2,8 +2,16 @@
 
 **🇪🇸 Español** · [🇬🇧 English](#english)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-blue.svg)](#)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Qt](https://img.shields.io/badge/Qt-PySide6-41CD52.svg)](https://www.qt.io/)
+
 [![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=sito1982&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/sito1982)
 
+<p align="center">
+  <img src="assets/screenshots/lcd-theme-horizontal.png" alt="Tema LCD de Thermal Engine Studio" width="100%">
+</p>
 
 Editor visual de temas para pantallas de monitorización: LCD USB (refrigeración AIO), paneles LED **DMD** (ESP32), monitores **HDMI** y **preview web**. Diseñas el tema con un lienzo visual y Thermal Engine Studio lo renderiza en tiempo real con datos de sensores del sistema.
 
@@ -23,6 +31,24 @@ Thermal Engine Studio es una aplicación de escritorio (Python + Qt/PySide6) par
 | **Web** | Servidor local bajo demanda con la imagen renderizada y panel de control. |
 
 ### Capturas
+
+**LCD** — la imagen exacta que se envía al panel (1920×480):
+
+<p align="center">
+  <img src="assets/screenshots/lcd-theme-horizontal.png" alt="Tema LCD horizontal" width="100%">
+</p>
+
+| Tema LCD | NAS Server (Lite) |
+|---|---|
+| ![Tema LCD](assets/screenshots/lcd-theme.png) | ![NAS Server](assets/screenshots/lcd-nas-server.png) |
+
+**Datos de sensores en vivo**:
+
+<p align="center">
+  <img src="assets/screenshots/lcd-demo.gif" alt="Demo animada del LCD con sensores" width="85%">
+</p>
+
+**Editor**:
 
 ![Editor de Thermal Engine Studio con un tema LCD](assets/screenshots/editor-lcd.png)
 
@@ -275,6 +301,10 @@ Si **Thermal Engine Studio** te resulta útil, puedes invitarme a un café ❤�
 
 ## English
 
+<p align="center">
+  <img src="assets/screenshots/lcd-theme-horizontal.png" alt="Thermal Engine Studio LCD theme" width="100%">
+</p>
+
 Visual theme editor for monitoring displays: USB **LCD** (AIO coolers), **DMD** LED panels (ESP32), **HDMI** monitors and a **web preview**. You design a theme on a visual canvas and Thermal Engine Studio renders it live with system sensor data.
 
 ### What is it?
@@ -289,6 +319,24 @@ Thermal Engine Studio is a desktop application (Python + Qt/PySide6) to build an
 | **Web** | On-demand local server with the rendered image and a control panel. |
 
 ### Screenshots
+
+**LCD** — the exact image sent to the panel (1920×480):
+
+<p align="center">
+  <img src="assets/screenshots/lcd-theme-horizontal.png" alt="Horizontal LCD theme" width="100%">
+</p>
+
+| LCD theme | NAS Server (Lite) |
+|---|---|
+| ![LCD theme](assets/screenshots/lcd-theme.png) | ![NAS Server](assets/screenshots/lcd-nas-server.png) |
+
+**Live sensor data**:
+
+<p align="center">
+  <img src="assets/screenshots/lcd-demo.gif" alt="Animated LCD demo with sensors" width="85%">
+</p>
+
+**Editor**:
 
 ![Thermal Engine Studio editor with an LCD theme](assets/screenshots/editor-lcd.png)
 

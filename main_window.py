@@ -3132,6 +3132,14 @@ class ThemeEditorWindow(QMainWindow):
         monitor = self._selected_hdmi_monitor()
         if not isinstance(monitor, dict):
             return False
+        # En KDE/Wayland, ocultar la ventana de salida de la barra de tareas y
+        # del Alt+Tab (gestionado automáticamente; ver kwin_integration).
+        try:
+            from kwin_integration import ensure_script
+
+            ensure_script()
+        except Exception:
+            pass
         from device_hdmi import HDMIOutputWindow
 
         if self.hdmi_output is None:
@@ -7657,6 +7665,14 @@ class ThemeEditorWindow(QMainWindow):
 
         # Cerrar la salida HDMI si estaba activa
         self._shutdown_hdmi_output()
+
+        # Quitar el script KWin (skip taskbar de la salida HDMI) al cerrar.
+        try:
+            from kwin_integration import remove_script
+
+            remove_script()
+        except Exception:
+            pass
 
         self.disconnect_display()
 

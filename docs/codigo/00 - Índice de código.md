@@ -1,6 +1,6 @@
 ---
 generated: true
-source_count: 49
+source_count: 50
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -36,6 +36,7 @@ python3 scripts/verify_code_markdown.py
 - [[element_list.py|`element_list.py`]]
 - [[hwinfo_reader.py|`hwinfo_reader.py`]]
 - [[icons_panel.py|`icons_panel.py`]]
+- [[kwin_integration.py|`kwin_integration.py`]]
 - [[lcd_widgets.py|`lcd_widgets.py`]]
 - [[lcds.py|`lcds.py`]]
 - [[linux_sensors.py|`linux_sensors.py`]]

@@ -83,6 +83,11 @@ python -m nuitka `
     --include-package=wmi `
     --include-package=win32com `
     --include-package=pythoncom `
+    --include-package=flask `
+    --include-package=werkzeug `
+    --include-package=jinja2 `
+    --include-package=libusb_package `
+    --include-package-data=libusb_package `
     --include-package=elements `
     --include-data-dir=presets=presets `
     --include-data-dir=assets=assets `

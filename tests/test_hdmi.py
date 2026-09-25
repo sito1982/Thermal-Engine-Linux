@@ -42,7 +42,9 @@ def test_connector_detection():
     assert not monitors.is_hdmi("DP-1")
 
 
-def test_monitor_id_and_label():
+def test_monitor_id_and_label(monkeypatch):
+    # Este test valida el identificador basado en el nombre (Linux/DRM).
+    monkeypatch.setattr(monitors, "IS_WINDOWS", False)
     mon = _mon("HDMI-A-1", model="LG X")
     assert monitors.monitor_id(mon) == "HDMI-A-1|LG_X|123"
     label = monitors.display_label(mon)

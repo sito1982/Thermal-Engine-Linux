@@ -5353,6 +5353,13 @@ class ThemeEditorWindow(QMainWindow):
             self.connect_display()
 
     def connect_display(self, show_error=True):
+        # Si ya hay un dispositivo conectado, no reabrir. En Windows/WinUSB un
+        # segundo open() del mismo panel devuelve Access denied y deja el envío
+        # en un bucle de desconexión/reconexión (p. ej. connect manual seguido
+        # del auto_connect de arranque).
+        if self.device is not None:
+            return True
+
         # --- Intentar LY bulk USB primero (0416:5408 - Thermalright Trofeo) ---
         try:
             from device_ly import LYDevice
@@ -5427,7 +5434,13 @@ class ThemeEditorWindow(QMainWindow):
         except Exception as e:
             if show_error:
                 if sys.platform == "win32":
-                    hint = "Make sure TRCC is closed."
+                    hint = (
+                        "En Windows, comprueba:\n"
+                        "  • Cierra cualquier software del fabricante (p. ej. TRCC)\n"
+                        "  • Instala el backend USB del panel:\n"
+                        "      pip install libusb-package\n"
+                        "  • El panel (0416:5408) debe usar el driver WinUSB"
+                    )
                 else:
                     hint = (
                         "En Linux, comprueba:\n"

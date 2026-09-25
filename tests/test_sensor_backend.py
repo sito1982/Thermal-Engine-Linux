@@ -70,7 +70,15 @@ def test_bulk_supported_on_linux():
     if sys.platform.startswith("linux"):
         assert device_ly.bulk_supported() is True
     if sys.platform == "win32":
-        assert device_ly.bulk_supported() is False
+        # En Windows depende de que exista un backend libusb (libusb-package).
+        assert isinstance(device_ly.bulk_supported(), bool)
+
+
+def test_get_backend_type():
+    # Funciona en cualquier plataforma: None (Linux/sin libusb) o un backend.
+    backend = device_ly.get_backend()
+    if backend is not None:
+        assert hasattr(backend, "open_device")
 
 
 def test_hid_present_returns_bool():

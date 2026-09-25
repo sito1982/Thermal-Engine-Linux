@@ -58,6 +58,9 @@ class _FakeQProcess:
 def test_run_action_uses_start_detached(monkeypatch):
     _FakeQProcess.calls = []
     monkeypatch.setattr(actions, "QProcess", _FakeQProcess)
+    # El ejecutable de prueba (/bin/echo) no existe en Windows; se simula que
+    # la ruta existe para validar que se delega en QProcess.startDetached.
+    monkeypatch.setattr(actions.os.path, "exists", lambda _p: True)
     ok, message = actions.run_action(
         {"command": "/bin/echo", "args": ["hi"], "workdir": "/tmp"})
     assert ok

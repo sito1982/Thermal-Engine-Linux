@@ -1129,8 +1129,8 @@ class NewProjectDialog(QDialog):
             f"background: transparent; border: none;")
         if not _ly_bulk_supported():
             self.test_status.setText(
-                "El test del panel requiere USB bulk (solo Linux). En Windows "
-                "se usará la vía HID si el dispositivo la soporta.")
+                "El test del panel requiere el backend USB (pyusb/libusb). "
+                "En Windows instala 'libusb-package'.")
         test_row.addWidget(self.test_status, 1)
         ex.addLayout(test_row)
         v.addWidget(self.lcd_extra)
@@ -1853,8 +1853,8 @@ class NewProjectDialog(QDialog):
         if not _ly_bulk_supported():
             self.test_status.setStyleSheet(f"color: {WARN}; font-size: 11px;")
             self.test_status.setText(
-                "El test del panel no está disponible en esta plataforma "
-                "(requiere USB bulk).")
+                "El test del panel requiere el backend USB (pyusb/libusb). "
+                "En Windows instala 'libusb-package'.")
             return
         self.test_btn.setEnabled(False)
         self.test_status.setStyleSheet(f"color: {WARN}; font-size: 11px;")

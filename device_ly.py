@@ -16,6 +16,50 @@ LY_PID = 0x5408
 IS_WINDOWS = sys.platform == "win32"
 
 
+# ---------------------------------------------------------------------------
+# Backend de pyusb
+# ---------------------------------------------------------------------------
+# En Linux pyusb usa la libusb del sistema (autodetección). En Windows no hay
+# libusb-1.0.dll en el sistema y usb.core.find() falla con "No backend
+# available". El paquete 'libusb-package' empaqueta esa DLL y expone un
+# backend listo para usar. El LCD Thermalright (0416:5408) ya viene enlazado al
+# driver WinUSB de Microsoft, así que libusb puede abrirlo sin Zadig.
+_backend = None
+_backend_resolved = False
+
+
+def _load_backend():
+    """Devuelve el backend pyusb a usar (None = autodetección del sistema)."""
+    if not IS_WINDOWS:
+        return None
+    try:
+        import libusb_package
+    except ImportError:
+        return None
+    # Camino preferido: backend ya enlazado a la DLL del paquete.
+    try:
+        backend = libusb_package.get_libusb1_backend()
+        if backend is not None:
+            return backend
+    except Exception:
+        pass
+    # Alternativa: que pyusb localice la DLL a través de libusb_package.
+    try:
+        import usb.backend.libusb1 as _libusb1
+        return _libusb1.get_backend(find_library=libusb_package.find_library)
+    except Exception:
+        return None
+
+
+def get_backend():
+    """Backend pyusb cacheado (None en Linux o si falta libusb en Windows)."""
+    global _backend, _backend_resolved
+    if not _backend_resolved:
+        _backend = _load_backend()
+        _backend_resolved = True
+    return _backend
+
+
 def hid_present(vid=LY_VID, pid=LY_PID):
     """True si el dispositivo aparece en la enumeración HID (hidapi).
 
@@ -35,11 +79,13 @@ def hid_present(vid=LY_VID, pid=LY_PID):
 def bulk_supported():
     """True si el protocolo LY (USB bulk) puede usarse en esta plataforma.
 
-    En Linux funciona con pyusb/libusb. En Windows pyusb necesita un driver
-    WinUSB/libusbK que el dispositivo no trae por defecto, por lo que el modo
-    bulk no está soportado y el panel no se puede controlar por esa vía.
+    En Linux funciona con pyusb/libusb del sistema. En Windows pyusb necesita
+    una DLL de libusb-1.0; si 'libusb-package' está instalado (y el panel está
+    enlazado a WinUSB) el modo bulk es utilizable.
     """
-    return not IS_WINDOWS
+    if IS_WINDOWS:
+        return get_backend() is not None
+    return True
 
 HANDSHAKE_TIMEOUT_MS = 5000
 WRITE_TIMEOUT_MS = 5000
@@ -100,17 +146,18 @@ class LYDevice:
 
     def is_available(self):
         try:
-            if usb.core.find(idVendor=LY_VID, idProduct=LY_PID) is not None:
+            if usb.core.find(idVendor=LY_VID, idProduct=LY_PID,
+                             backend=get_backend()) is not None:
                 return True
         except Exception:
             pass
-        # En Windows el panel puede aparecer como HID aunque el bulk no sea
-        # usable: al menos se detecta su presencia.
+        # En Windows el panel puede aparecer como HID además de WinUSB.
         return IS_WINDOWS and hid_present()
 
     def open(self):
         """Abre el dispositivo y ejecuta el handshake obligatorio."""
-        self.dev = usb.core.find(idVendor=LY_VID, idProduct=LY_PID)
+        self.dev = usb.core.find(idVendor=LY_VID, idProduct=LY_PID,
+                                 backend=get_backend())
         if self.dev is None:
             raise OSError("LY device 0416:5408 not found")
 
@@ -124,7 +171,11 @@ class LYDevice:
         try:
             self.dev.set_configuration()
         except usb.core.USBError as exc:
-            if exc.errno not in (16,):
+            if IS_WINDOWS:
+                # En Windows/WinUSB el dispositivo suele venir ya configurado
+                # y el error puede tener un código distinto; no abortamos.
+                print(f"[LY] set_configuration ignorado en Windows: {exc}")
+            elif exc.errno not in (16,):
                 self.close()
                 raise
 

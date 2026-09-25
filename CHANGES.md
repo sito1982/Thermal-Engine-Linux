@@ -86,3 +86,29 @@ Resumen de los cambios realizados en este repositorio con respecto al último co
 - Compilación: `python3 -m py_compile presets.py main_window.py new_project.py`
 - Pruebas sin pantalla: `QT_QPA_PLATFORM=offscreen ./.venv/bin/python /tmp/opencode/test_newproj.py` y `.../test_presets_tab.py` (PASS).
 - App en vivo: `nohup ./.venv/bin/python main.py` (la app posee el LCD 0416:5408; no ejecutar dos instancias).
+
+---
+
+## Actualización — Soporte Windows (instalación, Web y LCD USB)
+
+### Instalación desde el código (Windows)
+- `scripts/install.bat` y `scripts/run.bat` ahora se sitúan en la raíz del proyecto (`cd /d "%~dp0.."`), crean/usan `venv\` en la raíz y se guardan con CRLF. Antes, al lanzarlos desde `scripts\`, la venv se creaba ahí y `pip install -r requirements.txt` fallaba.
+
+### Dependencias
+- Añadido `Flask` a `requirements.txt`: `webserver.py` lo importa y el destino Web fallaba en silencio.
+- Añadido `libusb-package` (Windows) para que `pyusb` disponga de `libusb-1.0.dll`.
+
+### LCD Thermalright Trofeo (0416:5408) en Windows
+- El panel se expone por el driver **WinUSB** de Microsoft; `pyusb` necesita un backend libusb (no estaba).
+- `device_ly.py`: nuevo `get_backend()` (usa `libusb_package` en Windows) aplicado a `usb.core.find()`; `bulk_supported()` devuelve `True` en Windows si hay backend; `set_configuration` tolerante en WinUSB.
+- `main_window.py`: `connect_display()` es idempotente (no reabre si ya hay dispositivo), evitando el `Access denied` y el bucle de reconexión que provocaba `auto_connect`.
+- Verificado sobre el hardware: handshake LY (PM=65, SUB=5) y envío de frame.
+
+### Acciones táctiles
+- `actions.parse_args_text()` elimina las comillas envolventes en Windows (shlex no-posix las conservaba).
+
+### Build (Nuitka)
+- `scripts/build-local.ps1` y `.github/workflows/release.yml` incluyen `flask`, `werkzeug`, `jinja2` y `libusb_package` (+ datos).
+
+### Tests
+- 311 passed, 4 skipped. Tests de `monitor_id` y de acciones hechos multiplataforma.

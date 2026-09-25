@@ -23,15 +23,28 @@ class ActionError(Exception):
     """Error de parseo/validación de una acción."""
 
 
+def _strip_surrounding_quotes(token):
+    """Quita un par de comillas envolventes (shlex no-posix las conserva)."""
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
+        return token[1:-1]
+    return token
+
+
 def parse_args_text(text, platform=None):
     """Convierte un texto de argumentos tipo shell en lista (OS-aware)."""
     if not text or not text.strip():
         return []
     posix = (platform or sys.platform) != "win32"
     try:
-        return shlex.split(text, posix=posix)
+        tokens = shlex.split(text, posix=posix)
     except ValueError as exc:
         raise ActionError(f"Argumentos inválidos: {exc}") from exc
+    if posix:
+        return tokens
+    # En Windows shlex (posix=False) conserva las comillas para no tocar las
+    # barras invertidas de las rutas. Como lanzamos sin shell, hay que
+    # quitarlas para no pasar las comillas literales al proceso.
+    return [_strip_surrounding_quotes(token) for token in tokens]
 
 
 def args_to_text(args):

@@ -63,6 +63,7 @@ def test_monitor_id_prefers_edid_on_windows(monkeypatch):
     assert monitors.monitor_id(monitor) == "GSM|1234|99"
 
 
-def test_monitor_id_uses_name_off_windows():
+def test_monitor_id_uses_name_off_windows(monkeypatch):
+    monkeypatch.setattr(monitors, "IS_WINDOWS", False)
     monitor = {"name": "HDMI-A-1", "manufacturer": "", "model": "X", "serial": ""}
     assert monitors.monitor_id(monitor) == "HDMI-A-1|X|"

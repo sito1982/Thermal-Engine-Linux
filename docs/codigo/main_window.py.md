@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "main_window.py"
-source_sha256: 5612927b28205c42615cfa61ba2c22e56f16cae12d0c66170b405b99f31be454
-source_bytes: 341759
-source_lines: 7731
+source_sha256: 0a7d0c78f389a076aa41a994121b83c9209602443872e5cba12a9a96e7619756
+source_bytes: 342131
+source_lines: 7743
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -3058,7 +3058,19 @@ class ThemeEditorWindow(QMainWindow):
         return resolve_monitor(screen_id, list_monitors())
 
     def _primary_output_name(self):
-        """Nombre de la salida principal (priority 1), para el script KWin."""
+        """Nombre de la salida principal (priority 1), para el script KWin.
+
+        Se prefiere KScreen (``kscreen-doctor``), porque Qt en Wayland puede
+        reportar como primaria una pantalla distinta (p. ej. el panel HDMI).
+        """
+        try:
+            from kwin_integration import primary_output_name
+
+            name = primary_output_name()
+            if name:
+                return name
+        except Exception:
+            pass
         try:
             from monitors import list_monitors
 

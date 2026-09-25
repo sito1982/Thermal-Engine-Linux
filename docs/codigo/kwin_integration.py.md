@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "kwin_integration.py"
-source_sha256: 17259809615891eb88246574a4c7fadd5d1673d6069ff2325e7dfab42f970cff
-source_bytes: 6635
-source_lines: 232
+source_sha256: e0a2749d69099f6adad2de63f88086ae0098621efd5c01658c0dccc0434fbdcb
+source_bytes: 8043
+source_lines: 277
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -41,6 +41,7 @@ Las listas siguientes se extraen mecánicamente del nivel superior del módulo; 
 - `import os`
 - `import shutil`
 - `import subprocess`
+- `import time`
 
 ### Clases directas
 
@@ -48,6 +49,8 @@ Ninguna clase declarada directamente en el módulo.
 
 ### Funciones directas
 
+- `_kscreen_primary`
+- `primary_output_name`
 - `_scripts_dir`
 - `_script_dir`
 - `_script_entry`
@@ -81,6 +84,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 
 # Identificador del script y título de la ventana de salida HDMI.
 SCRIPT_ID = "thermalengine-hdmi-skip-taskbar"
@@ -91,6 +95,50 @@ _DISABLE_ENV = "THERMALENGINE_NO_KWIN"
 
 _ensured = False
 _target_output = ""
+
+# Caché del nombre de la salida principal (evita lanzar kscreen-doctor de más).
+_PRIMARY_CACHE_TTL = 3.0
+_primary_cache = {"time": 0.0, "name": ""}
+
+
+def _kscreen_primary():
+    """Salida con ``priority == 1`` según KScreen (o la primera habilitada)."""
+    exe = shutil.which("kscreen-doctor")
+    if not exe:
+        return ""
+    try:
+        result = subprocess.run([exe, "-j"], check=False, timeout=5,
+                                capture_output=True, text=True)
+        data = json.loads(result.stdout)
+    except Exception:
+        return ""
+    fallback = ""
+    for output in data.get("outputs", []) or []:
+        if not output.get("enabled"):
+            continue
+        name = output.get("name") or ""
+        if output.get("priority") == 1:
+            return name
+        if not fallback:
+            fallback = name
+    return fallback
+
+
+def primary_output_name():
+    """Nombre de la salida principal (priority 1) o ``""`` si no se sabe.
+
+    Se obtiene de KScreen, porque Qt en Wayland puede reportar como primaria
+    una pantalla distinta (p. ej. el propio panel HDMI).
+    """
+    if os.environ.get(_DISABLE_ENV):
+        return ""
+    now = time.monotonic()
+    if now - _primary_cache["time"] < _PRIMARY_CACHE_TTL:
+        return _primary_cache["name"]
+    name = _kscreen_primary()
+    _primary_cache["time"] = now
+    _primary_cache["name"] = name
+    return name
 
 
 def _scripts_dir():

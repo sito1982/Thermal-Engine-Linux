@@ -2963,7 +2963,19 @@ class ThemeEditorWindow(QMainWindow):
         return resolve_monitor(screen_id, list_monitors())
 
     def _primary_output_name(self):
-        """Nombre de la salida principal (priority 1), para el script KWin."""
+        """Nombre de la salida principal (priority 1), para el script KWin.
+
+        Se prefiere KScreen (``kscreen-doctor``), porque Qt en Wayland puede
+        reportar como primaria una pantalla distinta (p. ej. el panel HDMI).
+        """
+        try:
+            from kwin_integration import primary_output_name
+
+            name = primary_output_name()
+            if name:
+                return name
+        except Exception:
+            pass
         try:
             from monitors import list_monitors
 

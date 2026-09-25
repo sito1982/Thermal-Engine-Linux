@@ -1,4 +1,5 @@
 import json
+import types
 
 import kwin_integration
 
@@ -14,6 +15,39 @@ def test_not_kde(monkeypatch):
     monkeypatch.delenv("THERMALENGINE_NO_KWIN", raising=False)
     monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
     assert kwin_integration.is_supported() is False
+
+
+def test_primary_output_name_uses_priority_one(monkeypatch):
+    monkeypatch.delenv("THERMALENGINE_NO_KWIN", raising=False)
+    payload = ('{"outputs":['
+               '{"name":"DP-3","priority":2,"enabled":true},'
+               '{"name":"DP-1","priority":1,"enabled":true},'
+               '{"name":"HDMI-A-1","priority":3,"enabled":false}]}')
+    monkeypatch.setattr(kwin_integration.shutil, "which",
+                        lambda name: "/usr/bin/kscreen-doctor"
+                        if name == "kscreen-doctor" else None)
+    monkeypatch.setattr(kwin_integration.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(stdout=payload))
+    monkeypatch.setitem(kwin_integration._primary_cache, "time", 0.0)
+    assert kwin_integration.primary_output_name() == "DP-1"
+
+
+def test_primary_output_name_falls_back_to_first_enabled(monkeypatch):
+    monkeypatch.delenv("THERMALENGINE_NO_KWIN", raising=False)
+    payload = ('{"outputs":['
+               '{"name":"DP-3","priority":2,"enabled":true},'
+               '{"name":"DP-1","priority":3,"enabled":false}]}')
+    monkeypatch.setattr(kwin_integration.shutil, "which",
+                        lambda name: "/usr/bin/kscreen-doctor")
+    monkeypatch.setattr(kwin_integration.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(stdout=payload))
+    monkeypatch.setitem(kwin_integration._primary_cache, "time", 0.0)
+    assert kwin_integration.primary_output_name() == "DP-3"
+
+
+def test_primary_output_name_disabled_by_env(monkeypatch):
+    monkeypatch.setenv("THERMALENGINE_NO_KWIN", "1")
+    assert kwin_integration.primary_output_name() == ""
 
 
 def test_script_content_marks_taskbar_switcher_and_placement():

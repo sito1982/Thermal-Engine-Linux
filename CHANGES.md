@@ -112,3 +112,8 @@ Resumen de los cambios realizados en este repositorio con respecto al último co
 
 ### Tests
 - 311 passed, 4 skipped. Tests de `monitor_id` y de acciones hechos multiplataforma.
+
+### Sensores HWiNFO (idioma)
+- `hwinfo_reader.py`: el emparejamiento de lecturas ya no depende del idioma de HWiNFO. Se identifica el grupo por nombre de sensor (GPU/CPU) y se buscan palabras clave en inglés/español con normalización (sin acentos, sin puntuación); si no hay coincidencia se aplica una heurística por tipo de lectura dentro del grupo. Se corrigió también la decodificación (`mbcs`/ANSI) y se lee la memoria compartida una sola vez por ciclo.
+- Híbrido: si HWiNFO no aporta una métrica de GPU, se rellena con NVML.
+- Nuevo `tests/test_hwinfo_reader.py` (etiquetas ES/EN, idioma desconocido, exclusión de reloj de memoria y fallback NVML). Total: 317 passed, 4 skipped.

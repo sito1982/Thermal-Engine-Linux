@@ -1,9 +1,9 @@
 ---
 generated: true
 source_path: "lcds.py"
-source_sha256: 709a3f87481a1456e4a2c0822aeb5b0d9c9e30466e0e13af74f6578f1434b001
-source_bytes: 10441
-source_lines: 297
+source_sha256: f16d57df2c52cabfdec86c0663ec261d81eadb5ef2059d9e1e5ce778d0e86960
+source_bytes: 10755
+source_lines: 302
 generated_by: "scripts/generate_code_markdown.py"
 ---
 
@@ -96,6 +96,10 @@ class LCDModel:
         self.protocol = kw.get("protocol", "Thermalright LY")
         self.subsampling_fast = kw.get("subsampling_fast", 1)   # 4:2:2
         self.subsampling_slow = kw.get("subsampling_slow", 0)   # 4:4:4
+        # Paneles montados al revés: si es True, el frame horizontal que se
+        # envía por USB se rota 180° para que las etiquetas del panel coincidan
+        # con la imagen (no afecta al modo vertical ni al webserver).
+        self.rotate_180 = bool(kw.get("rotate_180", False))
 
     @property
     def bench_key(self):
@@ -262,6 +266,7 @@ LCD_CATALOG = [
         bench_requirement_fps=30,
         interface="USB 2.0 Bulk",
         protocol="Thermalright LY (0416:5408)",
+        rotate_180=True,
     ),
 ]
 

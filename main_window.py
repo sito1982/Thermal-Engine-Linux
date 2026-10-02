@@ -898,6 +898,10 @@ class ThemeEditorWindow(QMainWindow):
         self._auto_reconnect = False  # intención explícita de reconectar
         self._ly_device = None  # Referencia al driver LY bulk USB
 
+        # Monitor de suspensión de logind (Linux): suelta el panel USB antes de
+        # dormir para que el resume no se cuelgue (dispositivo abierto en usbfs).
+        self._sleep_monitor = None
+
         # DMD targets: envío TCP por timer (el canvas vive en la pestaña DMD).
         self.dmd_sender = None
         self.project_dmd_config = None
@@ -909,7 +913,7 @@ class ThemeEditorWindow(QMainWindow):
         self.hdmi_send_timer = None
         self.project_hdmi_config = settings.get_setting("hdmi_config", None)
         self._hdmi_last_signature = None
-        self._hdmi_output_enabled = False  # Toggle: conecta/desconecta la salida HDMI
+        self._hdmi_output_enabled = True  # Por defecto la salida HDMI arranca ON
         self.hdmi_frame_times = []
         self.hdmi_last_frame_time = 0
 
@@ -922,6 +926,7 @@ class ThemeEditorWindow(QMainWindow):
         self.setup_console()
         self.setup_menu()
         self.connect_signals()
+        self._setup_system_sleep_monitor()
 
         # Apply the persisted vertical mode state to the canvas and property
         # panel on startup. Without this, if vertical_mode was saved as True,
@@ -1070,6 +1075,20 @@ class ThemeEditorWindow(QMainWindow):
                 print(f"[Power] Error handling power event: {e}")
         return super().nativeEvent(eventType, message)
 
+    def _setup_system_sleep_monitor(self):
+        """Linux: suscribe a logind para soltar el LCD por USB antes de dormir."""
+        if not sys.platform.startswith("linux"):
+            return
+        try:
+            from sleep_linux import SystemSleepMonitor
+        except ImportError as e:
+            print(f"[Power] sleep_linux no disponible: {e}")
+            return
+        self._sleep_monitor = SystemSleepMonitor(self)
+        self._sleep_monitor.about_to_sleep.connect(self._handle_system_sleep)
+        self._sleep_monitor.woke_up.connect(self._handle_system_wake)
+        self._sleep_monitor.start()
+
     def _handle_system_sleep(self):
         """Handle system going to sleep."""
         print("[Power] System going to sleep")
@@ -1079,9 +1098,44 @@ class ThemeEditorWindow(QMainWindow):
             self._reconnect_timer.stop()
             self._reconnect_timer = None
 
+        # En Linux ningún driver libera el USB al suspender: cerramos el panel
+        # LCD (usbfs) y detenemos el envío para que el resume no se cuelgue.
+        if sys.platform.startswith("linux"):
+            self._pause_outputs_for_sleep()
+            self._release_lcd_for_sleep()
+
+    def _release_lcd_for_sleep(self):
+        """Cierra el dispositivo LCD y detiene el envío antes de suspender."""
+        try:
+            self.disconnect_display()
+        except Exception as e:
+            print(f"[Power] Error liberando el display antes de dormir: {e}")
+
+    def _pause_outputs_for_sleep(self):
+        """Detiene los bucles DMD/HDMI para no trabajar durante la suspensión."""
+        if self._hdmi_output_enabled:
+            self._stop_hdmi_loop()
+        if self.dmd_sender is not None:
+            self.dmd_sender.set_paused(True)
+        if self._dmd_output_enabled:
+            self._stop_dmd_loop()
+
+    def _resume_outputs_after_sleep(self):
+        """Reanuda los bucles DMD/HDMI que estuvieran activos al dormir."""
+        if self._hdmi_output_enabled and self.hdmi_send_timer is None:
+            self._start_hdmi_loop()
+        if self._dmd_output_enabled and self.dmd_send_timer is None:
+            if self.dmd_sender is not None:
+                self.dmd_sender.set_paused(False)
+            self._start_dmd_loop()
+
     def _handle_system_wake(self):
         """Handle system waking from sleep."""
         print("[Power] System waking up")
+
+        # Reanudar los bucles de salida que pausamos al dormir (Linux).
+        if sys.platform.startswith("linux"):
+            self._resume_outputs_after_sleep()
 
         # Reset video playback timing to prevent frame jumps
         reset_all_video_timing()
@@ -5835,7 +5889,7 @@ class ThemeEditorWindow(QMainWindow):
                     signature = self._compute_frame_signature(sensor_data)
                     if signature != self._last_frame_signature or self._last_jpeg_data is None:
                         img = self.render_theme_image()
-                        jpeg_data = self.image_to_jpeg(img)
+                        jpeg_data = self.image_to_jpeg(img, lcd_usb=True)
                         self._last_frame_signature = signature
                         self._last_jpeg_data = jpeg_data
                     else:
@@ -5952,7 +6006,7 @@ class ThemeEditorWindow(QMainWindow):
                     sensor_data = self.get_sensor_data()
                     self._sync_element_values(self.lcd_elements, sensor_data)
                     img = self.render_theme_image()
-                    jpeg_data = self.image_to_jpeg(img)
+                    jpeg_data = self.image_to_jpeg(img, lcd_usb=True)
                     self.send_jpeg_frame(jpeg_data)
 
                 # Advance deadline
@@ -5966,7 +6020,7 @@ class ThemeEditorWindow(QMainWindow):
                 signature = self._compute_frame_signature(sensor_data)
                 if signature != self._last_frame_signature or self._last_jpeg_data is None:
                     img = self.render_theme_image()
-                    jpeg_data = self.image_to_jpeg(img)
+                    jpeg_data = self.image_to_jpeg(img, lcd_usb=True)
                     self._last_frame_signature = signature
                     self._last_jpeg_data = jpeg_data
                 else:
@@ -7367,13 +7421,27 @@ class ThemeEditorWindow(QMainWindow):
             return
         img.paste(frame, (int(element.x), int(element.y)), frame)
 
+    def _lcd_output_rotate_180(self):
+        """True si el modelo de panel actual se monta al revés (rotar 180°)."""
+        try:
+            from lcds import get_lcd
+
+            model = get_lcd(self.project_lcd_id)
+            return bool(getattr(model, "rotate_180", False))
+        except Exception:
+            return False
+
     def image_to_jpeg(self, img, quality=80, subsampling=None,
-                      apply_rotation=True, apply_tuning=True):
+                      apply_rotation=True, apply_tuning=True, lcd_usb=False):
         """Convert image to JPEG bytes with optimized settings.
 
         ``apply_rotation``/``apply_tuning`` permiten saltarse el giro de modo
         vertical y la corrección de color del panel LCD cuando la imagen no va
         destinada al panel (p. ej. la fuente HDMI del webserver).
+
+        ``lcd_usb`` marca que el JPEG va destinado al frame que se envía por
+        USB al panel LCD: en ese caso, si el modelo se monta al revés
+        (``rotate_180``) y el diseño es horizontal, se rota 180°.
         """
         # Si vertical mode está activo, img se renderiza en espacio lógico
         # retrato (DISPLAY_HEIGHT x DISPLAY_WIDTH). Rótalo 90 grados para que el
@@ -7384,6 +7452,9 @@ class ThemeEditorWindow(QMainWindow):
             img = img.transpose(Image.ROTATE_270)
             if img.size != (DISPLAY_WIDTH, DISPLAY_HEIGHT):
                 img = img.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT))
+        elif lcd_usb and apply_rotation and self._lcd_output_rotate_180():
+            # Panel montado al revés: corrige el frame horizontal que va al USB.
+            img = img.transpose(Image.ROTATE_180)
 
         # Color correction (brightness/contrast/saturation) to compensate for LCD
         # panels that render colors washed-out/dim compared to the design preview.

@@ -7773,6 +7773,14 @@ class ThemeEditorWindow(QMainWindow):
             self._reconnect_timer.stop()
             self._reconnect_timer = None
 
+        # Cancelar la suscripción a logind (solo Linux).
+        if getattr(self, "_sleep_monitor", None) is not None:
+            try:
+                self._sleep_monitor.stop()
+            except Exception:
+                pass
+            self._sleep_monitor = None
+
         # Apagar el webserver y su caché JPEG si están activos
         self._set_webserver_state(False)
 

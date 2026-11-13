@@ -914,6 +914,8 @@ class ThemeEditorWindow(QMainWindow):
         self.project_hdmi_config = settings.get_setting("hdmi_config", None)
         self._hdmi_last_signature = None
         self._hdmi_output_enabled = True  # Por defecto la salida HDMI arranca ON
+        # Aviso de mapeo táctil (solo Windows): se muestra una vez por sesión.
+        self._touch_warning_shown = False
         self.hdmi_frame_times = []
         self.hdmi_last_frame_time = 0
 
@@ -1535,6 +1537,34 @@ class ThemeEditorWindow(QMainWindow):
         hdmi_head.addWidget(self.hdmi_monitor_label)
         hdmi_head.addStretch(1)
         hdmi_layout.addLayout(hdmi_head)
+
+        # Diagnóstico del mapeo táctil (solo Windows): en qué monitor aparece
+        # el toque y acceso al asistente de configuración de Windows.
+        hdmi_touch_row = QHBoxLayout()
+        hdmi_touch_row.setSpacing(8)
+        self.hdmi_touch_label = QLabel("")
+        self.hdmi_touch_label.setStyleSheet(f"color: {TEXT_DIM};")
+        self.hdmi_touch_label.setWordWrap(True)
+        self.hdmi_touch_label.setToolTip(
+            "Windows mapea el táctil por monitor (Tablet PC Settings o "
+            "MultiDigiMon). Si el toque aparece en la pantalla equivocada, "
+            "usa 'Configurar pantalla táctil…' para remapearlo.")
+        hdmi_touch_row.addWidget(self.hdmi_touch_label, 1)
+        self.hdmi_touch_setup_btn = QPushButton("Configurar pantalla táctil…")
+        self.hdmi_touch_setup_btn.setToolTip(
+            "Abre el asistente de Windows (Tablet PC Settings / MultiDigiMon) "
+            "para mapear el táctil al monitor HDMI.")
+        self.hdmi_touch_setup_btn.clicked.connect(self._open_touch_setup)
+        hdmi_touch_row.addWidget(self.hdmi_touch_setup_btn)
+        hdmi_layout.addLayout(hdmi_touch_row)
+        # En Linux no aplica: se ocultan ambos widgets.
+        try:
+            from touch_windows import IS_WINDOWS as _touch_is_windows
+        except Exception:
+            _touch_is_windows = False
+        if not _touch_is_windows:
+            self.hdmi_touch_label.hide()
+            self.hdmi_touch_setup_btn.hide()
 
         # Tira de pantallas HDMI (transiciones por tiempo y por toque).
         hdmi_row = QHBoxLayout()
@@ -3056,9 +3086,87 @@ class ThemeEditorWindow(QMainWindow):
                           else "Sin monitor configurado")
             label.setStyleSheet(f"color: {TEXT_DIM};")
 
+    def _refresh_hdmi_touch_status(self, monitor):
+        """Actualiza el diagnóstico del mapeo táctil (solo Windows).
+
+        Returns:
+            El dict de estado devuelto por ``touch_mapping_status`` o None si
+            no aplica (Linux) o no está disponible el módulo.
+        """
+        label = getattr(self, "hdmi_touch_label", None)
+        btn = getattr(self, "hdmi_touch_setup_btn", None)
+        # Import perezoso: en Linux (y en tests sin el módulo) no debe fallar.
+        try:
+            from touch_windows import IS_WINDOWS, touch_mapping_status
+        except Exception:
+            if label is not None:
+                label.hide()
+            if btn is not None:
+                btn.hide()
+            return None
+        if not IS_WINDOWS:
+            if label is not None:
+                label.hide()
+            if btn is not None:
+                btn.hide()
+            return None
+
+        name = monitor.get("name") if isinstance(monitor, dict) else None
+        try:
+            status = touch_mapping_status(name)
+        except Exception:
+            status = {"available": False, "device": None, "monitor": None,
+                      "hdmi_monitor": None, "ok": False, "reason": "error"}
+        if not isinstance(status, dict):
+            status = {"available": False, "device": None, "monitor": None,
+                      "hdmi_monitor": None, "ok": False, "reason": "error"}
+
+        if label is not None:
+            if not status.get("available"):
+                label.setText("Táctil: no detectado")
+                label.setStyleSheet(f"color: {TEXT_DIM};")
+            elif status.get("ok"):
+                label.setText(
+                    f"Táctil: {status.get('device')} → {status.get('monitor')} ✓")
+                label.setStyleSheet(f"color: {TEXT};")
+            else:
+                mapped = status.get('monitor') or '?'
+                hdmi_at = status.get('hdmi_monitor') or 'sin configurar'
+                device = status.get('device') or 'Pantalla táctil'
+                label.setText(
+                    f"Táctil: {device} → {mapped} ⚠ (HDMI en {hdmi_at})")
+                label.setStyleSheet(f"color: {TEXT};")
+            label.show()
+        if btn is not None:
+            # Siempre visible en Windows: permite remapear aunque ya esté bien.
+            btn.show()
+        return status
+
+    def _open_touch_setup(self):
+        """Abre el asistente de Windows para mapear la pantalla táctil."""
+        try:
+            from touch_windows import open_touch_setup
+        except Exception as exc:
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    f"No se pudo abrir el asistente táctil: {exc}", 6000)
+            return
+        try:
+            ok, msg = open_touch_setup()
+        except Exception as exc:
+            ok, msg = False, f"No se pudo abrir el asistente táctil: {exc}"
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(str(msg), 6000)
+        self._refresh_hdmi_touch_status(self._selected_hdmi_monitor())
+        return ok
+
     def _apply_hdmi_geometry(self, monitor, prompt=True):
         """Aplica el monitor configurado al canvas (no arranca la salida)."""
         self._update_hdmi_monitor_label(monitor)
+        # Solo Windows: diagnóstico del mapeo táctil del monitor configurado.
+        refresh_touch = getattr(self, "_refresh_hdmi_touch_status", None)
+        if refresh_touch is not None:
+            refresh_touch(monitor)
 
         if not isinstance(monitor, dict):
             # Sin monitor: se conserva la resolución guardada para poder editar,
@@ -3242,6 +3350,21 @@ class ThemeEditorWindow(QMainWindow):
         self._start_hdmi_loop()
         self._hdmi_last_signature = None
         self._tick_hdmi_send()
+        # Solo Windows: avisar (una vez) si el táctil no está mapeado a este
+        # monitor. Sin diálogos modales: mensaje en la barra de estado.
+        try:
+            from touch_windows import IS_WINDOWS as _touch_is_windows
+        except Exception:
+            _touch_is_windows = False
+        if _touch_is_windows:
+            status = self._refresh_hdmi_touch_status(monitor)
+            if status and not status.get("ok") and not self._touch_warning_shown:
+                self._touch_warning_shown = True
+                mapped = status.get("monitor") or "otra pantalla"
+                hdmi_at = status.get("hdmi_monitor") or monitor.get("name")
+                self.status_bar.showMessage(
+                    f"Táctil mapeado a {mapped}; la salida HDMI está en "
+                    f"{hdmi_at}. Usa 'Configurar pantalla táctil…'.", 8000)
         return True
 
     def _shutdown_hdmi_output(self):

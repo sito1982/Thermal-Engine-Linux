@@ -113,6 +113,12 @@ El receptor es el firmware del proyecto **[sito1982/RetroPixelLED-ThermalEngine]
   salta a una pantalla concreta. El widget **Touch Navigation** (barra anclada a
   *bottom/top/left/right* con items configurables: pantalla destino, *Next*/*Prev*) permite añadir
   o quitar items y navegar por toque.
+- **Lanzador de acciones por plataforma** (`actions_windows.py` / `actions_linux.py`):
+  `actions.run_action` delega según el sistema. En Windows usa `QProcess`; en Linux resuelve el
+  ejecutable en `PATH`, abre archivos `.desktop` con `gtk-launch`/`gio launch`, soporta lanzar
+  apps **Flatpak** y usa `subprocess` *detached* para el resto. En Windows, la pestaña HDMI
+  muestra además el monitor al que está mapeado el táctil y el botón
+  **“Configurar pantalla táctil…”**.
 
 #### Web
 
@@ -277,13 +283,19 @@ Los sensores funcionan **nativamente** en Windows (GPU vía NVML, CPU vía `psut
 
 Todas las opciones también se ajustan desde la interfaz; los cambios se guardan automáticamente.
 
-### Solución de problemas (Linux)
+### Solución de problemas
 
 - **`ModuleNotFoundError: No module named 'usb'`** — `pyusb` no está en el entorno activo: `./.venv/bin/python -m pip install pyusb`.
 - **`Failed to connect: open failed`** — reglas udev no instaladas o el usuario no está en `plugdev`; reconecta el LCD y cierra cualquier software TRCC.
 - **`[LY] Handshake error: ... Operation timed out`** — suele resolverse tras el primer *handshake* correcto; si persiste, reconecta el cable USB.
 - **DMD sin imagen** — verifica IP/puerto (`:8889`) y que el panel ejecuta el firmware RetroPixelLED-ThermalEngine; el toggle DMD debe estar activo.
 - **HDMI no aparece** — revisa el monitor seleccionado en la pestaña HDMI (se redetectan al conectar/desconectar).
+- **Windows: el táctil mueve el ratón en el monitor equivocado** — el mapeo táctil es del
+  **sistema**, no de la app: Windows asocia cada dispositivo táctil a un monitor concreto. Abre
+  **Panel de control → Tablet PC Settings** (o ejecuta `MultiDigiMon.exe`) y asigna el táctil al
+  monitor HDMI; también puedes usar el botón **“Configurar pantalla táctil…”** de la pestaña
+  HDMI. La etiqueta de esa pestaña indica a qué monitor está mapeado ahora mismo; si no coincide
+  con el configurado para HDMI, remapea y vuelve a comprobar.
 
 ### Apoya el proyecto
 
@@ -403,6 +415,11 @@ The receiver is the firmware from **[sito1982/RetroPixelLED-ThermalEngine](https
   to a specific screen. The **Touch Navigation** widget (a bar anchored to
   *bottom/top/left/right* with configurable items: target screen, *Next*/*Prev*) lets you add or
   remove items and navigate by touch.
+- **Per-platform action launcher** (`actions_windows.py` / `actions_linux.py`):
+  `actions.run_action` dispatches by OS. Windows uses `QProcess`; Linux resolves the executable in
+  `PATH`, opens `.desktop` files with `gtk-launch`/`gio launch`, supports launching **Flatpak**
+  apps and uses *detached* `subprocess` otherwise. On Windows, the HDMI tab also shows which
+  monitor the touch device is mapped to, plus the **“Configurar pantalla táctil…”** button.
 
 #### Web
 
@@ -567,13 +584,19 @@ Sensors work **natively** on Windows (GPU via NVML, CPU via `psutil`/WMI) with n
 
 All options are also adjustable from the UI; changes are saved automatically.
 
-### Troubleshooting (Linux)
+### Troubleshooting
 
 - **`ModuleNotFoundError: No module named 'usb'`** — `pyusb` is missing from the active environment: `./.venv/bin/python -m pip install pyusb`.
 - **`Failed to connect: open failed`** — udev rules not installed or user not in `plugdev`; reconnect the LCD and close any TRCC software.
 - **`[LY] Handshake error: ... Operation timed out`** — usually resolves after the first successful handshake; if it persists, reconnect the USB cable.
 - **No DMD image** — check IP/port (`:8889`) and that the panel runs the RetroPixelLED-ThermalEngine firmware; the DMD toggle must be enabled.
 - **HDMI not showing** — check the monitor selected in the HDMI tab (they are re-detected on connect/disconnect).
+- **Windows: touch moves the cursor on the wrong monitor** — touch mapping is handled by the
+  **system**, not by the app: Windows binds each touch device to a specific monitor. Open
+  **Control Panel → Tablet PC Settings** (or run `MultiDigiMon.exe`) and assign the touch device
+  to the HDMI monitor; you can also use the **“Configurar pantalla táctil…”** button in the HDMI tab.
+  The label in that tab shows which monitor the touch device is currently mapped to; if it does
+  not match the configured HDMI monitor, remap and check again.
 
 ### Support
 

@@ -117,3 +117,18 @@ Resumen de los cambios realizados en este repositorio con respecto al último co
 - `hwinfo_reader.py`: el emparejamiento de lecturas ya no depende del idioma de HWiNFO. Se identifica el grupo por nombre de sensor (GPU/CPU) y se buscan palabras clave en inglés/español con normalización (sin acentos, sin puntuación); si no hay coincidencia se aplica una heurística por tipo de lectura dentro del grupo. Se corrigió también la decodificación (`mbcs`/ANSI) y se lee la memoria compartida una sola vez por ciclo.
 - Híbrido: si HWiNFO no aporta una métrica de GPU, se rellena con NVML.
 - Nuevo `tests/test_hwinfo_reader.py` (etiquetas ES/EN, idioma desconocido, exclusión de reloj de memoria y fallback NVML). Total: 317 passed, 4 skipped.
+
+---
+
+## Actualización — Táctil en Windows y lanzador de acciones por plataforma
+
+### Diagnóstico del mapeo táctil (Windows)
+- Nuevo `touch_windows.py`: `IS_WINDOWS`, `touch_mapping_status(hdmi_screen_name)` (devuelve `available`, `device`, `monitor`, `hdmi_monitor`, `ok`, `reason`) y `open_touch_setup()`.
+- La pestaña HDMI muestra a qué monitor está asociado el dispositivo táctil; si no coincide con el monitor HDMI configurado, avisa con `⚠` y ofrece el botón **“Configurar pantalla táctil…”** (Tablet PC Settings / `MultiDigiMon.exe`).
+- El mapeo lo gestiona Windows, no la app: la UI solo lo detecta y enlaza con el asistente del sistema.
+- Nuevo `tests/test_touch_integration.py` (aviso de desajuste, caso correcto, oculto fuera de Windows).
+
+### Acciones de toque: lanzador por plataforma
+- `actions.run_action` delega en `actions_windows.py` (QProcess) o `actions_linux.py` según la plataforma.
+- Linux: resolución del ejecutable en `PATH`, apertura de `.desktop` con `gtk-launch`/`gio launch`, soporte de Flatpak y `subprocess` *detached* para el resto.
+- Documentado en `README.md` (secciones HDMI y Troubleshooting, ES/EN).

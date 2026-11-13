@@ -2,8 +2,9 @@
 
 Modelo de seguridad:
 - La funcionalidad está **desactivada por defecto** (ver ``settings``).
-- ``run_action`` nunca usa shell: lanza el ejecutable y sus argumentos
-  directamente con ``QProcess.startDetached``.
+- ``run_action`` nunca usa shell: delega en el backend de la plataforma
+  (``actions_windows`` o ``actions_linux``), que lanza el ejecutable y sus
+  argumentos directamente.
 - La ventana principal decide el gate (ajuste global) y la confirmación por
   comando antes de llamar aquí. Este módulo solo parsea, valida y ejecuta.
 """
@@ -13,8 +14,6 @@ import json
 import os
 import shlex
 import sys
-
-from PySide6.QtCore import QProcess
 
 ALLOWED_ACTION_TYPES = ("none", "command")
 
@@ -95,7 +94,7 @@ def action_fingerprint(command, args):
 
 
 def run_action(action):
-    """Lanza la acción sin shell.
+    """Lanza la acción sin shell delegando en el backend de la plataforma.
 
     Returns:
         tuple[bool, str]: (éxito, mensaje).
@@ -103,22 +102,12 @@ def run_action(action):
     command = action.get("command", "")
     args = [str(a) for a in (action.get("args") or [])]
     workdir = action.get("workdir", "") or ""
-    program = os.path.expanduser(command)
 
-    # Si el comando incluye ruta, comprobar que existe antes de lanzarlo.
-    if os.sep in program or (os.altsep and os.altsep in program):
-        if not os.path.exists(program):
-            return False, f"No existe el ejecutable: {program}"
+    if sys.platform == "win32":
+        import actions_windows
 
-    try:
-        result = QProcess.startDetached(program, args, workdir)
-    except Exception as exc:  # pragma: no cover - defensivo
-        return False, f"Error lanzando la acción: {exc}"
+        return actions_windows.run(command, args, workdir)
 
-    if isinstance(result, tuple):
-        started, pid = bool(result[0]), result[1]
-    else:
-        started, pid = bool(result), 0
-    if not started:
-        return False, "No se pudo lanzar la acción"
-    return True, f"Acción ejecutada (pid {pid})"
+    import actions_linux
+
+    return actions_linux.run(command, args, workdir)

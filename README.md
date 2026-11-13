@@ -106,6 +106,9 @@ El receptor es el firmware del proyecto **[sito1982/RetroPixelLED-ThermalEngine]
 - Render a la **resolución nativa** del monitor con **letterbox** centrado si la proporción no coincide.
 - Detección de **monitores y hotplug** (al conectar/desconectar se reajusta el canvas).
 - El toggle **HDMI** conecta y desconecta la ventana de salida.
+- Selector **Monitor** en la pestaña HDMI para cambiar la salida en caliente (útil al conectar
+  otra pantalla). La app resuelve el monitor por id + nombre + resolución; si hay ambigüedad,
+  apaga la salida y te pide que elijas uno.
 - **Pantallas y transiciones** como en DMD: varias pantallas (hasta 8) con duración y efecto por
   transición (corte, fundido, slide, cortina, dissolve), **por tiempo** (switch *Transitions*) o
   **por toque** en monitores táctiles.
@@ -290,6 +293,11 @@ Todas las opciones también se ajustan desde la interfaz; los cambios se guardan
 - **`[LY] Handshake error: ... Operation timed out`** — suele resolverse tras el primer *handshake* correcto; si persiste, reconecta el cable USB.
 - **DMD sin imagen** — verifica IP/puerto (`:8889`) y que el panel ejecuta el firmware RetroPixelLED-ThermalEngine; el toggle DMD debe estar activo.
 - **HDMI no aparece** — revisa el monitor seleccionado en la pestaña HDMI (se redetectan al conectar/desconectar).
+- **Al conectar otra pantalla, la salida HDMI aparece en el monitor equivocado** — Windows
+  renumera `\\.\DISPLAYx` y algunos paneles genéricos comparten id. La app resuelve el monitor
+  por id + nombre + resolución; si no hay coincidencia clara, apaga la salida. Elige el monitor
+  correcto en el desplegable **Monitor** de la pestaña HDMI (o pulsa ↻ para redetectar); el
+  cambio se guarda en el proyecto.
 - **Windows: el táctil mueve el ratón en el monitor equivocado** — el mapeo táctil es del
   **sistema**, no de la app: Windows asocia cada dispositivo táctil a un monitor concreto. Abre
   **Panel de control → Tablet PC Settings** (o ejecuta `MultiDigiMon.exe`) y asigna el táctil al
@@ -408,6 +416,9 @@ The receiver is the firmware from **[sito1982/RetroPixelLED-ThermalEngine](https
 - Rendered at the monitor's **native resolution** with centered **letterbox** when the aspect ratio differs.
 - **Monitor detection and hotplug** (the canvas re-adjusts when monitors are connected/disconnected).
 - The **HDMI** toggle connects and disconnects the output window.
+- **Monitor** selector in the HDMI tab to change the output on the fly (useful when another
+  display is connected). The app resolves the monitor by id + name + resolution; on ambiguity it
+  turns the output off and asks you to choose one.
 - **Screens and transitions** like DMD: several screens (up to 8) with per-screen duration and
   per-transition effect (cut, fade, slide, wipe, dissolve), **time-driven** (*Transitions* switch)
   or **touch-driven** on touch monitors.
@@ -591,6 +602,11 @@ All options are also adjustable from the UI; changes are saved automatically.
 - **`[LY] Handshake error: ... Operation timed out`** — usually resolves after the first successful handshake; if it persists, reconnect the USB cable.
 - **No DMD image** — check IP/port (`:8889`) and that the panel runs the RetroPixelLED-ThermalEngine firmware; the DMD toggle must be enabled.
 - **HDMI not showing** — check the monitor selected in the HDMI tab (they are re-detected on connect/disconnect).
+- **After connecting another display, the HDMI output appears on the wrong monitor** — Windows
+  renumbers `\\.\DISPLAYx` and some generic panels share an id. The app resolves the monitor by
+  id + name + resolution; when the match is ambiguous it turns the output off. Pick the right
+  monitor in the **Monitor** dropdown of the HDMI tab (or press ↻ to rescan); the choice is saved
+  with the project.
 - **Windows: touch moves the cursor on the wrong monitor** — touch mapping is handled by the
   **system**, not by the app: Windows binds each touch device to a specific monitor. Open
   **Control Panel → Tablet PC Settings** (or run `MultiDigiMon.exe`) and assign the touch device

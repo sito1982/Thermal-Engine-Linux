@@ -65,6 +65,62 @@ def test_resolve_monitor_by_id_and_fallback():
     assert monitors.resolve_monitor(None, [a]) is a
 
 
+def _out(index, name, width, height, mid):
+    return {
+        "index": index, "name": name, "width": width, "height": height,
+        "id": mid, "primary": index == 0, "connector": "OTHER",
+    }
+
+
+def test_resolve_monitor_config_prefers_id_over_stale_geometry():
+    # Caso real de hotplug: el id guardado es el del táctil, pero la
+    # resolución guardada es la de la pantalla nueva.
+    touch = _out(1, r"\\.\DISPLAY2", 1024, 600, "o|HDMI|0")
+    new = _out(2, r"\\.\DISPLAY3", 4095, 2160, "s|DENON-AVR|1")
+    config = {"screen_id": "o|HDMI|0", "screen_name": r"\\.\DISPLAY3",
+              "width": 4095, "height": 2160}
+    assert monitors.resolve_monitor_config(config, [touch, new]) is touch
+
+
+def test_resolve_monitor_config_uses_name_when_id_changed():
+    touch = _out(1, r"\\.\DISPLAY2", 1024, 600, "DWE|2100|0")
+    other = _out(2, r"\\.\DISPLAY3", 4095, 2160, "s|DENON|1")
+    config = {"screen_id": "old|id|0", "screen_name": r"\\.\DISPLAY2",
+              "width": 1024, "height": 600}
+    assert monitors.resolve_monitor_config(config, [touch, other]) is touch
+
+
+def test_resolve_monitor_config_duplicate_ids_uses_name():
+    a = _out(1, r"\\.\DISPLAY2", 1024, 600, "o|HDMI|0")
+    b = _out(2, r"\\.\DISPLAY4", 1920, 1080, "o|HDMI|0")
+    config = {"screen_id": "o|HDMI|0", "screen_name": r"\\.\DISPLAY2",
+              "width": 1024, "height": 600}
+    assert monitors.resolve_monitor_config(config, [a, b]) is a
+
+
+def test_resolve_monitor_config_ambiguous_returns_none():
+    a = _out(1, r"\\.\DISPLAY2", 1024, 600, "o|HDMI|0")
+    b = _out(2, r"\\.\DISPLAY4", 1920, 1080, "o|HDMI|0")
+    config = {"screen_id": "o|HDMI|0", "screen_name": r"\\.\DISPLAY9",
+              "width": 800, "height": 600}
+    assert monitors.resolve_monitor_config(config, [a, b]) is None
+
+
+def test_resolve_monitor_config_unique_resolution_fallback():
+    touch = _out(1, r"\\.\DISPLAY2", 1024, 600, "x")
+    other = _out(2, r"\\.\DISPLAY3", 4095, 2160, "y")
+    config = {"screen_id": "gone", "screen_name": "gone",
+              "width": 1024, "height": 600}
+    assert monitors.resolve_monitor_config(config, [touch, other]) is touch
+
+
+def test_same_monitor_compares_name_and_resolution():
+    a = _out(1, r"\\.\DISPLAY2", 1024, 600, "o|HDMI|0")
+    assert monitors.same_monitor(a, dict(a))
+    assert not monitors.same_monitor(a, dict(a, name=r"\\.\DISPLAY3"))
+    assert not monitors.same_monitor(a, dict(a, width=1920, height=1080))
+
+
 def test_list_monitors_shape(qapp):
     mons = monitors.list_monitors()
     assert mons  # el backend offscreen también reporta una pantalla

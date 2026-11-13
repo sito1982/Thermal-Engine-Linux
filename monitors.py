@@ -251,20 +251,101 @@ def first_hdmi(monitors=None):
     return None
 
 
+def same_monitor(a, b):
+    """True si dos entradas describen la misma salida física.
+
+    En Windows los ids de paneles genéricos pueden repetirse y los nombres
+    ``\\.\\DISPLAYx`` cambian al conectar/desconectar pantallas, así que para
+    decidir si hay que mover la ventana no basta con comparar el id.
+    """
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    return (
+        a.get("id") == b.get("id")
+        and a.get("name") == b.get("name")
+        and (a.get("width"), a.get("height"))
+        == (b.get("width"), b.get("height"))
+    )
+
+
+def resolve_monitor_config(config, monitors=None):
+    """Resuelve el monitor guardado usando id, nombre y resolución.
+
+    El id de Windows puede ser genérico/repetido (p. ej. ``o|HDMI|0``) y el
+    nombre ``\\.\\DISPLAYx`` cambia al añadir o quitar pantallas. Por eso se
+    combinan las tres pistas y, si no hay una coincidencia clara, se devuelve
+    ``None``: nunca se elige un monitor arbitrario.
+    """
+    monitors = list_monitors() if monitors is None else monitors
+    if not monitors or not isinstance(config, dict):
+        return None
+
+    screen_id = config.get("screen_id")
+    screen_name = config.get("screen_name")
+    try:
+        want_w = int(config.get("width") or 0)
+        want_h = int(config.get("height") or 0)
+    except (TypeError, ValueError):
+        want_w = want_h = 0
+
+    def _by_id():
+        return [m for m in monitors if screen_id and m.get("id") == screen_id]
+
+    def _by_name():
+        return [m for m in monitors if screen_name and m.get("name") == screen_name]
+
+    def _by_resolution(candidates):
+        if not (want_w and want_h):
+            return []
+        return [m for m in candidates
+                if (m.get("width"), m.get("height")) == (want_w, want_h)]
+
+    # 1) id exacto (con desempate por nombre y resolución).
+    candidates = _by_id()
+    if candidates:
+        if len(candidates) == 1:
+            return candidates[0]
+        if screen_name:
+            by_name = _by_resolution(
+                [m for m in candidates if m.get("name") == screen_name])
+            if len(by_name) == 1:
+                return by_name[0]
+        by_res = _by_resolution(candidates)
+        if len(by_res) == 1:
+            return by_res[0]
+        return None
+
+    # 2) nombre exacto (los nombres son únicos en la sesión actual).
+    candidates = _by_name()
+    if candidates:
+        if len(candidates) == 1:
+            return candidates[0]
+        by_res = _by_resolution(candidates)
+        if len(by_res) == 1:
+            return by_res[0]
+        return None
+
+    # 3) resolución única: último recurso cuando id/nombre ya no existen.
+    by_res = _by_resolution(monitors)
+    if len(by_res) == 1:
+        return by_res[0]
+    return None
+
+
 def resolve_monitor(screen_id, monitors=None):
     """Resuelve un identificador persistido a la entrada de monitor actual.
 
-    Orden de coincidencia: ``id`` exacto, luego ``name`` y por último
-    ``name`` + ``model``. Si ``screen_id`` es falsy devuelve el primer HDMI
-    disponible, o el primario como último recurso.
+    Orden de coincidencia: ``id`` exacto, luego ``name`` y por último nombre
+    parcial. Si ``screen_id`` es falsy devuelve el primer HDMI disponible, o el
+    primario como último recurso.
     """
     monitors = list_monitors() if monitors is None else monitors
     if not monitors:
         return None
     if screen_id:
-        for monitor in monitors:
-            if monitor.get("id") == screen_id:
-                return monitor
+        resolved = resolve_monitor_config({"screen_id": screen_id}, monitors)
+        if resolved is not None:
+            return resolved
         for monitor in monitors:
             if monitor.get("name") == screen_id:
                 return monitor

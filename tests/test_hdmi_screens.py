@@ -279,6 +279,81 @@ def test_selected_hdmi_monitor_without_match_returns_none(win):
         win.project_hdmi_config = original
 
 
+class _FakeOutput:
+    """Salida HDMI falsa para comprobar a qué monitor se mueve."""
+
+    def __init__(self, monitor):
+        self.monitor = monitor
+        self.is_active = True
+        self.calls = []
+
+    def set_monitor(self, monitor):
+        self.calls.append(("set", monitor))
+        self.monitor = monitor
+        return True
+
+    def show_on_monitor(self, monitor):
+        self.calls.append(("show", monitor))
+        self.monitor = monitor
+        return True
+
+
+def _fake_start_output(win, monkeypatch, current, target):
+    fake = _FakeOutput(current)
+    original = win.hdmi_output
+    win.hdmi_output = fake
+    monkeypatch.setattr(win, "_selected_hdmi_monitor", lambda: target)
+    for name in ("_sync_hdmi_canvas_size", "_start_hdmi_loop",
+                 "_tick_hdmi_send", "_refresh_hdmi_touch_status"):
+        monkeypatch.setattr(win, name, lambda *a, **k: None)
+    return fake, original
+
+
+def test_start_hdmi_output_moves_when_id_matches_but_screen_changes(win, monkeypatch):
+    # Caso hotplug: mismo id genérico, pero otro nombre/resolución.
+    stale = {"id": "o|HDMI|0", "name": r"\\.\DISPLAY3",
+             "width": 4095, "height": 2160}
+    touch = {"id": "o|HDMI|0", "name": r"\\.\DISPLAY2",
+             "width": 1024, "height": 600}
+    fake, original = _fake_start_output(win, monkeypatch, stale, touch)
+    try:
+        assert win._start_hdmi_output() is True
+        assert fake.calls and fake.calls[0][0] == "set"
+    finally:
+        win.hdmi_output = original
+
+
+def test_start_hdmi_output_keeps_same_screen(win, monkeypatch):
+    touch = {"id": "o|HDMI|0", "name": r"\\.\DISPLAY2",
+             "width": 1024, "height": 600}
+    fake, original = _fake_start_output(win, monkeypatch, dict(touch), touch)
+    try:
+        assert win._start_hdmi_output() is True
+        assert fake.calls and fake.calls[0][0] == "show"
+    finally:
+        win.hdmi_output = original
+
+
+def test_hdmi_monitor_combo_changes_monitor(win, monkeypatch):
+    calls = []
+    monkeypatch.setattr(win, "_apply_hdmi_geometry",
+                        lambda monitor, prompt=True: calls.append(monitor))
+    combo = win.hdmi_monitor_combo
+    monitor = {"id": "test", "name": "Test", "width": 800, "height": 600}
+    combo.blockSignals(True)
+    combo.addItem("Test", monitor)
+    index = combo.count() - 1
+    combo.blockSignals(False)
+    calls.clear()
+    try:
+        combo.setCurrentIndex(index)
+        assert calls == [monitor]
+    finally:
+        combo.blockSignals(True)
+        combo.removeItem(index)
+        combo.blockSignals(False)
+
+
 def test_sync_hdmi_output_requires_toggle_and_monitor(win, monkeypatch):
     calls = []
     monkeypatch.setattr(win, "_start_hdmi_output",

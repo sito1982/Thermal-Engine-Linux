@@ -132,3 +132,12 @@ Resumen de los cambios realizados en este repositorio con respecto al último co
 - `actions.run_action` delega en `actions_windows.py` (QProcess) o `actions_linux.py` según la plataforma.
 - Linux: resolución del ejecutable en `PATH`, apertura de `.desktop` con `gtk-launch`/`gio launch`, soporte de Flatpak y `subprocess` *detached* para el resto.
 - Documentado en `README.md` (secciones HDMI y Troubleshooting, ES/EN).
+
+---
+
+## Actualización — Monitor HDMI: identidad robusta y selector en caliente
+
+- `monitors.resolve_monitor_config()` resuelve el monitor guardado por `screen_id` + `screen_name` + resolución; `same_monitor()` compara también nombre y resolución (no solo el id).
+- `main_window`: la salida HDMI se mueve si cambia el nombre o la resolución aunque el id coincida (hotplug/renumeración de `\\.\DISPLAYx`); si el monitor es ambiguo o no está, la salida se apaga y se avisa.
+- Nuevo selector **Monitor** (combo + ↻) en la pestaña HDMI para cambiar de pantalla sin rehacer el proyecto.
+- Tests: id duplicado, nombre cambiado, resolución única, ambigüedad, movimiento forzado y selector. Total: 353 passed, 4 skipped.
